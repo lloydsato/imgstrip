@@ -6,7 +6,13 @@ import hashlib
 import http.client
 import io
 import json
+import os
+import signal
+import socket
+import subprocess
+import sys
 import threading
+import time
 import urllib.parse
 import zipfile
 
@@ -34,13 +40,12 @@ class Client:
     def __init__(self, port: int, session: web.Session):
         self.port = port
         self.session = session
-        self.cookie = f"imgstrip_{port}={session.cookie_value}"
 
     def request(self, method, path, body=None, headers=None, *, auth=True, host=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         hdrs = {"Host": host or f"127.0.0.1:{self.port}"}
         if auth:
-            hdrs.update({"Cookie": self.cookie, "X-Imgstrip-Token": self.session.token})
+            hdrs["X-Imgstrip-Token"] = self.session.token
         hdrs.update(headers or {})
         conn.request(method, path, body=body, headers=hdrs)
         res = conn.getresponse()
@@ -48,9 +53,9 @@ class Client:
         conn.close()
         return res, data
 
-    def json(self, method, path, payload=None, **kw):
+    def json(self, method, path, payload=None, headers=None, **kw):
         body = json.dumps(payload).encode() if payload is not None else None
-        res, data = self.request(method, path, body, {"Content-Type": "application/json"}, **kw)
+        res, data = self.request(method, path, body, {"Content-Type": "application/json", **(headers or {})}, **kw)
         return res.status, json.loads(data)
 
     def upload(self, path, data, name="photo.jpg", options=None, headers=None, **kw):
@@ -71,22 +76,62 @@ class Client:
 # --------------------------------------------------------------------------
 
 
-def test_page_needs_the_launch_link(app):
+def test_page_is_a_static_shell_without_secrets(app):
     res, body = app.request("GET", "/", auth=False)
-    assert res.status == 403
-    assert b"link printed in the terminal" in body
-    res, _ = app.request("GET", "/?k=wrong", auth=False)
-    assert res.status == 403
-    res, _ = app.request("GET", f"/?k={app.session.token}", auth=False)
-    assert res.status == 303
-    cookie = res.getheader("Set-Cookie")
-    assert app.session.cookie_value in cookie and "HttpOnly" in cookie and "SameSite=Strict" in cookie
-    res, body = app.request("GET", "/", auth=False, headers={"Cookie": cookie.split(";")[0]})
     assert res.status == 200
-    assert app.session.token.encode() in body
-    assert b"{{TOKEN}}" not in body and b"{{VERSION}}" not in body
+    assert app.session.token.encode() not in body and app.session.launch_key.encode() not in body
+    assert b"{{" not in body
+    assert res.getheader("Set-Cookie") is None
     assert "frame-ancestors 'none'" in res.getheader("Content-Security-Policy")
     assert res.getheader("X-Frame-Options") == "DENY"
+
+
+def test_launch_key_is_single_use_and_rotates(app):
+    issued = []
+    app.session.on_launch = issued.append
+    first = app.session.launch_key
+    status, res = app.json("POST", "/api/session", {"key": "wrong"}, auth=False)
+    assert status == 403 and issued == []
+    status, res = app.json("POST", "/api/session", {"key": first}, auth=False)
+    assert status == 200 and res["token"] == app.session.token
+    assert issued == [app.session.launch_key] and app.session.launch_key != first
+    status, res = app.json("POST", "/api/session", {"key": first}, auth=False)
+    assert status == 403 and "already been used" in res["error"]
+    status, res = app.json("POST", "/api/session", {"key": issued[0]}, auth=False)
+    assert status == 200
+    assert app.session.token not in app.session.launch_key
+
+
+def test_launch_key_needs_same_origin(app):
+    status, _ = app.json(
+        "POST", "/api/session", {"key": app.session.launch_key}, auth=False, headers={"Sec-Fetch-Site": "cross-site"}
+    )
+    assert status == 403
+
+
+def test_non_ascii_secrets_are_refused_not_crashed(app):
+    status, _ = app.json("POST", "/api/session", {"key": "\u00e9" * 10}, auth=False)
+    assert status == 403
+    res, body = app.upload("/api/inspect", fixtures.jpeg_everything(), headers={"X-Imgstrip-Token": "\u00e9"})
+    assert res.status == 403, body
+
+
+def test_error_responses_close_the_connection(app):
+    """A refused request's unread body must never be parsed as a second request."""
+    smuggled = f"GET /static/favicon.svg HTTP/1.1\r\nHost: 127.0.0.1:{app.port}\r\n\r\n".encode()
+    raw = (
+        f"POST /api/inspect HTTP/1.1\r\nHost: evil.example\r\nContent-Length: {len(smuggled)}\r\n\r\n".encode()
+        + smuggled
+    )
+    with socket.create_connection(("127.0.0.1", app.port), timeout=10) as sock:
+        sock.sendall(raw)
+        received = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            received += chunk
+    assert received.count(b"HTTP/1.1 ") == 1 and b" 421 " in received
 
 
 @pytest.mark.parametrize("host", ["evil.example", "127.0.0.1", "127.0.0.1:1", "localhost.evil.example:8765"])
@@ -112,20 +157,25 @@ def test_localhost_names_are_accepted(app):
         {"Origin": "null"},
         {"Sec-Fetch-Site": "cross-site"},
         {"Sec-Fetch-Site": "same-site"},
-        {"Cookie": "imgstrip_1=nope"},
     ],
 )
-def test_api_writes_need_token_cookie_and_same_origin(app, headers):
+def test_api_needs_token_and_same_origin(app, headers):
     res, body = app.upload("/api/inspect", fixtures.jpeg_everything(), headers=headers)
+    assert res.status == 403, body
+    res, body = app.request("GET", "/api/info", headers=headers)
     assert res.status == 403, body
 
 
-def test_api_reads_need_the_cookie(app):
+def test_results_are_capabilities(app):
+    """A result downloads by its unguessable id alone (plain links), nothing else does."""
     result = app.clean(fixtures.jpeg_everything())
+    assert len(result["id"]) >= 32
     res, _ = app.request("GET", f"/api/result/{result['id']}", auth=False)
-    assert res.status == 403
+    assert res.status == 200
     res, _ = app.request("GET", "/api/info", auth=False)
     assert res.status == 403
+    res, _ = app.request("GET", "/api/result/" + "A" * 32, auth=False)
+    assert res.status == 404
 
 
 def test_same_origin_requests_pass(app):
@@ -345,7 +395,7 @@ def test_delete_and_reset(app):
     assert status == 200
     res, _ = app.request("GET", f"/api/result/{b['id']}")
     assert res.status == 404
-    assert list(app.session.dir.iterdir()) == []
+    assert [p.name for p in app.session.dir.iterdir()] == [web.PID_FILE]
 
 
 def test_info(app):
@@ -400,3 +450,138 @@ def test_clean_name():
     assert web.clean_name("photo.clean.jpg", "JPEG") == "photo.clean.jpg"
     assert web.clean_name("scan.tif", "PNG") == "scan.clean.png"
     assert web.clean_name("noext", "PNG") == "noext.clean.png"
+
+
+# --------------------------------------------------------------------------
+# Review fixes
+# --------------------------------------------------------------------------
+
+
+def test_only_one_zip_is_kept(app):
+    a = app.clean(fixtures.jpeg_everything(), "a.jpg")
+    b = app.clean(fixtures.jpeg_everything(), "b.jpg")
+    _, z1 = app.json("POST", "/api/zip", {"ids": [a["id"], b["id"]]})
+    _, z2 = app.json("POST", "/api/zip", {"ids": [a["id"], b["id"]]})
+    res, _ = app.request("GET", f"/api/result/{z1['id']}")
+    assert res.status == 404
+    res, _ = app.request("GET", f"/api/result/{z2['id']}")
+    assert res.status == 200
+
+
+def test_deep_scan_skips_huge_images(app, monkeypatch):
+    monkeypatch.setattr(web, "DEEP_SCAN_MAX_PIXELS", 1000)
+    res, body = app.upload("/api/inspect?deep=1", fixtures.png_lsb_stego(), "memo.png")
+    report = json.loads(body)
+    assert not any("LSB" in f["label"] for f in report["findings"])
+    assert any("not scanned" in n for n in report["notes"])
+
+
+def test_unknown_containers_are_probed(app):
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGBA", (32, 32), (10, 20, 30, 255)).save(buf, "ICO")
+    res, body = app.upload("/api/inspect", buf.getvalue(), "icon.ico")
+    report = json.loads(body)
+    assert report["format"] is None and report["decodable"] == "ICO" and report["size"] == [32, 32]
+    res, body = app.upload("/api/inspect", b"plain text, not an image" * 4, "notes.jpg")
+    report = json.loads(body)
+    assert report["format"] is None and report["decodable"] is None
+
+
+def test_preview_scales_16_bit_images():
+    import numpy as np
+    from PIL import Image
+
+    ramp = (np.linspace(1000, 60000, 64 * 64).reshape(64, 64)).astype(np.uint16)
+    buf = io.BytesIO()
+    Image.fromarray(ramp).save(buf, "TIFF")
+    png = web.preview_bytes(buf.getvalue())
+    pixels = np.asarray(Image.open(io.BytesIO(png)).convert("L"))
+    assert pixels.min() < 30 and pixels.max() > 225
+
+
+def test_preview_refuses_giant_images(monkeypatch):
+    monkeypatch.setattr(web, "PREVIEW_MAX_PIXELS", 100)
+    with pytest.raises(web.StripError):
+        web.preview_bytes(fixtures.jpeg_everything())
+
+
+def test_reveals_gps_without_coordinates_and_xmp_location():
+    found = web.reveals([Finding("metadata", "GPS data", "1 GPS tags")])
+    assert found == [{"key": "gps", "label": "GPS tags", "value": "1 GPS tags"}]
+    found = web.reveals([Finding("metadata", "XMP", "320 bytes; contains city, GPS")])
+    assert found == [{"key": "location", "label": "Location", "value": "recorded in the XMP data"}]
+    both = web.reveals([Finding("metadata", "GPS location", "1.0, 2.0"), Finding("metadata", "XMP", "contains GPS")])
+    assert both == [{"key": "location", "label": "Location", "value": "1.0, 2.0"}]
+
+
+def test_write_new_without_hard_links_still_never_replaces(tmp_path, monkeypatch):
+    def no_links(src, dst):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(web.os, "link", no_links)
+    dest = tmp_path / "a.jpg"
+    web.write_new(dest, b"one")
+    assert dest.read_bytes() == b"one"
+    with pytest.raises(FileExistsError):
+        web.write_new(dest, b"two")
+    assert dest.read_bytes() == b"one"
+    assert [p.name for p in tmp_path.iterdir()] == ["a.jpg"]
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX only")
+def test_stale_work_folders_are_swept(tmp_path, monkeypatch):
+    monkeypatch.setattr(web.tempfile, "gettempdir", lambda: str(tmp_path))
+    dead = tmp_path / "imgstrip-web-dead"
+    dead.mkdir()
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    (dead / web.PID_FILE).write_text(str(proc.pid))
+    (dead / "result").write_bytes(b"clean pixels")
+    alive = tmp_path / "imgstrip-web-alive"
+    alive.mkdir()
+    (alive / web.PID_FILE).write_text(str(os.getpid()))
+    other = tmp_path / "unrelated"
+    other.mkdir()
+    web.sweep_stale_sessions()
+    assert not dead.exists() and alive.exists() and other.exists()
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX only")
+@pytest.mark.parametrize("sig", ["SIGTERM", "SIGHUP"])
+def test_signals_still_delete_cleaned_files(tmp_path, sig):
+    env = {**os.environ, "TMPDIR": str(tmp_path)}
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "imgstrip.web", "--no-browser", "--port", "0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+    )
+    try:
+        proc.stdout.readline()
+        url = proc.stdout.readline().strip()
+        port = int(urllib.parse.urlsplit(url).port)
+        key = urllib.parse.urlsplit(url).fragment.split("=", 1)[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        conn.request("POST", "/api/session", json.dumps({"key": key}), {"Host": f"127.0.0.1:{port}"})
+        token = json.loads(conn.getresponse().read())["token"]
+        conn.request(
+            "POST",
+            "/api/clean",
+            fixtures.jpeg_everything(),
+            {"Host": f"127.0.0.1:{port}", "X-Imgstrip-Token": token, "X-Filename": "a.jpg", "X-Options": "{}"},
+        )
+        assert conn.getresponse().status == 200
+        conn.close()
+        assert list(tmp_path.glob("imgstrip-web-*/*"))
+        proc.send_signal(getattr(signal, sig))
+        proc.wait(timeout=20)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    deadline = time.time() + 5
+    while list(tmp_path.glob("imgstrip-web-*")) and time.time() < deadline:
+        time.sleep(0.05)
+    assert list(tmp_path.glob("imgstrip-web-*")) == []

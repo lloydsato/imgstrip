@@ -2,7 +2,6 @@
 'use strict';
 
 (() => {
-  const TOKEN = document.querySelector('meta[name="imgstrip-token"]').content;
   const $ = (sel, root = document) => root.querySelector(sel);
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -15,30 +14,46 @@
   const CATEGORY_ORDER = ['metadata', 'hidden', 'color', 'structure'];
   const REVEAL_NOUN = {
     location: 'location', camera: 'camera', lens: 'lens', time: 'time taken', serial: 'serial number',
-    person: 'a name', software: 'software', preview: 'a hidden image', trailer: 'appended data', comment: 'a comment',
+    person: 'a name', software: 'software', preview: 'a hidden image', trailer: 'appended data',
+    comment: 'a comment', gps: 'GPS tags',
   };
   const OPTION_DEFAULTS = {
     format: '', quality: '', icc: 'convert',
     deep: false, jpeg_lossless: false, scrub_lsb: false, auto_orient: true, optimize: false,
   };
-  const STORE_KEY = 'imgstrip.options.v1';
+  const OPTIONS_KEY = 'imgstrip.options.v1';
+  const TOKEN_KEY = 'imgstrip.token';
+  const FOLDER_KEY = 'imgstrip.folder';
+  const GONE = new Error('removed');
+  const GATE = {
+    missing: ['Open imgstrip from your terminal', 'For your privacy this page only works when it is opened with the link imgstrip-web prints. Each link opens one tab.'],
+    used: ['This link was already used', 'Each link opens imgstrip once. The terminal has printed a fresh one: open that.'],
+    expired: ['imgstrip was restarted', 'Open the new link printed in the terminal. Files cleaned in the earlier run are gone.'],
+    down: ['imgstrip is not running', 'Start it again with imgstrip-web, then open the link it prints.'],
+  };
 
+  let TOKEN = null;
   const state = {
     info: null,
     items: [],
     nextId: 1,
+    epoch: 0, // bumped by Clear: work started before it is ignored
     options: loadOptions(),
-    cleaningRun: null, // {total, done} while a clean batch runs
+    run: null, // {total, done} while a clean batch runs
+    packing: false,
+    saving: false,
+    gate: null,
     lastFolder: null,
   };
 
   const els = {
     window: $('#window'), well: $('#well'), list: $('#list'), files: $('#files'), listCount: $('#listCount'),
     foot: $('#foot'), summary: $('#summary'), primary: $('#primary'), downloadSome: $('#downloadSome'),
-    saveToggle: $('#saveToggle'), save: $('#save'), saveForm: $('#saveForm'), folder: $('#folder'),
-    footNote: $('#footNote'), picker: $('#picker'), options: $('#options'), optionsToggle: $('#optionsToggle'),
-    optionsForm: $('#optionsForm'), limits: $('#limits'), limitsToggle: $('#limitsToggle'),
-    clear: $('#clear'), announce: $('#announce'),
+    saveToggle: $('#saveToggle'), save: $('#save'), saveForm: $('#saveForm'), saveSubmit: $('#saveSubmit'),
+    folder: $('#folder'), footNote: $('#footNote'), picker: $('#picker'), options: $('#options'),
+    optionsToggle: $('#optionsToggle'), optionsForm: $('#optionsForm'), limits: $('#limits'),
+    limitsToggle: $('#limitsToggle'), clear: $('#clear'), choose: $('#choose'), announce: $('#announce'),
+    gate: $('#gate'), gateTitle: $('#gateTitle'), gateText: $('#gateText'),
   };
 
   // ---------------------------------------------------------------- helpers
@@ -74,7 +89,8 @@
   }
 
   const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-  const formatName = (f) => ({ JPEG: 'JPEG', PNG: 'PNG', WEBP: 'WebP', GIF: 'GIF', TIFF: 'TIFF', BMP: 'BMP', AVIF: 'AVIF', HEIF: 'HEIF', MPO: 'MPO' }[f] || f);
+  const formatName = (f) => ({ WEBP: 'WebP' }[f] || f);
+  const capital = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
   function extOf(name) {
     const m = /\.([^.]+)$/.exec(name);
@@ -91,23 +107,33 @@
     if (toggle) toggle.setAttribute('aria-expanded', String(open));
   }
 
+  function setBusy(button, busy) {
+    // aria-disabled, never `disabled`: a disabled button drops keyboard focus to <body>.
+    if (busy) button.setAttribute('aria-disabled', 'true');
+    else button.removeAttribute('aria-disabled');
+  }
+  const isBusy = (button) => button.getAttribute('aria-disabled') === 'true';
+
+  function storage(kind) {
+    return {
+      get(key) { try { return window[kind].getItem(key); } catch { return null; } },
+      set(key, value) { try { window[kind].setItem(key, value); } catch { /* private window or blocked */ } },
+    };
+  }
+  const local = storage('localStorage');
+  const session = storage('sessionStorage');
+
   function loadOptions() {
     try {
-      const saved = JSON.parse(window.localStorage.getItem(STORE_KEY) || '{}');
-      return { ...OPTION_DEFAULTS, ...pick(saved, Object.keys(OPTION_DEFAULTS)) };
+      const saved = JSON.parse(storage('localStorage').get(OPTIONS_KEY) || '{}');
+      const out = { ...OPTION_DEFAULTS };
+      for (const k of Object.keys(OPTION_DEFAULTS)) {
+        if (saved && typeof saved[k] === typeof OPTION_DEFAULTS[k]) out[k] = saved[k];
+      }
+      return out;
     } catch {
       return { ...OPTION_DEFAULTS };
     }
-  }
-
-  function saveOptions() {
-    try { window.localStorage.setItem(STORE_KEY, JSON.stringify(state.options)); } catch { /* private window */ }
-  }
-
-  function pick(obj, keys) {
-    const out = {};
-    for (const k of keys) if (obj && Object.prototype.hasOwnProperty.call(obj, k)) out[k] = obj[k];
-    return out;
   }
 
   function cleanOptions() {
@@ -126,8 +152,13 @@
 
   // ---------------------------------------------------------------- API
 
-  async function api(path, { method = 'POST', body, json, headers = {} } = {}) {
-    const hdrs = { 'X-Imgstrip-Token': TOKEN, ...headers };
+  class HttpError extends Error {
+    constructor(message, status) { super(message); this.status = status; }
+  }
+
+  async function api(path, { method = 'POST', body, json, headers = {}, auth = true } = {}) {
+    const hdrs = { ...headers };
+    if (auth) hdrs['X-Imgstrip-Token'] = TOKEN || '';
     if (json !== undefined) {
       hdrs['Content-Type'] = 'application/json';
       body = JSON.stringify(json);
@@ -136,9 +167,14 @@
     }
     let res;
     try {
-      res = await fetch(path, { method, body, headers: hdrs, credentials: 'same-origin', cache: 'no-store' });
+      res = await fetch(path, { method, body, headers: hdrs, credentials: 'omit', cache: 'no-store' });
     } catch {
-      throw new Error('imgstrip is not running any more. Start it again with imgstrip-web.');
+      if (body instanceof Blob) {
+        try { await body.slice(0, 1).arrayBuffer(); } catch {
+          throw new HttpError('This file can no longer be read: it was moved, renamed or changed after you added it. Remove it and add it again.', 0);
+        }
+      }
+      throw new HttpError('imgstrip is not running any more. Start it again with imgstrip-web.', 0);
     }
     const type = res.headers.get('Content-Type') || '';
     if (!res.ok) {
@@ -146,7 +182,8 @@
       if (type.includes('application/json')) {
         try { message = (await res.json()).error || message; } catch { /* keep default */ }
       }
-      throw new Error(message);
+      if (res.status === 403 && auth) showGate('expired');
+      throw new HttpError(message, res.status);
     }
     return type.includes('application/json') ? res.json() : res.blob();
   }
@@ -158,12 +195,15 @@
       if (active >= n || !queue.length) return;
       active++;
       const { fn, resolve, reject } = queue.shift();
-      fn().then(resolve, reject).finally(() => { active--; next(); });
+      Promise.resolve().then(fn).then(resolve, reject).finally(() => { active--; next(); });
     };
     return (fn) => new Promise((resolve, reject) => { queue.push({ fn, resolve, reject }); next(); });
   }
   const scanQueue = limiter(2);
   const cleanQueue = limiter(2);
+
+  const alive = (item, epoch) => state.epoch === epoch && state.items.includes(item);
+  const discard = (id) => api(`/api/result/${id}`, { method: 'DELETE' }).catch(() => {});
 
   // ---------------------------------------------------------------- seal
 
@@ -230,7 +270,53 @@
     return wrap;
   }
 
+  // ---------------------------------------------------------------- the access gate
+
+  function showGate(kind) {
+    if (state.gate) return;
+    state.gate = kind;
+    const [title, text] = GATE[kind];
+    els.gateTitle.textContent = title;
+    els.gateText.textContent = text;
+    els.gate.hidden = false;
+    els.well.hidden = true;
+    els.list.hidden = true;
+    els.foot.hidden = true;
+    els.optionsToggle.hidden = true;
+    setOpen(els.options, els.optionsToggle, false);
+    announce(`${title}. ${text}`);
+  }
+
+  async function authenticate() {
+    const m = /[#&]k=([A-Za-z0-9_-]{16,})/.exec(window.location.hash);
+    if (m) {
+      // Take the key out of the address bar and history before anything else.
+      window.history.replaceState(null, '', window.location.pathname);
+      try {
+        const res = await api('/api/session', { json: { key: m[1] }, auth: false });
+        TOKEN = res.token;
+        session.set(TOKEN_KEY, TOKEN);
+        return true;
+      } catch (err) {
+        showGate(err.status === 403 ? 'used' : 'down');
+        return false;
+      }
+    }
+    TOKEN = session.get(TOKEN_KEY);
+    if (!TOKEN) {
+      showGate('missing');
+      return false;
+    }
+    return true;
+  }
+
   // ---------------------------------------------------------------- items
+
+  const findingCount = (r) => (r ? r.findings.length : 0);
+  const isDamaged = (r) => !!(r && r.format && r.error);
+  const unreadable = (r) => !!(r && (!r.decodable || r.raw));
+  const wantDeep = (item) => !!(state.options.deep || item.deepOnce);
+  const hasStego = (r) => !!(r && r.findings.some((f) => /steganograph/i.test(f.label)));
 
   function newItem(file) {
     const item = {
@@ -244,17 +330,23 @@
       error: null,
       failedKey: null,
       open: false,
+      deepOnce: false,
+      scanSeq: 0,
       thumbUrl: null,
       justCleaned: false,
+      sealDrawn: false,
       el: null,
+      ui: null,
     };
     state.items.push(item);
     return item;
   }
 
   function addFiles(fileList) {
+    if (state.gate) return;
     const files = Array.from(fileList || []).filter((f) => f && f.size !== undefined);
     if (!files.length) return;
+    disarmClear();
     const added = files.map(newItem);
     for (const item of added) {
       mountItem(item);
@@ -266,27 +358,37 @@
   }
 
   async function scan(item) {
+    const epoch = state.epoch;
+    const seq = ++item.scanSeq;
     item.state = 'scanning';
     renderItem(item);
     render();
-    const deep = state.options.deep ? '1' : '0';
     try {
-      item.report = await scanQueue(() => api(`/api/inspect?deep=${deep}`, {
-        body: item.file, headers: { 'X-Filename': encodeURIComponent(item.name) },
-      }));
+      const report = await scanQueue(() => {
+        if (!alive(item, epoch) || seq !== item.scanSeq) return Promise.reject(GONE);
+        return api(`/api/inspect?deep=${wantDeep(item) ? 1 : 0}`, {
+          body: item.file, headers: { 'X-Filename': encodeURIComponent(item.name) },
+        });
+      });
+      if (!alive(item, epoch) || seq !== item.scanSeq) return;
+      item.report = report;
       item.error = null;
-      if (!state.items.includes(item)) return;
-      item.state = item.result && item.result.key === optionsKey() ? 'clean' : 'scanned';
+      if (!!report.deep !== wantDeep(item) && report.decodable && !report.raw) {
+        scan(item); // Deep scan was switched while this file waited: scan it again the new way
+        return;
+      }
+      item.state = unreadable(report) ? 'unsupported' : 'scanned';
     } catch (err) {
-      if (!state.items.includes(item)) return;
+      if (err === GONE || !alive(item, epoch) || seq !== item.scanSeq) return;
       item.state = 'scanfailed';
       item.error = err.message;
     }
     renderItem(item);
     render();
     if (!state.items.some((i) => i.state === 'scanning')) {
-      const found = state.items.reduce((n, i) => n + (i.report && i.state !== 'clean' ? i.report.findings.length : 0), 0);
-      announce(`Scan finished. ${plural(found, 'revealing item')} found.`);
+      const found = state.items.reduce((n, i) => n + (i.state === 'clean' ? 0 : findingCount(i.report)), 0);
+      const failed = state.items.filter((i) => i.state === 'scanfailed').length;
+      announce(`Scan finished. ${plural(found, 'revealing item')} found${failed ? `; ${failed} could not be scanned` : ''}.`);
     }
   }
 
@@ -295,15 +397,17 @@
     return state.items.filter((i) =>
       (i.state === 'scanned') ||
       (i.state === 'failed' && i.failedKey !== key) ||
-      (i.state === 'clean' && i.result && i.result.key !== key));
+      (i.state === 'clean' && i.result.key !== key && i.failedKey !== key));
   }
 
   async function cleanAll() {
     const todo = cleanable();
-    if (!todo.length || state.cleaningRun) return;
+    if (!todo.length || state.run) return;
     const key = optionsKey();
     const options = encodeURIComponent(JSON.stringify(cleanOptions()));
-    state.cleaningRun = { total: todo.length, done: 0 };
+    const epoch = state.epoch;
+    const run = { total: todo.length, done: 0 };
+    state.run = run;
     hideNote();
     render();
     await Promise.all(todo.map(async (item) => {
@@ -311,52 +415,51 @@
       item.state = 'cleaning';
       renderItem(item);
       try {
-        const result = await cleanQueue(() => api('/api/clean', {
-          body: item.file, headers: { 'X-Filename': encodeURIComponent(item.name), 'X-Options': options },
-        }));
+        const result = await cleanQueue(() => (alive(item, epoch)
+          ? api('/api/clean', { body: item.file, headers: { 'X-Filename': encodeURIComponent(item.name), 'X-Options': options } })
+          : Promise.reject(GONE)));
         result.key = key;
-        if (!state.items.includes(item)) {
-          api(`/api/result/${result.id}`, { method: 'DELETE' }).catch(() => {});
-          return;
-        }
-        if (previous) api(`/api/result/${previous.id}`, { method: 'DELETE' }).catch(() => {});
-        item.result = result;
-        item.state = 'clean';
-        item.error = null;
-        item.justCleaned = true;
+        if (!alive(item, epoch)) { discard(result.id); return; }
+        if (previous) discard(previous.id);
+        Object.assign(item, { result, state: 'clean', error: null, failedKey: null, justCleaned: true, sealDrawn: false });
       } catch (err) {
-        if (!state.items.includes(item)) return;
-        if (previous) api(`/api/result/${previous.id}`, { method: 'DELETE' }).catch(() => {});
-        item.result = null;
-        item.state = 'failed';
+        if (err === GONE || !alive(item, epoch)) return;
         item.error = err.message;
-        item.failedKey = key;
+        // A refusal from the engine is final for these options; a lost connection is worth retrying.
+        item.failedKey = err.status === 422 ? key : null;
+        item.state = previous ? 'clean' : 'failed';
       }
-      state.cleaningRun.done++;
+      if (state.run !== run) return;
+      run.done++;
       renderItem(item);
       render();
     }));
-    const run = state.cleaningRun;
-    state.cleaningRun = null;
+    if (state.run !== run) return;
+    state.run = null;
     render();
-    const failed = todo.filter((i) => i.state === 'failed').length;
+    const failed = todo.filter((i) => i.error).length;
     announce(failed
       ? `${plural(run.total - failed, 'image')} cleaned and verified. ${failed} could not be cleaned.`
       : `${plural(run.total, 'image')} cleaned and verified.`);
   }
 
   function removeItem(item) {
+    const index = state.items.indexOf(item);
     state.items = state.items.filter((i) => i !== item);
-    if (item.result) api(`/api/result/${item.result.id}`, { method: 'DELETE' }).catch(() => {});
+    if (item.result) discard(item.result.id);
     if (item.thumbUrl) URL.revokeObjectURL(item.thumbUrl);
-    const focusTarget = item.el.nextElementSibling || item.el.previousElementSibling;
     item.el.remove();
+    disarmClear();
     render();
-    const btn = focusTarget && focusTarget.querySelector('.file-head');
-    (btn || (state.items.length ? els.window : $('#choose'))).focus?.();
+    const next = state.items[index] || state.items[index - 1];
+    if (next) next.ui.head.focus();
+    else els.choose.focus();
+    announce(`Removed ${item.name}. ${plural(state.items.length, 'image')} left.`);
   }
 
   function clearAll() {
+    state.epoch++;
+    state.run = null;
     for (const item of state.items) if (item.thumbUrl) URL.revokeObjectURL(item.thumbUrl);
     state.items = [];
     els.files.replaceChildren();
@@ -364,21 +467,21 @@
     hideNote();
     setOpen(els.save, els.saveToggle, false);
     render();
-    $('#choose').focus();
+    els.choose.focus();
     announce('List cleared.');
   }
 
   // ---------------------------------------------------------------- thumbnails
 
   function loadThumb(item) {
-    const holder = item.el.querySelector('.thumb');
+    const holder = item.ui.thumb;
     const fallback = async () => {
       try {
         const blob = await api('/api/preview', { body: item.file, headers: { 'X-Filename': encodeURIComponent(item.name) } });
+        if (!state.items.includes(item)) return;
         if (item.thumbUrl) URL.revokeObjectURL(item.thumbUrl);
         item.thumbUrl = URL.createObjectURL(blob);
-        const img = h('img', { alt: '', src: item.thumbUrl, decoding: 'async' });
-        holder.replaceChildren(img);
+        holder.replaceChildren(h('img', { alt: '', src: item.thumbUrl, decoding: 'async' }));
       } catch {
         holder.replaceChildren(icon('image'));
       }
@@ -398,38 +501,57 @@
 
   function mountItem(item) {
     const detailId = `detail-${item.id}`;
-    const head = h('button', {
+    const ui = {};
+    ui.thumb = h('span', { class: 'thumb' }, icon('image'));
+    ui.name = h('span', { class: 'file-name' });
+    ui.sub = h('span', { class: 'file-sub' });
+    ui.status = h('span', { class: 'status' });
+    ui.head = h('button', {
       class: 'file-head', type: 'button', 'aria-expanded': 'false', 'aria-controls': detailId,
       onclick: () => { item.open = !item.open; renderItem(item); },
-    },
-    h('span', { class: 'thumb' }, icon('image')),
-    h('span', { class: 'file-main' }, h('span', { class: 'file-name' }), h('span', { class: 'file-sub' })),
-    h('span', { class: 'status' }),
-    icon('chevron', 'icon chev'));
-    const actions = h('div', { class: 'file-actions' });
-    const detail = h('div', { class: 'reveal', id: detailId, 'data-open': 'false' }, h('div', { class: 'reveal-inner' }, h('div', { class: 'detail-body' })));
+    }, ui.thumb, h('span', { class: 'file-main' }, ui.name, ui.sub), ui.status, icon('chevron', 'icon chev'));
+    ui.download = h('a', { class: 'btn btn-icon is-off', tabindex: '-1', 'aria-hidden': 'true' }, icon('download'));
+    ui.remove = h('button', { class: 'btn btn-icon', type: 'button', title: 'Remove', onclick: () => removeItem(item) }, icon('x'));
+    ui.body = h('div', { class: 'detail-body' });
+    ui.detail = h('div', { class: 'reveal', id: detailId, 'data-open': 'false' }, h('div', { class: 'reveal-inner' }, ui.body));
+    item.ui = ui;
     item.el = h('li', { class: 'file', 'data-state': item.state, 'data-open': 'false' },
-      h('div', { class: 'file-row' }, head, actions), detail);
+      h('div', { class: 'file-row' }, ui.head, h('div', { class: 'file-actions' }, ui.download, ui.remove)), ui.detail);
     els.files.append(item.el);
     renderItem(item);
+  }
+
+  function revealSummary(r) {
+    if (r.reveals.length) return `Reveals ${r.reveals.slice(0, 4).map((x) => REVEAL_NOUN[x.key] || x.label.toLowerCase()).join(', ')}`;
+    const nouns = [];
+    for (const f of r.findings) {
+      const noun = f.category === 'color' ? 'a colour profile'
+        : f.category === 'hidden' ? 'hidden data'
+          : f.category === 'structure' ? 'unknown structures'
+            : /^([A-Z0-9]{2,}|Photoshop|Adobe|Apple|Google|Samsung|Microsoft|Netscape)\b/.test(f.label) ? `${f.label.replace(/ \(.*\)$/, '')}${/^(EXIF|XMP|IPTC|TIFF)\b/.test(f.label) ? ' data' : ''}`
+              : f.label.charAt(0).toLowerCase() + f.label.slice(1).replace(/ \(.*\)$/, '');
+      if (!nouns.includes(noun)) nouns.push(noun);
+    }
+    return `Contains ${nouns.slice(0, 3).join(', ')}`;
   }
 
   function itemSub(item) {
     const r = item.report;
     if (item.state === 'clean' && item.result) {
       const res = item.result;
-      return { text: `${formatName(res.output_format)} · ${res.size[0]}×${res.size[1]} · ${bytes(res.bytes_out)}`, leak: false };
+      return { text: `${formatName(res.output_format)} · ${res.size[0]}×${res.size[1]} · ${bytes(res.bytes_out)}` };
     }
-    if (r && r.reveals.length && item.state !== 'scanning') {
-      const names = r.reveals.slice(0, 3).map((x) => REVEAL_NOUN[x.key] || x.label.toLowerCase());
-      return { text: `Reveals ${names.join(', ')}`, leak: true };
+    if (item.state === 'unsupported') {
+      return { text: r.raw ? `Camera RAW (${r.raw}) isn't supported` : "Not an image imgstrip can read" };
     }
+    if (r && findingCount(r) && item.state !== 'scanning') return { text: revealSummary(r), reveal: true };
     const parts = [];
-    if (r && r.format) parts.push(formatName(r.format));
+    const fmt = r && (r.format || r.decodable);
+    if (fmt) parts.push(formatName(fmt));
     else if (extOf(item.name)) parts.push(extOf(item.name));
     if (r && r.size) parts.push(`${r.size[0]}×${r.size[1]}`);
     parts.push(bytes(item.size));
-    return { text: parts.join(' · '), leak: false };
+    return { text: parts.join(' · ') };
   }
 
   function itemStatus(item) {
@@ -439,57 +561,75 @@
       case 'cleaning': return [h('span', { text: 'Cleaning…' })];
       case 'scanfailed': return [icon('alert'), h('span', { class: 'status-fail', text: 'Not scanned' })];
       case 'failed': return [icon('alert'), h('span', { class: 'status-fail', text: 'Not cleaned' })];
+      case 'unsupported': return [h('span', { text: 'Not supported' })];
       case 'clean': {
-        const stale = item.result.key !== optionsKey();
+        const res = item.result;
+        const stale = res.key !== optionsKey();
         const anim = item.justCleaned;
         item.justCleaned = false;
         return [
-          seal(item.result.sha256, { detail: false, animate: anim }),
-          h('span', { class: stale ? '' : 'status-ok', text: stale ? 'Clean (old options)' : 'Clean' }),
+          seal(res.sha256, { detail: false, animate: anim }),
+          h('span', { class: stale ? '' : 'status-ok', text: stale ? 'Clean, old options' : 'Clean' }),
+          h('span', { class: 'seal-tip', id: `tip-${item.id}`, role: 'tooltip' },
+            h('strong', { text: 'Verified clean' }),
+            h('span', { text: 'Every byte accounted for · ' + (res.lossy ? 'pixels within tolerance' : 'pixels exact') }),
+            h('code', { text: `SHA-256 ${res.sha256.slice(0, 16)}…` })),
         ];
       }
       default: {
-        const n = r ? r.findings.length + (r.format && r.error ? 1 : 0) : 0;
-        if (n) return [h('span', { class: 'status-count', text: plural(n, 'item') })];
+        const n = findingCount(r);
+        if (n) return [h('span', { class: 'status-count', text: `${n} to remove` })];
+        if (isDamaged(r)) return [icon('alert'), h('span', { class: 'status-fail', text: 'Damaged' })];
         if (r && !r.format) return [h('span', { text: 'Not inspected' })];
-        return [h('span', { text: 'Nothing found' })];
+        return [h('span', { text: r && r.deep ? 'Nothing found' : 'No metadata' })];
       }
     }
   }
 
   function renderItem(item) {
-    const el = item.el;
+    const { el, ui } = item;
     if (!el) return;
     el.dataset.state = item.state;
     el.dataset.open = String(item.open);
-    $('.file-name', el).textContent = item.name;
-    $('.file-name', el).title = item.name;
+    ui.name.textContent = item.name;
     const sub = itemSub(item);
-    const subEl = $('.file-sub', el);
-    subEl.textContent = sub.text;
-    subEl.classList.toggle('is-leak', sub.leak);
-    $('.status', el).replaceChildren(...itemStatus(item));
-    const head = $('.file-head', el);
-    head.setAttribute('aria-expanded', String(item.open));
-    head.setAttribute('aria-label', `${item.name}, ${$('.status', el).textContent}. ${sub.text}`);
+    ui.sub.textContent = sub.text;
+    ui.sub.classList.toggle('is-reveal', !!sub.reveal);
+    ui.status.replaceChildren(...itemStatus(item));
+    ui.head.setAttribute('aria-expanded', String(item.open));
+    const statusText = Array.from(ui.status.childNodes).filter((n) => !n.classList || !n.classList.contains('seal-tip')).map((n) => n.textContent).join(' ').trim();
+    ui.head.setAttribute('aria-label', `${item.name}. ${statusText}. ${sub.text}`);
+    if (item.state === 'clean') ui.head.setAttribute('aria-describedby', `tip-${item.id}`);
+    else ui.head.removeAttribute('aria-describedby');
 
-    const actions = $('.file-actions', el);
-    const parts = [];
-    if (item.state === 'clean') {
-      parts.push(h('a', {
-        class: 'btn btn-icon', href: `/api/result/${item.result.id}`, download: item.result.filename,
-        'aria-label': `Download ${item.result.filename}`, title: `Download ${item.result.filename}`,
-      }, icon('download')));
+    // Persistent action buttons: only their state changes, so keyboard focus never falls off them.
+    const res = item.result;
+    const dl = ui.download;
+    if (res && (item.state === 'clean' || item.state === 'cleaning')) {
+      dl.classList.remove('is-off');
+      dl.href = `/api/result/${res.id}`;
+      dl.setAttribute('download', res.filename);
+      dl.setAttribute('aria-label', `Download ${res.filename}`);
+      dl.title = `Download ${res.filename}`;
+      dl.removeAttribute('tabindex');
+      dl.removeAttribute('aria-hidden');
+    } else if (!dl.classList.contains('is-off')) {
+      const hadFocus = document.activeElement === dl;
+      dl.classList.add('is-off');
+      dl.removeAttribute('href');
+      dl.setAttribute('tabindex', '-1');
+      dl.setAttribute('aria-hidden', 'true');
+      if (hadFocus) ui.remove.focus();
     }
-    parts.push(h('button', {
-      class: 'btn btn-icon', type: 'button', 'aria-label': `Remove ${item.name} from the list`, title: 'Remove',
-      disabled: item.state === 'cleaning', onclick: () => removeItem(item),
-    }, icon('x')));
-    actions.replaceChildren(...parts);
+    ui.remove.setAttribute('aria-label', `Remove ${item.name} from the list`);
 
-    const detail = $('.reveal', el);
-    detail.dataset.open = String(item.open);
-    if (item.open) $('.detail-body', el).replaceChildren(...detailContent(item));
+    ui.detail.dataset.open = String(item.open);
+    if (item.open) {
+      const active = document.activeElement;
+      const keep = active && ui.body.contains(active) ? active.dataset.key : null;
+      ui.body.replaceChildren(...detailContent(item));
+      if (keep) (ui.body.querySelector(`[data-key="${keep}"]`) || ui.head).focus();
+    }
   }
 
   function groupList(findings, removed) {
@@ -500,50 +640,61 @@
     }
     const order = [...CATEGORY_ORDER, ...[...groups.keys()].filter((k) => !CATEGORY_ORDER.includes(k))];
     return order.filter((k) => groups.has(k)).map((k) => h('section', { class: 'group' },
-      h('h3', { class: 'group-title' }, `${removed ? 'Removed: ' : ''}${CATEGORY[k] || k}`, h('span', { class: 'n', text: String(groups.get(k).length) })),
+      h('h3', { class: 'group-title' }, `${removed ? 'Removed: ' : ''}${CATEGORY[k] || k}`,
+        h('span', { class: 'n' }, h('span', { class: 'sr-only', text: ', ' }), String(groups.get(k).length), h('span', { class: 'sr-only', text: groups.get(k).length === 1 ? ' item' : ' items' }))),
       h('ul', { class: 'items' }, groups.get(k).map((f) => h('li', { class: 'item' },
         h('span', { class: 'item-label', text: f.label }),
         h('span', { class: 'item-detail', text: f.detail || '—' }))))));
   }
 
   function note(text, kind = '') {
-    return h('p', { class: `note${kind ? ` is-${kind}` : ''}` }, icon(kind === 'warn' || kind === 'error' ? 'alert' : 'check'), h('span', { text }));
+    const glyph = kind === 'warn' || kind === 'error' ? 'alert' : kind === 'ok' ? 'check' : 'info';
+    return h('p', { class: `note${kind ? ` is-${kind}` : ''}` }, icon(glyph), h('span', { text }));
   }
 
   function detailContent(item) {
     const r = item.report;
-    const out = [];
+    // The row truncates long names; the detail always shows the whole name.
+    const out = [h('p', { class: `detail-name${item.name.length > 44 ? ' is-long' : ''}`, text: item.name })];
     const meta = [];
-    if (r && r.format) meta.push(formatName(r.format));
+    const fmt = r && (r.format || r.decodable);
+    if (fmt) meta.push(formatName(fmt));
     if (r && r.size) meta.push(`${r.size[0]}×${r.size[1]}`);
     meta.push(bytes(item.size));
-    if (r && r.deep) meta.push('deep scan');
+    if (r && r.deep) meta.push('pixels scanned');
 
     if (item.state === 'clean' && item.result) {
       const res = item.result;
-      const lossy = !res.pixels_exact;
       const checks = h('div', { class: 'checks' },
         h('p', { class: 'check' }, icon('check'), h('span', { text: 'Every byte of the new file is accounted for.' })),
         h('p', { class: 'check' }, icon('check'), h('span', {
-          text: lossy
-            ? `Pixels match the original within ${formatName(res.output_format)} re-encoding tolerance.`
-            : 'Pixels are bit-for-bit identical to the original.',
-        })));
-      const hash = h('div', { class: 'hash' },
-        h('code', { text: `SHA-256 ${res.sha256}` }),
-        h('button', {
-          class: 'btn btn-icon', type: 'button', 'aria-label': 'Copy SHA-256', title: 'Copy SHA-256',
-          onclick: (e) => copyText(res.sha256, e.currentTarget),
-        }, icon('copy')));
-      checks.append(hash);
-      out.push(h('div', { class: 'verified' }, seal(res.sha256, { detail: true }), checks));
+          text: res.lossy
+            ? `It decodes back to the written pixels within ${formatName(res.output_format)} re-encoding tolerance.`
+            : 'It decodes back to exactly the pixels that were written.',
+        })),
+        h('div', { class: 'hash' },
+          h('code', { text: `SHA-256 ${res.sha256}` }),
+          h('button', {
+            class: 'btn btn-icon', type: 'button', 'aria-label': 'Copy SHA-256', title: 'Copy SHA-256', 'data-key': 'copy',
+            onclick: (e) => copyText(res.sha256, e.currentTarget),
+          }, icon('copy'))));
+      const animate = !item.sealDrawn;
+      item.sealDrawn = true;
+      out.push(h('div', { class: 'verified' }, seal(res.sha256, { detail: true, animate }), checks));
       const frames = res.frames > 1 ? ` · ${res.frames} frames` : '';
       out.push(h('p', { class: 'meta-line', text: `${formatName(res.input_format)} ${bytes(res.bytes_in)} → ${formatName(res.output_format)} ${bytes(res.bytes_out)} · ${res.size[0]}×${res.size[1]}${frames} · saved as ${res.filename}` }));
+      if (res.key !== optionsKey()) out.push(note('Cleaned with earlier options. Clean again to apply the current ones.', 'warn'));
+      if (item.error) out.push(note(`Cleaning again failed: ${item.error}`, 'error'));
+      if (!res.scrubbed && hasStego(r)) {
+        out.push(note('The scan found signs of LSB steganography and Scrub least-significant bits was off, so the hidden payload is probably still in this file.', 'warn'));
+      } else if (!res.scrubbed && !res.lossy) {
+        out.push(note('Data hidden inside the pixel values themselves is not removed. Turn on Scrub least-significant bits in Options to destroy it.'));
+      }
       if (res.removed.length) out.push(...groupList(res.removed, true));
-      else out.push(note('Nothing beside the picture was found. The file was still rebuilt from its pixels.'));
+      else out.push(note('Nothing beside the picture was found. The file was still rebuilt from its pixels.', 'ok'));
       if (res.actions.length) {
         out.push(h('section', { class: 'group' }, h('h3', { class: 'group-title', text: 'Changed' }),
-          h('ul', { class: 'actions-list' }, res.actions.map((a) => h('li', { text: a.charAt(0).toUpperCase() + a.slice(1) })))));
+          h('ul', { class: 'actions-list' }, res.actions.map((a) => h('li', { text: capital(a) })))));
       }
       for (const w of res.warnings) out.push(note(w, 'warn'));
       return out;
@@ -552,6 +703,12 @@
     out.push(h('p', { class: 'meta-line', text: meta.join(' · ') }));
     if (item.state === 'failed' || item.state === 'scanfailed') out.push(note(item.error, 'error'));
     if (!r) return out;
+    if (item.state === 'unsupported') {
+      out.push(note(r.raw
+        ? `Camera RAW files (${r.raw}) aren't supported. Export the photo to TIFF, PNG or JPEG first.`
+        : "This file isn't an image imgstrip can read, so it can't be cleaned.", 'error'));
+      return out;
+    }
     if (r.reveals.length) {
       out.push(h('dl', { class: 'reveals' }, r.reveals.map((x) => [
         h('dt', { text: x.label }),
@@ -559,14 +716,20 @@
       ])));
     }
     if (r.findings.length) out.push(...groupList(r.findings, false));
-    if (r.format && r.error) out.push(note(`The file's structure is damaged: ${r.error}. Cleaning rebuilds it from its pixels if they can still be decoded.`, 'warn'));
-    if (!r.format) out.push(note("imgstrip can't inspect this container, but cleaning still rebuilds the image from its pixels alone."));
+    if (isDamaged(r)) out.push(note(`The file's structure is damaged (${r.error}). Cleaning rebuilds it from its pixels if they can still be decoded.`, 'warn'));
+    if (!r.format) out.push(note(`imgstrip can't list what a ${r.decodable} file holds, but cleaning rebuilds the image from its pixels alone.`));
     else if (!r.findings.length && !r.error) {
       out.push(note(r.deep
-        ? 'Nothing beside the picture was found, in the container or in the pixels. Cleaning still rebuilds the file from its pixels.'
-        : 'Nothing beside the picture was found. Cleaning still rebuilds the file from its pixels, which removes anything a scan cannot recognise.'));
+        ? 'Nothing beside the picture was found, in the file or in its pixels. Cleaning still rebuilds it from its pixels.'
+        : 'No metadata found. The pixels were not searched, and anything hidden in them survives cleaning unless Scrub least-significant bits is on.'));
     }
     for (const n of r.notes) out.push(note(n, 'warn'));
+    if (!r.deep && item.state === 'scanned') {
+      out.push(h('div', { class: 'detail-tools' }, h('button', {
+        class: 'btn btn-secondary btn-small', type: 'button', 'data-key': 'deep',
+        onclick: () => { item.deepOnce = true; scan(item); },
+      }, h('span', { text: 'Scan the pixels too' }))));
+    }
     return out;
   }
 
@@ -574,14 +737,17 @@
     try {
       await navigator.clipboard.writeText(text);
       button.replaceChildren(icon('check'));
-      button.setAttribute('aria-label', 'Copied');
-      window.setTimeout(() => { button.replaceChildren(icon('copy')); button.setAttribute('aria-label', 'Copy SHA-256'); }, 1400);
-    } catch { /* clipboard blocked: the hash stays selectable */ }
+      announce('SHA-256 copied.');
+      window.setTimeout(() => button.replaceChildren(icon('copy')), 1400);
+    } catch {
+      announce('Could not copy. Select the hash to copy it instead.');
+    }
   }
 
   // ---------------------------------------------------------------- rendering: shell
 
   function render() {
+    if (state.gate) return;
     const items = state.items;
     const any = items.length > 0;
     els.well.hidden = any;
@@ -589,66 +755,56 @@
     els.foot.hidden = !any;
     if (!any) return;
 
+    const key = optionsKey();
     const scanning = items.filter((i) => i.state === 'scanning').length;
     const clean = items.filter((i) => i.state === 'clean');
-    const fresh = clean.filter((i) => i.result.key === optionsKey());
-    const failed = items.filter((i) => i.state === 'failed' || i.state === 'scanfailed').length;
+    const fresh = clean.filter((i) => i.result.key === key);
+    const failed = items.filter((i) => i.state === 'failed' || i.state === 'scanfailed' || i.state === 'unsupported').length;
     const todo = cleanable();
-    const found = items.reduce((n, i) => n + (i.report && i.state !== 'clean' ? i.report.findings.length : 0), 0);
+    const found = items.reduce((n, i) => n + (i.state === 'clean' ? 0 : findingCount(i.report)), 0);
     const removed = clean.reduce((n, i) => n + i.result.removed.length, 0);
 
     els.listCount.textContent = plural(items.length, 'image');
 
-    // summary line
     const s = [];
-    if (state.cleaningRun) s.push(h('span', { text: `Cleaning ${Math.min(state.cleaningRun.done + 1, state.cleaningRun.total)} of ${state.cleaningRun.total}…` }));
+    if (state.run) s.push(h('span', { text: `Cleaning ${Math.min(state.run.done + 1, state.run.total)} of ${state.run.total}…` }));
     else if (scanning) s.push(h('span', { text: `Scanning ${plural(scanning, 'image')}…` }));
-    else if (todo.length && !clean.length) {
-      s.push(found ? h('span', { class: 'is-leak', text: plural(found, 'revealing item') }) : h('span', { text: 'Nothing revealing found' }));
+    else if (!clean.length) {
+      s.push(found ? h('span', { class: 'is-reveal', text: plural(found, 'revealing item') }) : h('span', { text: 'Nothing revealing found' }));
       s.push(` in ${plural(items.length, 'image')}`);
-    } else if (clean.length) {
+    } else {
       s.push(h('span', { class: 'is-clean', text: `${clean.length} clean` }));
       s.push(removed ? ` · ${plural(removed, 'item')} removed` : ' · rebuilt from pixels');
-      if (todo.length && fresh.length !== clean.length) s.push(' · options changed');
+      if (fresh.length !== clean.length) s.push(' · options changed');
       else if (todo.length) s.push(` · ${todo.length} to clean`);
-    } else {
-      s.push(h('span', { text: plural(items.length, 'image') }));
     }
-    if (failed) s.push(h('span', { class: 'is-leak', text: ` · ${failed} failed` }));
+    if (failed) s.push(h('span', { class: 'is-fail', text: ` · ${failed} not cleanable` }));
     els.summary.replaceChildren(...s);
 
-    // primary plate: the one next action
+    // The primary plate is the one next action; it is never `disabled`, so it keeps focus.
     const plate = els.primary;
     const label = $('span', plate);
-    plate.classList.remove('is-busy');
     let mode;
-    if (state.cleaningRun) {
-      mode = 'busy';
-      label.textContent = 'Cleaning…';
-      plate.disabled = true;
-      plate.classList.add('is-busy');
-    } else if (todo.length) {
+    if (state.run) { mode = 'busy'; label.textContent = 'Cleaning…'; }
+    else if (todo.length) {
       mode = 'clean';
-      const allStale = todo.every((i) => i.state === 'clean');
-      label.textContent = allStale ? `Clean again with new options` : `Clean ${plural(todo.length, 'image')}`;
-      plate.disabled = false;
+      label.textContent = todo.every((i) => i.state === 'clean') ? 'Clean again with new options' : `Clean ${plural(todo.length, 'image')}`;
     } else if (fresh.length) {
       mode = 'download';
-      label.textContent = fresh.length === 1 ? 'Download' : `Download all (.zip)`;
-      plate.disabled = false;
-    } else {
-      mode = 'wait';
-      label.textContent = scanning ? 'Scanning…' : 'Clean';
-      plate.disabled = true;
-    }
+      label.textContent = state.packing ? 'Packing…' : fresh.length === 1 ? 'Download' : 'Download all (.zip)';
+    } else { mode = 'wait'; label.textContent = scanning ? 'Scanning…' : 'Clean'; }
     plate.dataset.mode = mode;
+    setBusy(plate, mode === 'busy' || mode === 'wait' || state.packing);
+    // One reversed plate per state: while the save row is open, Save is the plate.
+    const saveOpen = els.save.dataset.open === 'true';
+    plate.classList.toggle('btn-plate', !(saveOpen && mode === 'download'));
+    plate.classList.toggle('btn-secondary', saveOpen && mode === 'download');
 
-    // secondary: download (when the plate is busy cleaning others) and save
-    const downloadable = fresh.length;
-    els.downloadSome.hidden = !(downloadable && mode === 'clean');
-    $('span', els.downloadSome).textContent = downloadable === 1 ? 'Download' : `Download ${downloadable}`;
-    els.saveToggle.hidden = !downloadable;
-    if (!downloadable) setOpen(els.save, els.saveToggle, false);
+    els.downloadSome.hidden = !(fresh.length && mode === 'clean');
+    $('span', els.downloadSome).textContent = state.packing ? 'Packing…' : fresh.length === 1 ? 'Download' : `Download ${fresh.length}`;
+    setBusy(els.downloadSome, state.packing);
+    els.saveToggle.hidden = !fresh.length;
+    if (!fresh.length && saveOpen) setOpen(els.save, els.saveToggle, false);
   }
 
   // ---------------------------------------------------------------- download & save
@@ -665,17 +821,15 @@
     a.remove();
   }
 
-  async function downloadClean(button) {
+  async function downloadClean() {
     const items = freshClean();
-    if (!items.length) return;
+    if (!items.length || state.packing) return;
     if (items.length === 1) {
       triggerDownload(`/api/result/${items[0].result.id}`, items[0].result.filename);
       return;
     }
-    const label = $('span', button);
-    const before = label.textContent;
-    button.disabled = true;
-    label.textContent = 'Packing…';
+    state.packing = true;
+    render();
     try {
       const zip = await api('/api/zip', { json: { ids: items.map((i) => i.result.id) } });
       triggerDownload(`/api/result/${zip.id}`, zip.filename);
@@ -683,40 +837,50 @@
     } catch (err) {
       showNote(err.message, 'error');
     } finally {
-      button.disabled = false;
-      label.textContent = before;
+      state.packing = false;
       render();
     }
+  }
+
+  function folderError(text) {
+    els.folder.setAttribute('aria-invalid', 'true');
+    els.folder.setAttribute('aria-describedby', 'footNote');
+    showNote(text, 'error');
+    els.folder.focus();
   }
 
   async function saveToFolder(event) {
     event.preventDefault();
     const items = freshClean();
     const folder = els.folder.value.trim();
-    if (!items.length) return;
+    if (!items.length || state.saving) return;
     if (!folder) {
-      showNote('Type the folder to save into, for example ~/Pictures/clean.', 'error');
-      els.folder.focus();
+      folderError('Type the folder to save into, for example ~/Pictures/clean.');
       return;
     }
-    const submit = $('button[type="submit"]', els.saveForm);
-    submit.disabled = true;
+    state.saving = true;
+    setBusy(els.saveSubmit, true);
     try {
       const res = await api('/api/save', { json: { ids: items.map((i) => i.result.id), folder } });
       state.lastFolder = folder;
-      try { window.localStorage.setItem('imgstrip.folder', folder); } catch { /* ignore */ }
+      session.set(FOLDER_KEY, folder);
+      els.folder.removeAttribute('aria-invalid');
+      els.folder.removeAttribute('aria-describedby');
       const ok = res.files.filter((f) => f.ok);
       const bad = res.files.filter((f) => !f.ok);
       if (bad.length) {
-        showNote(`Saved ${ok.length} of ${res.files.length} to ${res.folder}. ${bad.map((f) => f.message).join(' ')}`, 'error');
+        folderError(`Saved ${ok.length} of ${res.files.length} to ${res.folder}. ${bad.map((f) => f.message).join(' ')}`);
       } else {
-        showNote(`Saved ${plural(ok.length, 'image')} to ${res.folder}`, 'ok', res.folder);
         setOpen(els.save, els.saveToggle, false);
+        render();
+        els.saveToggle.focus();
+        showNote(`Saved ${plural(ok.length, 'image')} to ${res.folder}`, 'ok', res.folder);
       }
     } catch (err) {
-      showNote(err.message, 'error');
+      folderError(err.message);
     } finally {
-      submit.disabled = false;
+      state.saving = false;
+      setBusy(els.saveSubmit, false);
     }
   }
 
@@ -733,6 +897,22 @@
 
   function hideNote() { els.footNote.hidden = true; }
 
+  // ---------------------------------------------------------------- clear (two presses, no timer)
+
+  let clearArmed = false;
+  function armClear() {
+    clearArmed = true;
+    els.clear.classList.add('is-armed');
+    $('span', els.clear).textContent = 'Clear all?';
+    announce(`Press Clear again to remove all ${plural(state.items.length, 'image')} from the list.`);
+  }
+  function disarmClear() {
+    if (!clearArmed) return;
+    clearArmed = false;
+    els.clear.classList.remove('is-armed');
+    $('span', els.clear).textContent = 'Clear';
+  }
+
   // ---------------------------------------------------------------- options
 
   function initOptions(info) {
@@ -748,14 +928,19 @@
     }
     form.addEventListener('change', (e) => {
       const f = e.target;
-      const before = state.options.deep;
+      const beforeKey = optionsKey();
+      const beforeDeep = state.options.deep;
       state.options[f.name] = f.type === 'checkbox' ? f.checked : f.value;
-      saveOptions();
-      if (f.name === 'deep' && before !== state.options.deep) {
+      local.set(OPTIONS_KEY, JSON.stringify(state.options));
+      if (f.name === 'deep' && beforeDeep !== state.options.deep) {
+        // Files still waiting re-check the setting when their scan returns (see scan()).
         for (const item of state.items) if (item.state === 'scanned' || item.state === 'scanfailed') scan(item);
       }
       for (const item of state.items) renderItem(item);
       render();
+      if (beforeKey !== optionsKey() && state.items.some((i) => i.state === 'clean')) {
+        announce('Options changed. Clean again to apply them to the cleaned images.');
+      }
     });
     form.addEventListener('submit', (e) => e.preventDefault());
   }
@@ -766,33 +951,20 @@
     const fixed = 'b3f19a07c2d4e58a61f0c3b7d9e2a4f6c8b1d3e5f7a9c0b2d4e6f8a1c3e5b7d9';
     $('#mark').append(sealSVG(fixed, { detail: false, check: false }));
     $('#wellMark').append(sealSVG(fixed, { detail: true, check: false }));
+    $('#gateMark').append(sealSVG(fixed, { detail: true, check: false }));
   }
 
   // ---------------------------------------------------------------- events
 
   function bind() {
-    $('#choose').addEventListener('click', () => els.picker.click());
+    els.choose.addEventListener('click', () => els.picker.click());
     $('#add').addEventListener('click', () => els.picker.click());
     els.picker.addEventListener('change', () => { addFiles(els.picker.files); els.picker.value = ''; });
 
-    let armed = null;
     els.clear.addEventListener('click', () => {
-      if (armed) {
-        window.clearTimeout(armed);
-        armed = null;
-        els.clear.classList.remove('is-armed');
-        $('span', els.clear).textContent = 'Clear';
-        clearAll();
-        return;
-      }
-      els.clear.classList.add('is-armed');
-      $('span', els.clear).textContent = 'Clear all?';
-      armed = window.setTimeout(() => {
-        armed = null;
-        els.clear.classList.remove('is-armed');
-        $('span', els.clear).textContent = 'Clear';
-      }, 3000);
+      if (clearArmed) { disarmClear(); clearAll(); } else armClear();
     });
+    els.clear.addEventListener('blur', disarmClear);
 
     els.optionsToggle.addEventListener('click', () => {
       setOpen(els.options, els.optionsToggle, els.options.dataset.open !== 'true');
@@ -802,32 +974,43 @@
     });
 
     els.primary.addEventListener('click', () => {
+      if (isBusy(els.primary)) return;
       const mode = els.primary.dataset.mode;
       if (mode === 'clean') cleanAll();
-      else if (mode === 'download') downloadClean(els.primary);
+      else if (mode === 'download') downloadClean();
     });
-    els.downloadSome.addEventListener('click', () => downloadClean(els.downloadSome));
+    els.downloadSome.addEventListener('click', () => { if (!isBusy(els.downloadSome)) downloadClean(); });
     els.saveToggle.addEventListener('click', () => {
       const open = els.save.dataset.open !== 'true';
       setOpen(els.save, els.saveToggle, open);
+      render();
       if (open) {
         if (!els.folder.value) els.folder.value = state.lastFolder || state.info?.folder || '';
         window.setTimeout(() => els.folder.focus(), 60);
       }
     });
     els.saveForm.addEventListener('submit', saveToFolder);
+    els.folder.addEventListener('input', () => els.folder.removeAttribute('aria-invalid'));
 
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
-      if (els.save.dataset.open === 'true') { setOpen(els.save, els.saveToggle, false); els.saveToggle.focus(); }
-      else if (els.options.dataset.open === 'true') { setOpen(els.options, els.optionsToggle, false); els.optionsToggle.focus(); }
+      const active = document.activeElement;
+      if (clearArmed) { disarmClear(); return; }
+      if (els.save.dataset.open === 'true' && els.foot.contains(active)) {
+        setOpen(els.save, els.saveToggle, false);
+        render();
+        els.saveToggle.focus();
+      } else if (els.options.dataset.open === 'true' && (els.options.contains(active) || active === els.optionsToggle)) {
+        setOpen(els.options, els.optionsToggle, false);
+        els.optionsToggle.focus();
+      }
     });
 
     // drag and drop anywhere on the page
     let depth = 0;
     const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
     document.addEventListener('dragenter', (e) => {
-      if (!hasFiles(e)) return;
+      if (!hasFiles(e) || state.gate) return;
       e.preventDefault();
       depth++;
       document.body.classList.add('is-dragging');
@@ -835,7 +1018,7 @@
     document.addEventListener('dragover', (e) => {
       if (!hasFiles(e)) return;
       e.preventDefault();
-      e.dataTransfer.dropEffect = 'copy';
+      e.dataTransfer.dropEffect = state.gate ? 'none' : 'copy';
     });
     document.addEventListener('dragleave', (e) => {
       if (!hasFiles(e)) return;
@@ -861,13 +1044,13 @@
   async function init() {
     drawMarks();
     bind();
-    try { state.lastFolder = window.localStorage.getItem('imgstrip.folder'); } catch { /* ignore */ }
+    state.lastFolder = session.get(FOLDER_KEY);
+    if (!(await authenticate())) return;
     try {
       state.info = await api('/api/info', { method: 'GET' });
     } catch (err) {
-      state.info = { formats: ['JPEG', 'PNG', 'WEBP', 'GIF', 'TIFF', 'BMP'], folder: '' };
-      showNote(err.message, 'error');
-      els.foot.hidden = false;
+      if (!state.gate) showGate(err.status ? 'expired' : 'down');
+      return;
     }
     initOptions(state.info);
     render();

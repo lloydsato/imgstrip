@@ -42,7 +42,7 @@ imgstrip-web             # starts the app on this computer and opens it in your 
 
 The web app is the same engine behind a small window in your browser. It runs only on your own machine (on `127.0.0.1`), works offline, and never uploads anything.
 
-1. **Drop images** onto the window, choose them, or paste them. Each file is scanned straight away and its row says what it gives away: location, camera, time taken, serial numbers, hidden preview images, appended data. Open a row for every item, grouped as identifying metadata, hidden data and colour profile. Nothing is changed yet.
+1. **Drop images** onto the window, choose them, or paste them. Each file is scanned straight away and its row says what it gives away: location, camera, time taken, serial numbers, hidden preview images, appended data. Open a row for every item, grouped as identifying metadata, hidden data and colour profile. Nothing is changed yet. The scan reads the file's structure; to also search the pixels for steganography, turn on **Deep scan** or use *Scan the pixels too* on one file.
 2. **Clean.** Every file is rebuilt from its pixels and passes both checks before it is offered back. Each verified file gets a small seal engraved from its SHA-256 (the same file always gets the same seal); open the row for the checks, the full hash, and the list of what was removed.
 3. **Take the clean files**: download one, download all as a ZIP (its entries carry no dates), or **save to a folder** on disk. Saving creates the folder if needed and never replaces an existing file; a name that is taken gets a number instead (`photo.clean (2).jpg`).
 
@@ -51,12 +51,13 @@ The web app is the same engine behind a small window in your browser. It runs on
 | Option | Meaning |
 |---|---|
 | `--port N` | Port on `127.0.0.1` (default 8765; a free port is used if it is taken). |
-| `--no-browser` | Print the link instead of opening the browser. |
+| `--no-browser` | Print the link instead of opening the browser. Use it on a computer shared with other users (see below). |
 
 How it stays private:
 
 * Originals are never written to disk. They are read from the request, cleaned in memory, and only the verified clean output is kept, in a private temporary folder that is deleted when you stop the app (Ctrl+C).
-* The terminal prints a one-time link with a secret key. The page opens only through it (it sets a session cookie), every request from the page carries a second per-run token, and requests addressed to any other host name are refused. Other websites open in your browser, and other users on the same computer, cannot drive the app or read your images.
+* The terminal prints a link with a secret, single-use key. The page trades that key for this run's access token, which it keeps only in that browser tab, and the terminal then prints a fresh link for the next tab. No cookies are used (browsers share cookies between all local ports), and requests addressed to any other host name are refused. Other websites open in your browser cannot drive the app or read your images.
+* On a computer shared with other users, start it with `--no-browser` and open the printed link yourself: opening a browser passes the link on its command line, which other local users can briefly see. Each link works once, so a link used by someone else shows you "already used".
 * The server keeps no log of file names, and the page loads nothing from the internet (its typeface, Schibsted Grotesk, ships with the app under the SIL Open Font License).
 
 ## Usage

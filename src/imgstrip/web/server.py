@@ -1,17 +1,19 @@
 """Local web interface: a loopback-only HTTP server around the stripping engine.
 
 The server is deliberately small and built on the standard library only.  It
-binds to the loopback interface, and every request has to get past three
-gates before it reaches the engine:
+binds to the loopback interface, and requests have to get past these gates
+before they reach the engine:
 
 * the ``Host`` header must name this server's loopback address, which defeats
   DNS-rebinding attacks from web pages the user happens to have open;
-* the page itself is only served to a browser holding this run's session
-  cookie (set by the one-time link printed in the terminal), so other local
-  users cannot drive the app;
-* every state-changing API call must carry this run's token in a custom
-  header, which a cross-origin page can neither read nor send without a CORS
-  preflight that is never answered.
+* the page is a static shell with no secrets in it.  The link printed in the
+  terminal carries a single-use launch key in its fragment; the page trades
+  it for this run's API token, which it keeps in ``sessionStorage`` (scoped
+  to this exact origin, port included).  Each use prints a fresh link.  No
+  cookies are used, because browsers send cookies to every port of a host;
+* every API call (except fetching a result by its unguessable id) must carry
+  the token in a custom header, which a cross-origin page can neither read nor
+  send without a CORS preflight that is never answered.
 
 Originals are never written to disk: they arrive in the request body, are
 cleaned in memory, and only the verified clean output is kept, in a private
@@ -21,6 +23,7 @@ temporary directory that is removed when the server stops.
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import hmac
 import io
@@ -29,6 +32,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import sys
 import tempfile
 import threading
@@ -50,6 +54,8 @@ DEFAULT_PORT = 8765
 MAX_UPLOAD = 1 << 30  # 1 GiB per request
 MAX_JSON = 1 << 20
 MAX_NAME = 180
+DEEP_SCAN_MAX_PIXELS = 40_000_000  # the pixel scan needs about 100 bytes per pixel
+PREVIEW_MAX_PIXELS = 100_000_000
 DEFAULT_SUFFIX = ".clean"
 LOSSY = {"JPEG", "WEBP", "AVIF", "HEIF"}
 STATIC_FILES = {
@@ -140,8 +146,6 @@ def reveals(findings: list[Finding]) -> list[dict]:
     for f in findings:
         if f.label == "GPS location":
             add("location", "Location", f.detail)
-        elif f.label == "GPS data":
-            add("location", "Location data", f.detail)
     for f in findings:
         if f.category != METADATA or "=" not in f.detail:
             continue
@@ -165,6 +169,24 @@ def reveals(findings: list[Finding]) -> list[dict]:
             add("preview", "Hidden image", f.label)
         elif f.label == "Comment":
             add("comment", "Comment", f.detail.strip("'"))
+        elif f.label == "GPS data":
+            add("gps", "GPS tags", f.detail)
+        elif f.label in ("XMP", "Extended XMP") and re.search(r"\b(GPS|city|location)\b", f.detail):
+            add("location", "Location", "recorded in the XMP data")
+    order = (
+        "location",
+        "camera",
+        "time",
+        "person",
+        "serial",
+        "preview",
+        "lens",
+        "software",
+        "trailer",
+        "comment",
+        "gps",
+    )
+    out.sort(key=lambda r: order.index(r["key"]) if r["key"] in order else len(order))
     return out
 
 
@@ -231,17 +253,38 @@ class Session:
     """Everything one server run holds: its secrets and the cleaned outputs."""
 
     def __init__(self, workdir: str | None = None):
-        self.token = secrets.token_urlsafe(32)
-        self.cookie_value = secrets.token_urlsafe(32)
-        self.dir = Path(workdir or tempfile.mkdtemp(prefix="imgstrip-web-"))
+        self.token = secrets.token_urlsafe(32)  # API token: never part of a URL
+        self.launch_key = secrets.token_urlsafe(32)  # single-use, in the printed link
+        self.on_launch = None  # called with the next launch key after each use
+        self.dir = Path(workdir or tempfile.mkdtemp(prefix=TEMP_PREFIX))
         self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.dir, 0o700)
+        (self.dir / PID_FILE).write_text(str(os.getpid()))
         self._items: dict[str, Stored] = {}
         self._lock = threading.Lock()
+        self._last_zip: str | None = None
         self.jobs = threading.BoundedSemaphore(max(1, min(4, (os.cpu_count() or 2) // 2)))
 
+    def redeem(self, key: str) -> str | None:
+        """Trade the current launch key for the API token, once; then issue the next key."""
+        with self._lock:
+            if not _same(key, self.launch_key):
+                return None
+            self.launch_key = secrets.token_urlsafe(32)
+            nxt = self.launch_key
+        if self.on_launch:
+            self.on_launch(nxt)
+        return self.token
+
+    def replace_zip(self, rid: str) -> None:
+        """Keep one ZIP at a time: each one is a full copy of the batch."""
+        with self._lock:
+            old, self._last_zip = self._last_zip, rid
+        if old:
+            self.delete(old)
+
     def put(self, data: bytes, filename: str, mime: str) -> str:
-        rid = secrets.token_urlsafe(18)
+        rid = secrets.token_urlsafe(24)
         path = self.dir / rid
         with open(path, "xb") as fh:
             fh.write(data)
@@ -269,6 +312,34 @@ class Session:
     def close(self) -> None:
         self.reset()
         shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def _same(given: str | None, secret: str) -> bool:
+    """Constant-time comparison that also copes with non-ASCII input."""
+    return hmac.compare_digest((given or "").encode("utf-8", "surrogateescape"), secret.encode())
+
+
+TEMP_PREFIX = "imgstrip-web-"
+PID_FILE = "owner.pid"
+
+
+def sweep_stale_sessions() -> None:
+    """Remove work folders left by runs that were killed before they could clean up."""
+    if not hasattr(os, "getuid"):
+        return
+    for d in Path(tempfile.gettempdir()).glob(TEMP_PREFIX + "*"):
+        try:
+            if not d.is_dir() or d.is_symlink() or d.stat().st_uid != os.getuid():
+                continue
+            pid = int((d / PID_FILE).read_text().strip())
+        except (OSError, ValueError):
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass  # alive (or not ours to judge)
 
 
 def default_folder() -> str:
@@ -336,20 +407,47 @@ def parse_options(raw: dict) -> Options:
 # --------------------------------------------------------------------------
 
 
+def _probe(data: bytes) -> tuple[str | None, tuple[int, int] | None]:
+    """Format and size from the image header alone, for containers the inspector does not parse."""
+    from ..core import _pillow_guard, canonical_format, open_image
+
+    try:
+        with _pillow_guard([]):
+            im = open_image(data)
+            return canonical_format(im.format), im.size
+    except Exception:  # noqa: BLE001 - anything unreadable is simply "not an image we can decode"
+        return None, None
+
+
 def inspect_payload(data: bytes, deep: bool) -> dict:
+    from ..core import camera_raw_kind
+
     report = inspect_bytes(data)
     findings = list(report.findings)
     notes: list[str] = []
-    if deep:
-        from ..analysis import analyze_pixels
-
-        try:
-            findings += analyze_pixels(data)
-        except StripError as exc:
-            notes.append(f"Pixel scan failed: {exc}")
     size = report.info.get("size")
+    decodable = report.format
+    raw = camera_raw_kind(data)
+    if report.format is None:
+        decodable, size = _probe(data)
+    if deep and decodable and not raw:
+        if size and size[0] * size[1] > DEEP_SCAN_MAX_PIXELS:
+            notes.append(
+                f"The pixels were not scanned: the image is over {DEEP_SCAN_MAX_PIXELS // 1_000_000} megapixels."
+            )
+        else:
+            from ..analysis import analyze_pixels
+
+            try:
+                findings += analyze_pixels(data)
+            except StripError as exc:
+                notes.append(f"The pixel scan failed: {exc}")
+            except MemoryError:
+                notes.append("The pixel scan ran out of memory.")
     return {
         "format": report.format,
+        "decodable": decodable,
+        "raw": raw,
         "size": list(size) if size else None,
         "bytes": len(data),
         "deep": deep,
@@ -367,14 +465,23 @@ def preview_bytes(data: bytes, edge: int = 160) -> bytes:
 
     from ..core import _pillow_guard, fresh, open_image
 
+    import numpy as np
+
     caught: list[str] = []
     with _pillow_guard(caught):
         im = open_image(data)
+        if im.size[0] * im.size[1] > PREVIEW_MAX_PIXELS:
+            raise StripError("too large for a preview")
         im.draft("RGB", (edge * 2, edge * 2))  # JPEG only: decode at reduced scale
         try:
             im = ImageOps.exif_transpose(im)
         except Exception:  # noqa: BLE001 - a broken orientation tag must not block a preview
             pass
+        if im.mode.startswith("I") or im.mode == "F":  # 16/32-bit and float: Pillow would clip, not scale
+            arr = np.asarray(im, dtype=np.float64)
+            lo, hi = float(arr.min()), float(arr.max())
+            arr = (arr - lo) * (255.0 / (hi - lo)) if hi > lo else np.zeros_like(arr)
+            im = Image.fromarray(arr.clip(0, 255).astype(np.uint8), "L")
         im = im.convert("RGBA" if "A" in im.getbands() or im.mode == "P" else "RGB")
         im.thumbnail((edge, edge), Image.Resampling.LANCZOS)
         out = io.BytesIO()
@@ -403,6 +510,7 @@ def clean_payload(session: Session, data: bytes, filename: str, options: Options
         "frames": result.frames,
         "pixels_exact": result.pixels_exact,
         "lossy": result.output_format in LOSSY and not result.pixels_exact,
+        "scrubbed": options.scrub_lsb,
         "bytes_in": len(data),
         "bytes_out": len(result.data),
         "sha256": hashlib.sha256(result.data).hexdigest(),
@@ -428,6 +536,7 @@ def zip_results(session: Session, ids: list[str]) -> dict:
     data = buf.getvalue()
     name = "imgstrip-clean.zip"
     rid = session.put(data, name, "application/zip")
+    session.replace_zip(rid)
     return {"id": rid, "filename": name, "bytes": len(data)}
 
 
@@ -443,10 +552,17 @@ def write_new(dest: Path, data: bytes) -> None:
         tmp.unlink(missing_ok=True)
         raise
     except OSError:  # file systems without hard links (FAT, exFAT, some network shares)
-        if dest.exists():
+        try:  # claim the name exclusively, then swap our own placeholder for the content
+            os.close(os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+        except FileExistsError:
             tmp.unlink(missing_ok=True)
-            raise FileExistsError(str(dest)) from None
-        os.replace(tmp, dest)
+            raise
+        try:
+            os.replace(tmp, dest)
+        except OSError:
+            dest.unlink(missing_ok=True)
+            tmp.unlink(missing_ok=True)
+            raise
     else:
         tmp.unlink(missing_ok=True)
 
@@ -516,6 +632,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        if status >= 400:
+            # An error may leave part of the request body unread; never parse it as a new request.
+            self.close_connection = True
+            self.send_header("Connection", "close")
         self._security_headers()
         for k, v in (extra or {}).items():
             self.send_header(k, v)
@@ -542,21 +662,8 @@ class Handler(BaseHTTPRequestHandler):
         site = self.headers.get("Sec-Fetch-Site")
         return site in (None, "same-origin", "none")
 
-    def _cookie_name(self) -> str:
-        return f"imgstrip_{self.port}"
-
-    def _has_cookie(self) -> bool:
-        from http.cookies import CookieError, SimpleCookie
-
-        try:
-            jar = SimpleCookie(self.headers.get("Cookie") or "")
-        except CookieError:
-            return False
-        morsel = jar.get(self._cookie_name())
-        return morsel is not None and hmac.compare_digest(morsel.value, self.session.cookie_value)
-
     def _token_ok(self) -> bool:
-        return hmac.compare_digest(self.headers.get("X-Imgstrip-Token") or "", self.session.token)
+        return _same(self.headers.get("X-Imgstrip-Token"), self.session.token)
 
     def _body(self, limit: int) -> bytes:
         if self.headers.get("Transfer-Encoding"):
@@ -568,7 +675,6 @@ class Handler(BaseHTTPRequestHandler):
         if length < 0:
             raise ApiError(400, "Bad Content-Length.")
         if length > limit:
-            self.close_connection = True
             raise ApiError(413, f"Too large: the limit is {limit >> 20} MB per file.")
         data = bytearray()
         while len(data) < length:
@@ -593,6 +699,12 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "No cleaned files were selected.")
         return ids
 
+    def _upload(self) -> bytes:
+        data = self._body(MAX_UPLOAD)
+        if not data:
+            raise ApiError(400, "The file is empty.")
+        return data
+
     # ---- routing ----------------------------------------------------------
 
     def do_HEAD(self):  # noqa: N802
@@ -604,18 +716,22 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         try:
             if url.path == "/":
-                return self._index(url)
+                return self._index()
             if url.path.startswith("/static/"):
                 return self._static(url.path[len("/static/") :])
-            if not self._has_cookie():
-                raise ApiError(403, "Open imgstrip from the link printed in the terminal.")
-            if url.path == "/api/info":
-                return self._json(200, self._info())
             if url.path.startswith("/api/result/"):
+                # Result ids are unguessable capabilities handed only to the page, so a plain
+                # link can download them; everything else needs the token.
                 return self._result(url.path[len("/api/result/") :])
+            if url.path == "/api/info":
+                if not (self._origin_ok() and self._token_ok()):
+                    raise ApiError(403, "This request did not come from the imgstrip page.")
+                return self._json(200, self._info())
             raise ApiError(404, "Not found.")
         except ApiError as exc:
             self._error(exc.status, exc.message)
+        except Exception as exc:  # noqa: BLE001 - one bad request must never take the server down
+            self._error(500, f"Internal error ({type(exc).__name__}).")
 
     def do_POST(self):  # noqa: N802
         self._api_write()
@@ -628,11 +744,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(421, b"Misdirected request", "text/plain; charset=utf-8")
         url = urllib.parse.urlsplit(self.path)
         query = urllib.parse.parse_qs(url.query)
+        route = (self.command, url.path)
         try:
-            if not (self._origin_ok() and self._token_ok() and self._has_cookie()):
-                self.close_connection = True
+            if not self._origin_ok():
                 raise ApiError(403, "This request did not come from the imgstrip page.")
-            route = (self.command, url.path)
+            if route == ("POST", "/api/session"):
+                token = self.session.redeem(str(self._json_body().get("key") or ""))
+                if token is None:
+                    raise ApiError(403, "This link has already been used.")
+                return self._json(200, {"token": token})
+            if not self._token_ok():
+                raise ApiError(403, "This request did not come from the imgstrip page.")
             if route == ("POST", "/api/inspect"):
                 data = self._upload()
                 deep = query.get("deep", ["0"])[0] == "1"
@@ -672,37 +794,20 @@ class Handler(BaseHTTPRequestHandler):
         except ApiError as exc:
             self._error(exc.status, exc.message)
         except Exception as exc:  # noqa: BLE001 - one bad file must never take the server down
-            self._error(500, f"Internal error: {type(exc).__name__}: {exc}")
-
-    def _upload(self) -> bytes:
-        data = self._body(MAX_UPLOAD)
-        if not data:
-            raise ApiError(400, "The file is empty.")
-        return data
+            self._error(500, f"Internal error ({type(exc).__name__}: {exc}).")
 
     # ---- pages ------------------------------------------------------------
 
-    def _index(self, url) -> None:
-        key = urllib.parse.parse_qs(url.query).get("k", [""])[0]
-        if key:
-            if not hmac.compare_digest(key, self.session.token):
-                return self._send(403, _gate_page("This link has expired."), "text/html; charset=utf-8")
-            cookie = f"{self._cookie_name()}={self.session.cookie_value}; Path=/; HttpOnly; SameSite=Strict"
-            return self._send(303, b"", "text/plain", {"Location": "/", "Set-Cookie": cookie})
-        if not self._has_cookie():
-            return self._send(
-                403, _gate_page("Open imgstrip from the link printed in the terminal."), "text/html; charset=utf-8"
-            )
-        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-        html = html.replace("{{TOKEN}}", self.session.token).replace("{{VERSION}}", __version__)
+    def _index(self) -> None:
+        # A static shell: it holds no secret, the launch key travels in the URL fragment.
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8").replace("{{VERSION}}", __version__)
         self._send(200, html.encode(), "text/html; charset=utf-8")
 
     def _static(self, rel: str) -> None:
         ctype = STATIC_FILES.get(rel)
         if ctype is None:
             raise ApiError(404, "Not found.")
-        body = (STATIC_DIR / rel).read_bytes()
-        self._send(200, body, ctype)
+        self._send(200, (STATIC_DIR / rel).read_bytes(), ctype)
 
     def _info(self) -> dict:
         return {
@@ -725,15 +830,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, body, item.mime, {"Content-Disposition": disposition})
 
 
-def _gate_page(message: str) -> bytes:
-    return (
-        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
-        "<title>imgstrip</title><link rel=stylesheet href=/static/app.css>"
-        f"<main class=gate><p class=gate-title>imgstrip</p><p>{message}</p>"
-        "<p class=gate-hint>Start it with <code>imgstrip-web</code>; it opens this page for you.</p></main>"
-    ).encode()
-
-
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -752,13 +848,17 @@ def make_server(port: int = DEFAULT_PORT, session: Session | None = None) -> tup
     return httpd, session
 
 
-def launch_url(httpd: Server, session: Session) -> str:
-    return f"http://127.0.0.1:{httpd.server_address[1]}/?k={session.token}"
+def launch_url(httpd: Server, key: str) -> str:
+    return f"http://127.0.0.1:{httpd.server_address[1]}/#k={key}"
 
 
 # --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
+
+
+def _stop_on_signal(signum, frame):  # noqa: ARG001 - signal handler signature
+    raise KeyboardInterrupt
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -767,16 +867,34 @@ def main(argv: list[str] | None = None) -> int:
         description="Open imgstrip in your browser. Runs only on this computer; images never leave it.",
     )
     p.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"port on 127.0.0.1 (default {DEFAULT_PORT})")
-    p.add_argument("--no-browser", action="store_true", help="print the link instead of opening a browser")
+    p.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="print the link instead of opening a browser (recommended on computers shared with other users)",
+    )
     p.add_argument("--version", action="version", version=f"imgstrip {__version__}")
     args = p.parse_args(argv)
     if not 0 <= args.port <= 65535:
         p.error("--port must be between 0 and 65535")
+    sweep_stale_sessions()
     httpd, session = make_server(args.port)
-    url = launch_url(httpd, session)
+    atexit.register(session.close)
+    # Closing the terminal (SIGHUP) or `kill` (SIGTERM) must still delete the cleaned files.
+    for name in ("SIGTERM", "SIGHUP"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), _stop_on_signal)
+
+    def on_launch(key: str) -> None:
+        print(
+            f"Opened in a browser tab. Each link works once; to open another tab use:\n  {launch_url(httpd, key)}",
+            flush=True,
+        )
+
+    session.on_launch = on_launch
+    url = launch_url(httpd, session.launch_key)
     print(f"imgstrip {__version__} is running on this computer only.", flush=True)
     print(f"  {url}", flush=True)
-    print("Keep this link private: it opens the app. Press Ctrl+C to stop.", flush=True)
+    print("The link opens the app once. Press Ctrl+C to stop; cleaned files are deleted then.", flush=True)
     if not args.no_browser:
         threading.Timer(0.3, webbrowser.open, args=(url,)).start()
     try:
