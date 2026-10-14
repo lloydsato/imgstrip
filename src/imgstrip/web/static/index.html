@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="imgstrip-token" content="{{TOKEN}}">
+<title>imgstrip</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/static/fonts/schibsted-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9.5" rx="2.2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7.5h9M18 7.5h2M4 16.5h3M11 16.5h9"/><circle cx="15.5" cy="7.5" r="2.25"/><circle cx="8.5" cy="16.5" r="2.25"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4.5v10.5M7.5 11l4.5 4.5 4.5-4.5M5.5 19.5h13"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5.5 12.5l4 4 9-9"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4.25M12 17.1v.01"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9.5" cy="10" r="1.5"/><path d="M5 17.5l4.5-4.5 3 3 2.5-2.5 4 4"/></symbol>
+</svg>
+
+<main class="stage">
+  <section class="window" id="window" aria-labelledby="appname">
+    <header class="bar">
+      <div class="brand">
+        <span class="mark" id="mark" aria-hidden="true"></span>
+        <h1 class="wordmark" id="appname">imgstrip</h1>
+      </div>
+      <div class="bar-end">
+        <span class="local" title="imgstrip runs on this computer. Images are never uploaded anywhere.">
+          <svg class="icon"><use href="#i-lock"/></svg><span class="local-text">Local only</span>
+        </span>
+        <button class="btn btn-quiet" id="optionsToggle" type="button" aria-expanded="false" aria-controls="options">
+          <svg class="icon"><use href="#i-sliders"/></svg><span>Options</span>
+        </button>
+      </div>
+    </header>
+
+    <div class="reveal" id="options" data-open="false">
+      <div class="reveal-inner">
+        <form class="options" id="optionsForm" autocomplete="off">
+          <div class="field">
+            <label for="opt-format">Save as</label>
+            <select id="opt-format" name="format">
+              <option value="">Same as original</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="opt-quality">Quality <span class="hint">for lossy formats</span></label>
+            <select id="opt-quality" name="quality">
+              <option value="">Default</option>
+              <option value="100">100</option>
+              <option value="95">95</option>
+              <option value="90">90</option>
+              <option value="85">85</option>
+              <option value="80">80</option>
+              <option value="75">75</option>
+              <option value="70">70</option>
+              <option value="60">60</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="opt-icc">Colour profile</label>
+            <select id="opt-icc" name="icc">
+              <option value="convert">Convert colours to sRGB</option>
+              <option value="sanitize">Keep colours, embed a rebuilt anonymous profile</option>
+              <option value="drop">Drop the profile</option>
+            </select>
+          </div>
+          <div class="switches">
+            <label class="switch">
+              <input type="checkbox" role="switch" name="deep">
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-text"><span>Deep scan</span><span class="hint">Also search the pixels for steganography and hidden colour. Slower.</span></span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" role="switch" name="jpeg_lossless">
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-text"><span>Keep JPEG data bit-exact</span><span class="hint">No re-encoding. Keeps DCT-domain content and can't rotate pixels.</span></span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" role="switch" name="scrub_lsb">
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-text"><span>Scrub least-significant bits</span><span class="hint">Destroys LSB steganography. Changes pixels by at most 1.</span></span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" role="switch" name="auto_orient" checked>
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-text"><span>Apply orientation</span><span class="hint">Rotate the pixels so the photo stays upright without its tag.</span></span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" role="switch" name="optimize">
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-text"><span>Smaller PNGs</span><span class="hint">Try extra compression. Slower.</span></span>
+            </label>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="body" id="body">
+      <div class="well" id="well">
+        <span class="well-mark" id="wellMark" aria-hidden="true"></span>
+        <p class="well-title">Drop images to scan</p>
+        <p class="well-sub">See what each file gives away. Nothing changes until you clean, and nothing leaves this computer.</p>
+        <button class="btn btn-secondary" id="choose" type="button">Choose images</button>
+        <p class="well-formats">JPEG, PNG, HEIC, WebP, AVIF, TIFF, GIF, BMP and more. You can also paste.</p>
+      </div>
+
+      <div class="list" id="list" hidden>
+        <div class="list-head">
+          <p class="list-count" id="listCount"></p>
+          <div class="list-tools">
+            <button class="btn btn-quiet" id="add" type="button"><svg class="icon"><use href="#i-plus"/></svg><span>Add</span></button>
+            <button class="btn btn-quiet" id="clear" type="button"><span>Clear</span></button>
+          </div>
+        </div>
+        <ul class="files" id="files"></ul>
+      </div>
+    </div>
+
+    <footer class="foot" id="foot" hidden>
+      <div class="foot-row">
+        <p class="foot-summary" id="summary"></p>
+        <div class="foot-actions">
+          <button class="btn btn-secondary" id="saveToggle" type="button" aria-expanded="false" aria-controls="save"><svg class="icon"><use href="#i-folder"/></svg><span>Save to folder</span></button>
+          <button class="btn btn-secondary" id="downloadSome" type="button"><svg class="icon"><use href="#i-download"/></svg><span></span></button>
+          <button class="btn btn-plate" id="primary" type="button"><span></span></button>
+        </div>
+      </div>
+      <div class="reveal" id="save" data-open="false">
+        <div class="reveal-inner">
+          <form class="save" id="saveForm" autocomplete="off">
+            <label for="folder">Save into</label>
+            <div class="save-field">
+              <input id="folder" name="folder" type="text" spellcheck="false" autocapitalize="off" placeholder="~/Pictures/imgstrip">
+              <button class="btn btn-plate btn-small" type="submit">Save</button>
+            </div>
+            <p class="save-hint">The folder is created if needed. Existing files are never replaced.</p>
+          </form>
+        </div>
+      </div>
+      <p class="foot-note" id="footNote" hidden></p>
+    </footer>
+  </section>
+
+  <div class="colophon">
+    <span>imgstrip {{VERSION}}</span>
+    <span aria-hidden="true">·</span>
+    <button class="link" id="limitsToggle" type="button" aria-expanded="false" aria-controls="limits">What cleaning can't do</button>
+  </div>
+  <div class="reveal limits-wrap" id="limits" data-open="false">
+    <div class="reveal-inner">
+      <ul class="limits">
+        <li><strong>The picture itself stays.</strong> Faces, reflections, street signs and landmarks can still identify people and places. imgstrip never alters what the image shows.</li>
+        <li><strong>Robust watermarks can survive.</strong> Marks built to outlast re-encoding (Digimarc, SynthID and similar) live in the pixels. imgstrip removes C2PA manifests, not content watermarks.</li>
+        <li><strong>File names can leak.</strong> Names like IMG_20240517_133700 carry a date. Cleaned files keep the original name plus <code>.clean</code>; rename them before sharing if that matters.</li>
+        <li><strong>Lossy formats are re-encoded.</strong> JPEG, WebP, AVIF and HEIF lose a little quality. <em>Keep JPEG data bit-exact</em> avoids that for JPEGs, but keeps any data hidden in the JPEG coefficients.</li>
+        <li><strong>Originals stay as they are.</strong> imgstrip never modifies or deletes them; securely erasing old copies is up to you.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="drop-veil" id="veil" aria-hidden="true"><p>Drop to scan</p></div>
+  <input type="file" id="picker" multiple accept="image/*,.heic,.heif,.avif,.tif,.tiff,.psd,.tga,.qoi,.jp2,.j2k,.dds,.icns,.pcx,.sgi,.ppm,.pgm,.pbm,.pnm" hidden>
+  <p class="sr-only" id="announce" aria-live="polite"></p>
+</main>
+</body>
+</html>

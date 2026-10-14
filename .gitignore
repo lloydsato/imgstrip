@@ -5,3 +5,10 @@ build/
 dist/
 .pytest_cache/
 .venv/
+
+# impeccable design-tool scratch (review captures, decision state, local config)
+.impeccable/review/
+.impeccable/questions/
+.impeccable/mocks/
+.impeccable/build/
+.impeccable/config.local.json
