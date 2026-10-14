@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "imgstrip"
+version = "1.0.0"
+description = "Remove all metadata and hidden data from images by rebuilding them from their pixels, with fail-closed verification."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "Pillow>=11.2",
+    "numpy>=1.24",
+    "pillow-heif>=0.18",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+imgstrip = "imgstrip.cli:entry"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = ["E501", "B904", "E731", "B023"]
