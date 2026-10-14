@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
-<meta name="imgstrip-token" content="{{TOKEN}}">
 <title>imgstrip</title>
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="preload" href="/static/fonts/schibsted-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
@@ -24,6 +23,7 @@
   <symbol id="i-check" viewBox="0 0 24 24"><path d="M5.5 12.5l4 4 9-9"/></symbol>
   <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4.25M12 17.1v.01"/></symbol>
   <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8v.01"/></symbol>
   <symbol id="i-image" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9.5" cy="10" r="1.5"/><path d="M5 17.5l4.5-4.5 3 3 2.5-2.5 4 4"/></symbol>
 </svg>
 
@@ -36,10 +36,10 @@
       </div>
       <div class="bar-end">
         <span class="local" title="imgstrip runs on this computer. Images are never uploaded anywhere.">
-          <svg class="icon"><use href="#i-lock"/></svg><span class="local-text">Local only</span>
+          <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-lock"/></svg><span class="local-text">Local only</span>
         </span>
         <button class="btn btn-quiet" id="optionsToggle" type="button" aria-expanded="false" aria-controls="options">
-          <svg class="icon"><use href="#i-sliders"/></svg><span>Options</span>
+          <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-sliders"/></svg><span>Options</span>
         </button>
       </div>
     </header>
@@ -49,13 +49,13 @@
         <form class="options" id="optionsForm" autocomplete="off">
           <div class="field">
             <label for="opt-format">Save as</label>
-            <select id="opt-format" name="format">
+            <span class="select"><select id="opt-format" name="format">
               <option value="">Same as original</option>
-            </select>
+            </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
           </div>
           <div class="field">
             <label for="opt-quality">Quality <span class="hint">for lossy formats</span></label>
-            <select id="opt-quality" name="quality">
+            <span class="select"><select id="opt-quality" name="quality">
               <option value="">Default</option>
               <option value="100">100</option>
               <option value="95">95</option>
@@ -65,15 +65,15 @@
               <option value="75">75</option>
               <option value="70">70</option>
               <option value="60">60</option>
-            </select>
+            </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
           </div>
           <div class="field">
             <label for="opt-icc">Colour profile</label>
-            <select id="opt-icc" name="icc">
+            <span class="select"><select id="opt-icc" name="icc">
               <option value="convert">Convert colours to sRGB</option>
               <option value="sanitize">Keep colours, embed a rebuilt anonymous profile</option>
               <option value="drop">Drop the profile</option>
-            </select>
+            </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
           </div>
           <div class="switches">
             <label class="switch">
@@ -84,7 +84,7 @@
             <label class="switch">
               <input type="checkbox" role="switch" name="jpeg_lossless">
               <span class="switch-track" aria-hidden="true"></span>
-              <span class="switch-text"><span>Keep JPEG data bit-exact</span><span class="hint">No re-encoding. Keeps DCT-domain content and can't rotate pixels.</span></span>
+              <span class="switch-text"><span>Keep JPEG data bit-exact</span><span class="hint">No re-encoding. Keeps anything hidden in the compressed image data, and can't rotate pixels.</span></span>
             </label>
             <label class="switch">
               <input type="checkbox" role="switch" name="scrub_lsb">
@@ -109,17 +109,23 @@
     <div class="body" id="body">
       <div class="well" id="well">
         <span class="well-mark" id="wellMark" aria-hidden="true"></span>
-        <p class="well-title">Drop images to scan</p>
+        <h2 class="well-title">Drop images to scan</h2>
         <p class="well-sub">See what each file gives away. Nothing changes until you clean, and nothing leaves this computer.</p>
         <button class="btn btn-secondary" id="choose" type="button">Choose images</button>
         <p class="well-formats">JPEG, PNG, HEIC, WebP, AVIF, TIFF, GIF, BMP and more. You can also paste.</p>
       </div>
 
+      <div class="well" id="gate" hidden>
+        <span class="well-mark" id="gateMark" aria-hidden="true"></span>
+        <h2 class="well-title" id="gateTitle"></h2>
+        <p class="well-sub" id="gateText"></p>
+      </div>
+
       <div class="list" id="list" hidden>
         <div class="list-head">
-          <p class="list-count" id="listCount"></p>
+          <h2 class="list-count" id="listCount"></h2>
           <div class="list-tools">
-            <button class="btn btn-quiet" id="add" type="button"><svg class="icon"><use href="#i-plus"/></svg><span>Add</span></button>
+            <button class="btn btn-quiet" id="add" type="button"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"/></svg><span>Add</span></button>
             <button class="btn btn-quiet" id="clear" type="button"><span>Clear</span></button>
           </div>
         </div>
@@ -131,8 +137,8 @@
       <div class="foot-row">
         <p class="foot-summary" id="summary"></p>
         <div class="foot-actions">
-          <button class="btn btn-secondary" id="saveToggle" type="button" aria-expanded="false" aria-controls="save"><svg class="icon"><use href="#i-folder"/></svg><span>Save to folder</span></button>
-          <button class="btn btn-secondary" id="downloadSome" type="button"><svg class="icon"><use href="#i-download"/></svg><span></span></button>
+          <button class="btn btn-secondary" id="saveToggle" type="button" aria-expanded="false" aria-controls="save"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-folder"/></svg><span>Save to folder</span></button>
+          <button class="btn btn-secondary" id="downloadSome" type="button"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-download"/></svg><span></span></button>
           <button class="btn btn-plate" id="primary" type="button"><span></span></button>
         </div>
       </div>
@@ -142,7 +148,7 @@
             <label for="folder">Save into</label>
             <div class="save-field">
               <input id="folder" name="folder" type="text" spellcheck="false" autocapitalize="off" placeholder="~/Pictures/imgstrip">
-              <button class="btn btn-plate btn-small" type="submit">Save</button>
+              <button class="btn btn-plate btn-small" id="saveSubmit" type="submit">Save</button>
             </div>
             <p class="save-hint">The folder is created if needed. Existing files are never replaced.</p>
           </form>
@@ -163,6 +169,7 @@
         <li><strong>The picture itself stays.</strong> Faces, reflections, street signs and landmarks can still identify people and places. imgstrip never alters what the image shows.</li>
         <li><strong>Robust watermarks can survive.</strong> Marks built to outlast re-encoding (Digimarc, SynthID and similar) live in the pixels. imgstrip removes C2PA manifests, not content watermarks.</li>
         <li><strong>File names can leak.</strong> Names like IMG_20240517_133700 carry a date. Cleaned files keep the original name plus <code>.clean</code>; rename them before sharing if that matters.</li>
+        <li><strong>Data hidden in the pixels can survive.</strong> Lossless cleaning keeps every pixel value, so a steganography payload stored in them stays unless <em>Scrub least-significant bits</em> is on. <em>Deep scan</em> looks for one first.</li>
         <li><strong>Lossy formats are re-encoded.</strong> JPEG, WebP, AVIF and HEIF lose a little quality. <em>Keep JPEG data bit-exact</em> avoids that for JPEGs, but keeps any data hidden in the JPEG coefficients.</li>
         <li><strong>Originals stay as they are.</strong> imgstrip never modifies or deletes them; securely erasing old copies is up to you.</li>
       </ul>
