@@ -19,9 +19,13 @@ test = ["pytest>=7"]
 
 [project.scripts]
 imgstrip = "imgstrip.cli:entry"
+imgstrip-web = "imgstrip.web.server:entry"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"imgstrip.web" = ["static/*.html", "static/*.css", "static/*.js", "static/*.svg", "static/fonts/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

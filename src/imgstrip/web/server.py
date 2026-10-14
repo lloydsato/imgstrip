@@ -1,0 +1,793 @@
+"""Local web interface: a loopback-only HTTP server around the stripping engine.
+
+The server is deliberately small and built on the standard library only.  It
+binds to the loopback interface, and every request has to get past three
+gates before it reaches the engine:
+
+* the ``Host`` header must name this server's loopback address, which defeats
+  DNS-rebinding attacks from web pages the user happens to have open;
+* the page itself is only served to a browser holding this run's session
+  cookie (set by the one-time link printed in the terminal), so other local
+  users cannot drive the app;
+* every state-changing API call must carry this run's token in a custom
+  header, which a cross-origin page can neither read nor send without a CORS
+  preflight that is never answered.
+
+Originals are never written to disk: they arrive in the request body, are
+cleaned in memory, and only the verified clean output is kept, in a private
+temporary directory that is removed when the server stops.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import hmac
+import io
+import json
+import os
+import re
+import secrets
+import shutil
+import sys
+import tempfile
+import threading
+import urllib.parse
+import webbrowser
+import zipfile
+from dataclasses import dataclass
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from .. import __version__
+from ..cli import RAW_EXTENSIONS, atomic_write, output_extension
+from ..core import EXTENSIONS, OUTPUT_FORMATS, Options, StripError, heif_available, strip_image
+from ..inspect import HIDDEN, METADATA, Finding, inspect_bytes
+
+STATIC_DIR = Path(__file__).with_name("static")
+DEFAULT_PORT = 8765
+MAX_UPLOAD = 1 << 30  # 1 GiB per request
+MAX_JSON = 1 << 20
+MAX_NAME = 180
+DEFAULT_SUFFIX = ".clean"
+LOSSY = {"JPEG", "WEBP", "AVIF", "HEIF"}
+STATIC_FILES = {
+    "app.css": "text/css; charset=utf-8",
+    "app.js": "text/javascript; charset=utf-8",
+    "favicon.svg": "image/svg+xml",
+    "fonts/schibsted-grotesk-latin.woff2": "font/woff2",
+    "fonts/schibsted-grotesk-latin-ext.woff2": "font/woff2",
+}
+CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
+    "img-src 'self' blob: data:; connect-src 'self'; base-uri 'none'; form-action 'none'; "
+    "frame-ancestors 'none'"
+)
+_ID = re.compile(r"[A-Za-z0-9_-]{16,64}")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+class ApiError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+# --------------------------------------------------------------------------
+# Plain-language summary of what a file reveals
+# --------------------------------------------------------------------------
+
+_EXIF_KEYS = (
+    "make",
+    "model",
+    "software",
+    "date",
+    "artist",
+    "host",
+    "copyright",
+    "description",
+    "taken",
+    "body serial",
+    "owner",
+    "lens",
+    "lens serial",
+    "unique id",
+    "user comment",
+)
+_EXIF_PAIR = re.compile(r"(?:^|[;,] )(" + "|".join(re.escape(k) for k in _EXIF_KEYS) + r")=")
+_EXIF_DATE = re.compile(r"(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2})")
+
+
+def _exif_fields(detail: str) -> dict[str, str]:
+    """Parse the ``key=value, key=value`` summary the inspector writes for EXIF blobs."""
+    fields: dict[str, str] = {}
+    matches = list(_EXIF_PAIR.finditer(detail))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(detail)
+        value = detail[m.end() : end]
+        if i + 1 == len(matches):
+            value = re.sub(r"(, maker notes)?( \(unparseable\))?$", "", value)
+        fields.setdefault(m.group(1), value.strip())
+    return fields
+
+
+def _pretty_date(value: str) -> str:
+    m = _EXIF_DATE.match(value)
+    if not m:
+        return value
+    try:
+        when = datetime(*(int(g) for g in m.groups()))
+    except ValueError:
+        return value
+    return f"{when.day} {when.strftime('%b %Y, %H:%M')}"
+
+
+_HIDDEN_IMAGE_WORDS = ("thumbnail", "preview", "multi-picture", "gain-map", "sub-images", "default image", "depth")
+
+
+def reveals(findings: list[Finding]) -> list[dict]:
+    """The few facts a reader cares about first: where, what camera, when, who."""
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def add(key: str, label: str, value: str) -> None:
+        if key not in seen and value:
+            seen.add(key)
+            out.append({"key": key, "label": label, "value": value})
+
+    for f in findings:
+        if f.label == "GPS location":
+            add("location", "Location", f.detail)
+        elif f.label == "GPS data":
+            add("location", "Location data", f.detail)
+    for f in findings:
+        if f.category != METADATA or "=" not in f.detail:
+            continue
+        x = _exif_fields(f.detail)
+        make, model = x.get("make", ""), x.get("model", "")
+        camera = model if make and model.lower().startswith(make.split()[0].lower()) else f"{make} {model}".strip()
+        add("camera", "Camera", camera)
+        if x.get("lens"):
+            add("lens", "Lens", x["lens"])
+        if x.get("taken") or x.get("date"):
+            add("time", "Taken" if x.get("taken") else "Date", _pretty_date(x.get("taken") or x.get("date", "")))
+        serial = ", ".join(v for v in (x.get("body serial"), x.get("lens serial"), x.get("unique id")) if v)
+        add("serial", "Serial number", serial)
+        add("person", "Name", x.get("artist") or x.get("owner") or x.get("copyright") or "")
+        add("software", "Software", x.get("software") or x.get("host") or "")
+    for f in findings:
+        label = f.label.lower()
+        if f.category == HIDDEN and (label.startswith("data after") or "trailer" in label):
+            add("trailer", "Appended data", f.detail or f.label)
+        elif f.category == HIDDEN and any(w in label for w in _HIDDEN_IMAGE_WORDS):
+            add("preview", "Hidden image", f.label)
+        elif f.label == "Comment":
+            add("comment", "Comment", f.detail.strip("'"))
+    return out
+
+
+def findings_payload(findings: list[Finding]) -> list[dict]:
+    return [{"category": f.category, "label": f.label, "detail": f.detail} for f in findings]
+
+
+# --------------------------------------------------------------------------
+# Session state
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Stored:
+    path: Path
+    filename: str
+    mime: str
+    size: int
+
+
+_MIME = {
+    "JPEG": "image/jpeg",
+    "PNG": "image/png",
+    "WEBP": "image/webp",
+    "GIF": "image/gif",
+    "TIFF": "image/tiff",
+    "BMP": "image/bmp",
+    "AVIF": "image/avif",
+    "HEIF": "image/heic",
+}
+
+
+def safe_filename(raw: str | None, fallback: str = "image") -> str:
+    """A display/download name with no directory part, control characters or reserved names."""
+    name = urllib.parse.unquote(raw or "")
+    name = _CONTROL.sub("", name).replace("\\", "/").rsplit("/", 1)[-1].strip().strip(".")
+    name = re.sub(r'[<>:"|?*]', "_", name)
+    if not name:
+        name = fallback
+    if len(name) > MAX_NAME:
+        stem, ext = os.path.splitext(name)
+        name = stem[: MAX_NAME - len(ext)] + ext
+    return name
+
+
+def clean_name(source: str, fmt: str) -> str:
+    stem = Path(source).stem or "image"
+    if stem.endswith(DEFAULT_SUFFIX):
+        stem = stem[: -len(DEFAULT_SUFFIX)]
+    return stem + DEFAULT_SUFFIX + output_extension(source, fmt)
+
+
+def unique_name(name: str, taken: set[str]) -> str:
+    stem, ext = os.path.splitext(name)
+    candidate, n = name, 2
+    while candidate.lower() in taken:
+        candidate = f"{stem} ({n}){ext}"
+        n += 1
+    taken.add(candidate.lower())
+    return candidate
+
+
+class Session:
+    """Everything one server run holds: its secrets and the cleaned outputs."""
+
+    def __init__(self, workdir: str | None = None):
+        self.token = secrets.token_urlsafe(32)
+        self.cookie_value = secrets.token_urlsafe(32)
+        self.dir = Path(workdir or tempfile.mkdtemp(prefix="imgstrip-web-"))
+        self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.dir, 0o700)
+        self._items: dict[str, Stored] = {}
+        self._lock = threading.Lock()
+        self.jobs = threading.BoundedSemaphore(max(1, min(4, (os.cpu_count() or 2) // 2)))
+
+    def put(self, data: bytes, filename: str, mime: str) -> str:
+        rid = secrets.token_urlsafe(18)
+        path = self.dir / rid
+        with open(path, "xb") as fh:
+            fh.write(data)
+        with self._lock:
+            self._items[rid] = Stored(path, filename, mime, len(data))
+        return rid
+
+    def get(self, rid: str) -> Stored | None:
+        with self._lock:
+            return self._items.get(rid)
+
+    def delete(self, rid: str) -> bool:
+        with self._lock:
+            item = self._items.pop(rid, None)
+        if item:
+            item.path.unlink(missing_ok=True)
+        return item is not None
+
+    def reset(self) -> None:
+        with self._lock:
+            items, self._items = list(self._items.values()), {}
+        for item in items:
+            item.path.unlink(missing_ok=True)
+
+    def close(self) -> None:
+        self.reset()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def default_folder() -> str:
+    home = Path.home()
+    pictures = home / "Pictures"
+    base = pictures if pictures.is_dir() else home
+    return str(base / "imgstrip")
+
+
+def display_path(path: str) -> str:
+    home = str(Path.home())
+    if path == home or path.startswith(home + os.sep):
+        return "~" + path[len(home) :]
+    return path
+
+
+def available_formats() -> list[str]:
+    from PIL import features
+
+    formats = []
+    for fmt in OUTPUT_FORMATS:
+        if fmt == "HEIF" and not heif_available():
+            continue
+        if fmt == "AVIF" and not features.check("avif"):
+            continue
+        formats.append(fmt)
+    return formats
+
+
+def parse_options(raw: dict) -> Options:
+    if not isinstance(raw, dict):
+        raise ApiError(400, "options must be an object")
+    fmt = raw.get("format") or None
+    if fmt is not None:
+        fmt = {"JPG": "JPEG", "TIF": "TIFF", "HEIC": "HEIF"}.get(str(fmt).upper(), str(fmt).upper())
+        if fmt not in available_formats():
+            raise ApiError(400, f"output format {fmt} is not available")
+    quality = raw.get("quality")
+    if quality is not None:
+        if not isinstance(quality, int) or isinstance(quality, bool) or not 1 <= quality <= 100:
+            raise ApiError(400, "quality must be a whole number from 1 to 100")
+    icc = raw.get("icc", "convert")
+    if icc not in ("convert", "sanitize", "drop"):
+        raise ApiError(400, "colour profile mode must be convert, sanitize or drop")
+
+    def flag(name: str, default: bool) -> bool:
+        value = raw.get(name, default)
+        if not isinstance(value, bool):
+            raise ApiError(400, f"{name} must be true or false")
+        return value
+
+    return Options(
+        format=fmt,
+        quality=quality,
+        jpeg_lossless=flag("jpeg_lossless", False),
+        icc=icc,
+        auto_orient=flag("auto_orient", True),
+        scrub_lsb=flag("scrub_lsb", False),
+        optimize=flag("optimize", False),
+    )
+
+
+# --------------------------------------------------------------------------
+# Work
+# --------------------------------------------------------------------------
+
+
+def inspect_payload(data: bytes, deep: bool) -> dict:
+    report = inspect_bytes(data)
+    findings = list(report.findings)
+    notes: list[str] = []
+    if deep:
+        from ..analysis import analyze_pixels
+
+        try:
+            findings += analyze_pixels(data)
+        except StripError as exc:
+            notes.append(f"Pixel scan failed: {exc}")
+    size = report.info.get("size")
+    return {
+        "format": report.format,
+        "size": list(size) if size else None,
+        "bytes": len(data),
+        "deep": deep,
+        "clean": not findings and report.error is None,
+        "error": report.error,
+        "findings": findings_payload(findings),
+        "reveals": reveals(findings),
+        "notes": notes,
+    }
+
+
+def preview_bytes(data: bytes, edge: int = 160) -> bytes:
+    """A small PNG built from pixels only, for formats the browser cannot show."""
+    from PIL import Image, ImageOps
+
+    from ..core import _pillow_guard, fresh, open_image
+
+    caught: list[str] = []
+    with _pillow_guard(caught):
+        im = open_image(data)
+        im.draft("RGB", (edge * 2, edge * 2))  # JPEG only: decode at reduced scale
+        try:
+            im = ImageOps.exif_transpose(im)
+        except Exception:  # noqa: BLE001 - a broken orientation tag must not block a preview
+            pass
+        im = im.convert("RGBA" if "A" in im.getbands() or im.mode == "P" else "RGB")
+        im.thumbnail((edge, edge), Image.Resampling.LANCZOS)
+        out = io.BytesIO()
+        fresh(im).save(out, "PNG")
+        return out.getvalue()
+
+
+def clean_payload(session: Session, data: bytes, filename: str, options: Options) -> dict:
+    if Path(filename).suffix.lower() in RAW_EXTENSIONS:
+        raise ApiError(422, "Camera RAW files are not supported. Export the photo to TIFF, PNG or JPEG first.")
+    try:
+        result = strip_image(data, options)
+    except MemoryError:
+        raise ApiError(422, "Out of memory while cleaning this image.")
+    except StripError as exc:
+        message = str(exc)
+        raise ApiError(422, message[:1].upper() + message[1:])
+    name = clean_name(filename, result.output_format)
+    rid = session.put(result.data, name, _MIME.get(result.output_format, "application/octet-stream"))
+    return {
+        "id": rid,
+        "filename": name,
+        "input_format": result.input_format,
+        "output_format": result.output_format,
+        "size": list(result.size),
+        "frames": result.frames,
+        "pixels_exact": result.pixels_exact,
+        "lossy": result.output_format in LOSSY and not result.pixels_exact,
+        "bytes_in": len(data),
+        "bytes_out": len(result.data),
+        "sha256": hashlib.sha256(result.data).hexdigest(),
+        "removed": findings_payload(result.removed),
+        "actions": result.actions,
+        "warnings": list(result.warnings),
+    }
+
+
+def zip_results(session: Session, ids: list[str]) -> dict:
+    items = [session.get(i) for i in ids]
+    if not items or any(item is None for item in items):
+        raise ApiError(404, "Some cleaned files are no longer available. Clean them again.")
+    buf = io.BytesIO()
+    taken: set[str] = set()
+    # Fixed timestamps: a ZIP's per-entry dates would otherwise record when the files were cleaned.
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
+        for item in items:
+            info = zipfile.ZipInfo(unique_name(item.filename, taken), date_time=(1980, 1, 1, 0, 0, 0))
+            info.external_attr = 0o644 << 16
+            info.create_system = 3
+            zf.writestr(info, item.path.read_bytes())
+    data = buf.getvalue()
+    name = "imgstrip-clean.zip"
+    rid = session.put(data, name, "application/zip")
+    return {"id": rid, "filename": name, "bytes": len(data)}
+
+
+def write_new(dest: Path, data: bytes) -> None:
+    """Write ``dest`` completely or not at all, and never replace an existing file."""
+    if dest.exists():
+        raise FileExistsError(str(dest))
+    tmp = dest.with_name(f".imgstrip-{secrets.token_hex(6)}.tmp")
+    atomic_write(str(tmp), data, None)
+    try:
+        os.link(tmp, dest)  # fails if dest exists: no race with other writers
+    except FileExistsError:
+        tmp.unlink(missing_ok=True)
+        raise
+    except OSError:  # file systems without hard links (FAT, exFAT, some network shares)
+        if dest.exists():
+            tmp.unlink(missing_ok=True)
+            raise FileExistsError(str(dest)) from None
+        os.replace(tmp, dest)
+    else:
+        tmp.unlink(missing_ok=True)
+
+
+def save_results(session: Session, ids: list[str], folder: str) -> dict:
+    if not isinstance(folder, str) or not folder.strip():
+        raise ApiError(400, "Choose a folder to save into.")
+    target = Path(os.path.expanduser(folder.strip()))
+    if not target.is_absolute():
+        raise ApiError(400, "Use a full folder path, such as ~/Pictures/clean.")
+    target = Path(os.path.abspath(target))
+    if target.exists() and not target.is_dir():
+        raise ApiError(400, f"{display_path(str(target))} is a file, not a folder.")
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ApiError(400, f"Cannot create {display_path(str(target))}: {exc.strerror or exc}")
+    taken = {p.name.lower() for p in target.iterdir()}
+    files = []
+    for rid in ids:
+        item = session.get(rid)
+        if item is None:
+            files.append({"id": rid, "ok": False, "message": "No longer available. Clean it again."})
+            continue
+        name = unique_name(item.filename, taken)
+        dest = target / name
+        try:
+            write_new(dest, item.path.read_bytes())
+        except FileExistsError:
+            files.append({"id": rid, "ok": False, "message": f"{name} appeared in the folder meanwhile; save again."})
+            continue
+        except OSError as exc:
+            files.append({"id": rid, "ok": False, "message": f"Cannot write {name}: {exc.strerror or exc}"})
+            continue
+        files.append({"id": rid, "ok": True, "name": name, "path": display_path(str(dest))})
+    return {"folder": display_path(str(target)), "files": files}
+
+
+# --------------------------------------------------------------------------
+# HTTP
+# --------------------------------------------------------------------------
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "imgstrip"
+    sys_version = ""
+    protocol_version = "HTTP/1.1"
+    session: Session  # set on the subclass made by make_server
+    port: int
+
+    # Requests are not logged: file names and paths are exactly what users want kept private.
+    def log_message(self, format, *args):  # noqa: A002 - signature fixed by the base class
+        return
+
+    # ---- plumbing ---------------------------------------------------------
+
+    def _security_headers(self) -> None:
+        self.send_header("Content-Security-Policy", CSP)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("Cache-Control", "no-store")
+
+    def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self._security_headers()
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _json(self, status: int, payload) -> None:
+        self._send(status, json.dumps(payload).encode(), "application/json")
+
+    def _error(self, status: int, message: str) -> None:
+        self._json(status, {"error": message})
+
+    def _allowed_hosts(self) -> set[str]:
+        return {f"127.0.0.1:{self.port}", f"localhost:{self.port}", f"[::1]:{self.port}"}
+
+    def _host_ok(self) -> bool:
+        return (self.headers.get("Host") or "").lower() in self._allowed_hosts()
+
+    def _origin_ok(self) -> bool:
+        origin = self.headers.get("Origin")
+        if origin is not None and origin.lower() not in {"http://" + h for h in self._allowed_hosts()}:
+            return False
+        site = self.headers.get("Sec-Fetch-Site")
+        return site in (None, "same-origin", "none")
+
+    def _cookie_name(self) -> str:
+        return f"imgstrip_{self.port}"
+
+    def _has_cookie(self) -> bool:
+        from http.cookies import CookieError, SimpleCookie
+
+        try:
+            jar = SimpleCookie(self.headers.get("Cookie") or "")
+        except CookieError:
+            return False
+        morsel = jar.get(self._cookie_name())
+        return morsel is not None and hmac.compare_digest(morsel.value, self.session.cookie_value)
+
+    def _token_ok(self) -> bool:
+        return hmac.compare_digest(self.headers.get("X-Imgstrip-Token") or "", self.session.token)
+
+    def _body(self, limit: int) -> bytes:
+        if self.headers.get("Transfer-Encoding"):
+            raise ApiError(411, "Chunked uploads are not supported.")
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            raise ApiError(400, "Bad Content-Length.")
+        if length < 0:
+            raise ApiError(400, "Bad Content-Length.")
+        if length > limit:
+            self.close_connection = True
+            raise ApiError(413, f"Too large: the limit is {limit >> 20} MB per file.")
+        data = bytearray()
+        while len(data) < length:
+            chunk = self.rfile.read(min(1 << 20, length - len(data)))
+            if not chunk:
+                raise ApiError(400, "Upload was cut short.")
+            data += chunk
+        return bytes(data)
+
+    def _json_body(self) -> dict:
+        try:
+            payload = json.loads(self._body(MAX_JSON) or b"{}")
+        except (ValueError, UnicodeDecodeError):
+            raise ApiError(400, "Request body is not valid JSON.")
+        if not isinstance(payload, dict):
+            raise ApiError(400, "Request body must be a JSON object.")
+        return payload
+
+    def _ids(self, payload: dict) -> list[str]:
+        ids = payload.get("ids")
+        if not isinstance(ids, list) or not ids or not all(isinstance(i, str) and _ID.fullmatch(i) for i in ids):
+            raise ApiError(400, "No cleaned files were selected.")
+        return ids
+
+    # ---- routing ----------------------------------------------------------
+
+    def do_HEAD(self):  # noqa: N802
+        self.do_GET()
+
+    def do_GET(self):  # noqa: N802
+        if not self._host_ok():
+            return self._send(421, b"Misdirected request", "text/plain; charset=utf-8")
+        url = urllib.parse.urlsplit(self.path)
+        try:
+            if url.path == "/":
+                return self._index(url)
+            if url.path.startswith("/static/"):
+                return self._static(url.path[len("/static/") :])
+            if not self._has_cookie():
+                raise ApiError(403, "Open imgstrip from the link printed in the terminal.")
+            if url.path == "/api/info":
+                return self._json(200, self._info())
+            if url.path.startswith("/api/result/"):
+                return self._result(url.path[len("/api/result/") :])
+            raise ApiError(404, "Not found.")
+        except ApiError as exc:
+            self._error(exc.status, exc.message)
+
+    def do_POST(self):  # noqa: N802
+        self._api_write()
+
+    def do_DELETE(self):  # noqa: N802
+        self._api_write()
+
+    def _api_write(self) -> None:
+        if not self._host_ok():
+            return self._send(421, b"Misdirected request", "text/plain; charset=utf-8")
+        url = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(url.query)
+        try:
+            if not (self._origin_ok() and self._token_ok() and self._has_cookie()):
+                self.close_connection = True
+                raise ApiError(403, "This request did not come from the imgstrip page.")
+            route = (self.command, url.path)
+            if route == ("POST", "/api/inspect"):
+                data = self._upload()
+                deep = query.get("deep", ["0"])[0] == "1"
+                with self.session.jobs:
+                    return self._json(200, inspect_payload(data, deep))
+            if route == ("POST", "/api/preview"):
+                data = self._upload()
+                with self.session.jobs:
+                    try:
+                        png = preview_bytes(data)
+                    except Exception as exc:  # noqa: BLE001 - any decoder failure means "no preview"
+                        raise ApiError(422, f"No preview: {exc}")
+                return self._send(200, png, "image/png")
+            if route == ("POST", "/api/clean"):
+                data = self._upload()
+                filename = safe_filename(self.headers.get("X-Filename"))
+                try:
+                    raw = json.loads(urllib.parse.unquote(self.headers.get("X-Options") or "{}"))
+                except ValueError:
+                    raise ApiError(400, "Options are not valid JSON.")
+                options = parse_options(raw)
+                with self.session.jobs:
+                    return self._json(200, clean_payload(self.session, data, filename, options))
+            if route == ("POST", "/api/zip"):
+                return self._json(200, zip_results(self.session, self._ids(self._json_body())))
+            if route == ("POST", "/api/save"):
+                payload = self._json_body()
+                return self._json(200, save_results(self.session, self._ids(payload), payload.get("folder")))
+            if route == ("POST", "/api/reset"):
+                self._body(MAX_JSON)
+                self.session.reset()
+                return self._json(200, {"ok": True})
+            if self.command == "DELETE" and url.path.startswith("/api/result/"):
+                rid = url.path[len("/api/result/") :]
+                return self._json(200, {"ok": bool(_ID.fullmatch(rid)) and self.session.delete(rid)})
+            raise ApiError(404, "Not found.")
+        except ApiError as exc:
+            self._error(exc.status, exc.message)
+        except Exception as exc:  # noqa: BLE001 - one bad file must never take the server down
+            self._error(500, f"Internal error: {type(exc).__name__}: {exc}")
+
+    def _upload(self) -> bytes:
+        data = self._body(MAX_UPLOAD)
+        if not data:
+            raise ApiError(400, "The file is empty.")
+        return data
+
+    # ---- pages ------------------------------------------------------------
+
+    def _index(self, url) -> None:
+        key = urllib.parse.parse_qs(url.query).get("k", [""])[0]
+        if key:
+            if not hmac.compare_digest(key, self.session.token):
+                return self._send(403, _gate_page("This link has expired."), "text/html; charset=utf-8")
+            cookie = f"{self._cookie_name()}={self.session.cookie_value}; Path=/; HttpOnly; SameSite=Strict"
+            return self._send(303, b"", "text/plain", {"Location": "/", "Set-Cookie": cookie})
+        if not self._has_cookie():
+            return self._send(
+                403, _gate_page("Open imgstrip from the link printed in the terminal."), "text/html; charset=utf-8"
+            )
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        html = html.replace("{{TOKEN}}", self.session.token).replace("{{VERSION}}", __version__)
+        self._send(200, html.encode(), "text/html; charset=utf-8")
+
+    def _static(self, rel: str) -> None:
+        ctype = STATIC_FILES.get(rel)
+        if ctype is None:
+            raise ApiError(404, "Not found.")
+        body = (STATIC_DIR / rel).read_bytes()
+        self._send(200, body, ctype)
+
+    def _info(self) -> dict:
+        return {
+            "version": __version__,
+            "formats": available_formats(),
+            "extensions": {k: list(v) for k, v in EXTENSIONS.items()},
+            "heif": heif_available(),
+            "folder": display_path(default_folder()),
+            "max_upload": MAX_UPLOAD,
+        }
+
+    def _result(self, rid: str) -> None:
+        item = self.session.get(rid) if _ID.fullmatch(rid) else None
+        if item is None:
+            raise ApiError(404, "This cleaned file is no longer available.")
+        body = item.path.read_bytes()
+        quoted = urllib.parse.quote(item.filename, safe="")
+        ascii_name = re.sub(r"[^A-Za-z0-9._ ()-]", "_", item.filename)
+        disposition = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"
+        self._send(200, body, item.mime, {"Content-Disposition": disposition})
+
+
+def _gate_page(message: str) -> bytes:
+    return (
+        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+        "<title>imgstrip</title><link rel=stylesheet href=/static/app.css>"
+        f"<main class=gate><p class=gate-title>imgstrip</p><p>{message}</p>"
+        "<p class=gate-hint>Start it with <code>imgstrip-web</code>; it opens this page for you.</p></main>"
+    ).encode()
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def make_server(port: int = DEFAULT_PORT, session: Session | None = None) -> tuple[Server, Session]:
+    session = session or Session()
+    try:
+        httpd = Server(("127.0.0.1", port), Handler)
+    except OSError:
+        if port == 0:
+            raise
+        httpd = Server(("127.0.0.1", 0), Handler)  # preferred port is taken: any free one
+    handler = type("BoundHandler", (Handler,), {"session": session, "port": httpd.server_address[1]})
+    httpd.RequestHandlerClass = handler
+    return httpd, session
+
+
+def launch_url(httpd: Server, session: Session) -> str:
+    return f"http://127.0.0.1:{httpd.server_address[1]}/?k={session.token}"
+
+
+# --------------------------------------------------------------------------
+# Entry point
+# --------------------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(
+        prog="imgstrip-web",
+        description="Open imgstrip in your browser. Runs only on this computer; images never leave it.",
+    )
+    p.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"port on 127.0.0.1 (default {DEFAULT_PORT})")
+    p.add_argument("--no-browser", action="store_true", help="print the link instead of opening a browser")
+    p.add_argument("--version", action="version", version=f"imgstrip {__version__}")
+    args = p.parse_args(argv)
+    if not 0 <= args.port <= 65535:
+        p.error("--port must be between 0 and 65535")
+    httpd, session = make_server(args.port)
+    url = launch_url(httpd, session)
+    print(f"imgstrip {__version__} is running on this computer only.", flush=True)
+    print(f"  {url}", flush=True)
+    print("Keep this link private: it opens the app. Press Ctrl+C to stop.", flush=True)
+    if not args.no_browser:
+        threading.Timer(0.3, webbrowser.open, args=(url,)).start()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped", file=sys.stderr)
+    finally:
+        httpd.server_close()
+        session.close()
+    return 0
+
+
+def entry() -> None:
+    sys.exit(main())
