@@ -299,7 +299,7 @@ body.is-dragging .well { border-color: var(--focus); background: var(--hover); }
 .well-title { font-size: var(--t-lg); font-weight: 650; letter-spacing: -0.01em; text-wrap: balance; }
 .well-sub { max-width: 42ch; margin: 4px 0 14px; color: var(--ink-2); font-size: var(--t-sm); text-wrap: balance; }
 #gate .well-sub { margin-bottom: 4px; }
-.well-formats { margin-top: 12px; font-size: var(--t-xs); color: var(--ink-3); }
+.well-formats { margin-top: 10px; text-align: center; font-size: var(--t-xs); color: var(--ink-3); }
 
 /* ---- file list ---------------------------------------------------------------- */
 
@@ -381,6 +381,9 @@ body.is-dragging .well { border-color: var(--focus); background: var(--hover); }
 @media (hover: hover) { .status:hover .seal-tip { display: grid; } }
 @starting-style { .seal-tip { opacity: 0; transform: translateY(3px); } }
 body.tips-off .seal-tip { display: none !important; }
+.file:first-child .seal-tip { bottom: auto; top: calc(100% + 10px); }
+.file:first-child .seal-tip::after { top: auto; bottom: 100%; }
+#gateTitle:focus { outline: none; } /* focused for screen readers only; it cannot be operated */
 
 /* scanning sweep: a 1px line travelling under the row */
 .file[data-state="scanning"] .file-row::after,

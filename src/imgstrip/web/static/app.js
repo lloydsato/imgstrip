@@ -283,6 +283,7 @@
     els.gateText.textContent = text;
     els.gate.hidden = false;
     els.well.hidden = true;
+    $('#formats').hidden = true;
     els.list.hidden = true;
     els.foot.hidden = true;
     els.optionsToggle.hidden = true;
@@ -784,6 +785,7 @@
     const items = state.items;
     const any = items.length > 0;
     els.well.hidden = any;
+    $('#formats').hidden = any;
     els.list.hidden = !any;
     els.foot.hidden = !any;
     if (!any) return;
