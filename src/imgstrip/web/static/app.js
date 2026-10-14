@@ -27,7 +27,8 @@
   const GONE = new Error('removed');
   const GATE = {
     missing: ['Open imgstrip from your terminal', 'For your privacy this page only works when it is opened with the link imgstrip-web prints. Each link opens one tab.'],
-    used: ['This link was already used', 'Each link opens imgstrip once. The terminal has printed a fresh one: open that.'],
+    used: ['This link was already used', 'Each link opens imgstrip once, and the terminal has printed a fresh one. If you did not open it in another tab, someone else on this computer may have: stop imgstrip-web with Ctrl+C and start it again with --no-browser.'],
+    replaced: ['imgstrip is open in another tab', 'Only the newest tab can use imgstrip. Switch to that tab, or open the latest link from the terminal here.'],
     expired: ['imgstrip was restarted', 'Open the new link printed in the terminal. Files cleaned in the earlier run are gone.'],
     down: ['imgstrip is not running', 'Start it again with imgstrip-web, then open the link it prints.'],
   };
@@ -97,7 +98,8 @@
     return m ? m[1].toUpperCase() : '';
   }
 
-  function announce(text) {
+  function announce(text, { force = false } = {}) {
+    if (state.gate && !force) return;
     els.announce.textContent = '';
     window.setTimeout(() => { els.announce.textContent = text; }, 30);
   }
@@ -179,10 +181,11 @@
     const type = res.headers.get('Content-Type') || '';
     if (!res.ok) {
       let message = `Something went wrong (HTTP ${res.status}).`;
+      let code = null;
       if (type.includes('application/json')) {
-        try { message = (await res.json()).error || message; } catch { /* keep default */ }
+        try { const j = await res.json(); message = j.error || message; code = j.code || null; } catch { /* keep default */ }
       }
-      if (res.status === 403 && auth) showGate('expired');
+      if (res.status === 403 && auth) showGate(code === 'replaced' ? 'replaced' : 'expired');
       throw new HttpError(message, res.status);
     }
     return type.includes('application/json') ? res.json() : res.blob();
@@ -284,7 +287,9 @@
     els.foot.hidden = true;
     els.optionsToggle.hidden = true;
     setOpen(els.options, els.optionsToggle, false);
-    announce(`${title}. ${text}`);
+    els.gateTitle.tabIndex = -1;
+    els.gateTitle.focus();
+    announce(`${title}. ${text}`, { force: true });
   }
 
   async function authenticate() {
@@ -316,7 +321,11 @@
   const isDamaged = (r) => !!(r && r.format && r.error);
   const unreadable = (r) => !!(r && (!r.decodable || r.raw));
   const wantDeep = (item) => !!(state.options.deep || item.deepOnce);
-  const hasStego = (r) => !!(r && r.findings.some((f) => /steganograph/i.test(f.label)));
+  const isStego = (f) => /steganograph/i.test(f.label);
+  const hasStego = (r) => !!(r && r.findings.some(isStego));
+  // A clean file whose pixels still carry a detected payload (Scrub was off) earns no seal.
+  const keptPayload = (item) => !!(item.result && !item.result.scrubbed && hasStego(item.report));
+  const refused = (item) => !!(item.error && item.state === 'clean' && item.failedKey === optionsKey());
 
   function newItem(file) {
     const item = {
@@ -386,7 +395,7 @@
     renderItem(item);
     render();
     if (!state.items.some((i) => i.state === 'scanning')) {
-      const found = state.items.reduce((n, i) => n + (i.state === 'clean' ? 0 : findingCount(i.report)), 0);
+      const found = state.items.reduce((n, i) => n + (i.state === 'clean' || i.state === 'unsupported' ? 0 : findingCount(i.report)), 0);
       const failed = state.items.filter((i) => i.state === 'scanfailed').length;
       announce(`Scan finished. ${plural(found, 'revealing item')} found${failed ? `; ${failed} could not be scanned` : ''}.`);
     }
@@ -407,6 +416,7 @@
     const options = encodeURIComponent(JSON.stringify(cleanOptions()));
     const epoch = state.epoch;
     const run = { total: todo.length, done: 0 };
+    const leave = () => { if (state.run === run) { run.total--; render(); } };
     state.run = run;
     hideNote();
     render();
@@ -419,11 +429,11 @@
           ? api('/api/clean', { body: item.file, headers: { 'X-Filename': encodeURIComponent(item.name), 'X-Options': options } })
           : Promise.reject(GONE)));
         result.key = key;
-        if (!alive(item, epoch)) { discard(result.id); return; }
+        if (!alive(item, epoch)) { discard(result.id); leave(); return; }
         if (previous) discard(previous.id);
         Object.assign(item, { result, state: 'clean', error: null, failedKey: null, justCleaned: true, sealDrawn: false });
       } catch (err) {
-        if (err === GONE || !alive(item, epoch)) return;
+        if (err === GONE || !alive(item, epoch)) { leave(); return; }
         item.error = err.message;
         // A refusal from the engine is final for these options; a lost connection is worth retrying.
         item.failedKey = err.status === 422 ? key : null;
@@ -437,10 +447,12 @@
     if (state.run !== run) return;
     state.run = null;
     render();
-    const failed = todo.filter((i) => i.error).length;
+    const kept = todo.filter((i) => state.items.includes(i));
+    const failed = kept.filter((i) => i.error).length;
+    const cleaned = kept.length - failed;
     announce(failed
-      ? `${plural(run.total - failed, 'image')} cleaned and verified. ${failed} could not be cleaned.`
-      : `${plural(run.total, 'image')} cleaned and verified.`);
+      ? `${plural(cleaned, 'image')} cleaned and verified. ${failed} could not be cleaned.`
+      : `${plural(cleaned, 'image')} cleaned and verified.`);
   }
 
   function removeItem(item) {
@@ -567,6 +579,16 @@
         const stale = res.key !== optionsKey();
         const anim = item.justCleaned;
         item.justCleaned = false;
+        if (refused(item)) return [icon('alert'), h('span', { class: 'status-fail', text: 'Re-clean failed' })];
+        if (keptPayload(item)) {
+          return [
+            icon('alert'),
+            h('span', { class: 'status-fail', text: 'Payload kept' }),
+            h('span', { class: 'seal-tip', id: `tip-${item.id}`, role: 'tooltip' },
+              h('strong', { text: 'Metadata removed, payload kept' }),
+              h('span', { text: 'Structure verified, but a likely LSB payload is still in the pixels. Turn on Scrub least-significant bits and clean again.' })),
+          ];
+        }
         return [
           seal(res.sha256, { detail: false, animate: anim }),
           h('span', { class: stale ? '' : 'status-ok', text: stale ? 'Clean, old options' : 'Clean' }),
@@ -577,11 +599,13 @@
         ];
       }
       default: {
+        const scrub = state.options.scrub_lsb;
+        if (hasStego(r) && !scrub) return [icon('alert'), h('span', { class: 'status-fail', text: 'Payload in pixels' })];
         const n = findingCount(r);
         if (n) return [h('span', { class: 'status-count', text: `${n} to remove` })];
         if (isDamaged(r)) return [icon('alert'), h('span', { class: 'status-fail', text: 'Damaged' })];
         if (r && !r.format) return [h('span', { text: 'Not inspected' })];
-        return [h('span', { text: r && r.deep ? 'Nothing found' : 'No metadata' })];
+        return [h('span', { text: r && r.pixels_scanned ? 'Nothing found' : 'No metadata · pixels not scanned' })];
       }
     }
   }
@@ -599,7 +623,7 @@
     ui.head.setAttribute('aria-expanded', String(item.open));
     const statusText = Array.from(ui.status.childNodes).filter((n) => !n.classList || !n.classList.contains('seal-tip')).map((n) => n.textContent).join(' ').trim();
     ui.head.setAttribute('aria-label', `${item.name}. ${statusText}. ${sub.text}`);
-    if (item.state === 'clean') ui.head.setAttribute('aria-describedby', `tip-${item.id}`);
+    if (ui.status.querySelector('.seal-tip')) ui.head.setAttribute('aria-describedby', `tip-${item.id}`);
     else ui.head.removeAttribute('aria-describedby');
 
     // Persistent action buttons: only their state changes, so keyboard focus never falls off them.
@@ -654,14 +678,16 @@
 
   function detailContent(item) {
     const r = item.report;
-    // The row truncates long names; the detail always shows the whole name.
-    const out = [h('p', { class: `detail-name${item.name.length > 44 ? ' is-long' : ''}`, text: item.name })];
+    // Rows clip long names; the detail repeats the whole name only when the row cut it off.
+    const n = item.ui.name;
+    const clipped = n.scrollWidth > n.clientWidth + 1 || n.scrollHeight > n.clientHeight + 1;
+    const out = [h('p', { class: `detail-name${clipped ? ' is-clipped' : ''}`, text: item.name })];
     const meta = [];
     const fmt = r && (r.format || r.decodable);
     if (fmt) meta.push(formatName(fmt));
     if (r && r.size) meta.push(`${r.size[0]}×${r.size[1]}`);
     meta.push(bytes(item.size));
-    if (r && r.deep) meta.push('pixels scanned');
+    if (r && r.pixels_scanned) meta.push('pixels scanned');
 
     if (item.state === 'clean' && item.result) {
       const res = item.result;
@@ -678,20 +704,24 @@
             class: 'btn btn-icon', type: 'button', 'aria-label': 'Copy SHA-256', title: 'Copy SHA-256', 'data-key': 'copy',
             onclick: (e) => copyText(res.sha256, e.currentTarget),
           }, icon('copy'))));
-      const animate = !item.sealDrawn;
-      item.sealDrawn = true;
-      out.push(h('div', { class: 'verified' }, seal(res.sha256, { detail: true, animate }), checks));
+      const kept = keptPayload(item);
+      if (kept) {
+        out.push(note('A likely LSB steganography payload is still in this file\'s pixels, because Scrub least-significant bits was off. Turn it on in Options and clean again to destroy it.', 'warn'));
+        out.push(h('div', { class: 'verified is-partial' }, checks));
+      } else {
+        const animate = !item.sealDrawn;
+        item.sealDrawn = true;
+        out.push(h('div', { class: 'verified' }, seal(res.sha256, { detail: true, animate }), checks));
+      }
       const frames = res.frames > 1 ? ` · ${res.frames} frames` : '';
       out.push(h('p', { class: 'meta-line', text: `${formatName(res.input_format)} ${bytes(res.bytes_in)} → ${formatName(res.output_format)} ${bytes(res.bytes_out)} · ${res.size[0]}×${res.size[1]}${frames} · saved as ${res.filename}` }));
       if (res.key !== optionsKey()) out.push(note('Cleaned with earlier options. Clean again to apply the current ones.', 'warn'));
-      if (item.error) out.push(note(`Cleaning again failed: ${item.error}`, 'error'));
-      if (!res.scrubbed && hasStego(r)) {
-        out.push(note('The scan found signs of LSB steganography and Scrub least-significant bits was off, so the hidden payload is probably still in this file.', 'warn'));
-      } else if (!res.scrubbed && !res.lossy) {
+      if (refused(item)) out.push(note(`Cleaning again with the current options failed: ${item.error} This is the earlier clean file.`, 'error'));
+      if (!kept && !res.scrubbed && !res.lossy) {
         out.push(note('Data hidden inside the pixel values themselves is not removed. Turn on Scrub least-significant bits in Options to destroy it.'));
       }
       if (res.removed.length) out.push(...groupList(res.removed, true));
-      else out.push(note('Nothing beside the picture was found. The file was still rebuilt from its pixels.', 'ok'));
+      else if (!kept) out.push(note('Nothing beside the picture was found. The file was still rebuilt from its pixels.', 'ok'));
       if (res.actions.length) {
         out.push(h('section', { class: 'group' }, h('h3', { class: 'group-title', text: 'Changed' }),
           h('ul', { class: 'actions-list' }, res.actions.map((a) => h('li', { text: capital(a) })))));
@@ -715,11 +745,14 @@
         h('dd', { class: x.key === 'location' || x.key === 'serial' ? 'mono' : null, text: x.value }),
       ])));
     }
+    if (hasStego(r) && !state.options.scrub_lsb) {
+      out.push(note('Likely LSB steganography. Cleaning removes everything else, but keeps this payload unless Scrub least-significant bits is on in Options.', 'warn'));
+    }
     if (r.findings.length) out.push(...groupList(r.findings, false));
     if (isDamaged(r)) out.push(note(`The file's structure is damaged (${r.error}). Cleaning rebuilds it from its pixels if they can still be decoded.`, 'warn'));
     if (!r.format) out.push(note(`imgstrip can't list what a ${r.decodable} file holds, but cleaning rebuilds the image from its pixels alone.`));
     else if (!r.findings.length && !r.error) {
-      out.push(note(r.deep
+      out.push(note(r.pixels_scanned
         ? 'Nothing beside the picture was found, in the file or in its pixels. Cleaning still rebuilds it from its pixels.'
         : 'No metadata found. The pixels were not searched, and anything hidden in them survives cleaning unless Scrub least-significant bits is on.'));
     }
@@ -759,9 +792,10 @@
     const scanning = items.filter((i) => i.state === 'scanning').length;
     const clean = items.filter((i) => i.state === 'clean');
     const fresh = clean.filter((i) => i.result.key === key);
-    const failed = items.filter((i) => i.state === 'failed' || i.state === 'scanfailed' || i.state === 'unsupported').length;
+    const failed = items.filter((i) => i.state === 'failed' || i.state === 'scanfailed' || i.state === 'unsupported' || refused(i)).length;
+    const payloads = clean.filter(keptPayload).length;
     const todo = cleanable();
-    const found = items.reduce((n, i) => n + (i.state === 'clean' ? 0 : findingCount(i.report)), 0);
+    const found = items.reduce((n, i) => n + (i.state === 'clean' || i.state === 'unsupported' ? 0 : findingCount(i.report)), 0);
     const removed = clean.reduce((n, i) => n + i.result.removed.length, 0);
 
     els.listCount.textContent = plural(items.length, 'image');
@@ -773,7 +807,8 @@
       s.push(found ? h('span', { class: 'is-reveal', text: plural(found, 'revealing item') }) : h('span', { text: 'Nothing revealing found' }));
       s.push(` in ${plural(items.length, 'image')}`);
     } else {
-      s.push(h('span', { class: 'is-clean', text: `${clean.length} clean` }));
+      if (clean.length > payloads) s.push(h('span', { class: 'is-clean', text: `${clean.length - payloads} clean` }));
+      if (payloads) s.push(h('span', { class: 'is-fail', text: `${clean.length > payloads ? ' · ' : ''}${payloads} kept a pixel payload` }));
       s.push(removed ? ` · ${plural(removed, 'item')} removed` : ' · rebuilt from pixels');
       if (fresh.length !== clean.length) s.push(' · options changed');
       else if (todo.length) s.push(` · ${todo.length} to clean`);
@@ -992,9 +1027,19 @@
     els.saveForm.addEventListener('submit', saveToFolder);
     els.folder.addEventListener('input', () => els.folder.removeAttribute('aria-invalid'));
 
+    // A link pasted into this tab only changes the fragment: reload so it is redeemed.
+    window.addEventListener('hashchange', () => { if (/[#&]k=/.test(window.location.hash)) window.location.reload(); });
+    // The seal tooltip hides on Escape until focus or the pointer moves on.
+    document.addEventListener('focusin', () => document.body.classList.remove('tips-off'));
+    els.files.addEventListener('mouseout', (e) => { if (e.target.closest && e.target.closest('.status')) document.body.classList.remove('tips-off'); });
+
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
       const active = document.activeElement;
+      if (!document.body.classList.contains('tips-off') && document.querySelector('.seal-tip')) {
+        document.body.classList.add('tips-off');
+        if (active && active.classList.contains('file-head')) return;
+      }
       if (clearArmed) { disarmClear(); return; }
       if (els.save.dataset.open === 'true' && els.foot.contains(active)) {
         setOpen(els.save, els.saveToggle, false);
