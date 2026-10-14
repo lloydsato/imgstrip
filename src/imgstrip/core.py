@@ -146,6 +146,10 @@ class Result:
     frames: int
     pixels_exact: bool
     input_report: Report = field(repr=False, default=None)
+    # The written file decodes to exactly the pixels it was given (zero verification
+    # tolerance).  Unlike pixels_exact this ignores deliberate pixel changes such as
+    # the LSB scrub; it is false for lossy encodes and for quantised GIF frames.
+    verified_exact: bool = True
 
 
 # --------------------------------------------------------------------------
@@ -564,6 +568,7 @@ class _Job:
             frames=len(frames),
             pixels_exact=exact and self.exact,
             input_report=self.before,
+            verified_exact=exact,
         )
 
     # -- format / frame selection -----------------------------------------

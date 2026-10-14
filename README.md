@@ -1,6 +1,6 @@
 # imgstrip
 
-`imgstrip` is a command-line tool that removes **all** metadata and hidden data from images and leaves only the picture.
+`imgstrip` removes **all** metadata and hidden data from images and leaves only the picture. Use it from the command line, or open the local web app with `imgstrip-web`.
 
 Most metadata removers delete the tags they recognise and copy everything else. imgstrip does the opposite: it decodes the image to raw pixels and writes a brand-new file from those pixels alone. Nothing from the original file is copied except pixel values. Before anything is written, every output is checked twice:
 
@@ -33,6 +33,33 @@ Requires Python 3.10+.
 pip install .            # installs Pillow, numpy and pillow-heif (for iPhone HEIC photos)
 imgstrip --self-test     # proves the installation works end to end
 ```
+
+## Web app
+
+```console
+imgstrip-web             # starts the app on this computer and opens it in your browser
+```
+
+The web app is the same engine behind a small window in your browser. It runs only on your own machine (on `127.0.0.1`), works offline, and never uploads anything.
+
+1. **Drop images** onto the window, choose them, or paste them. Each file is scanned straight away and its row says what it gives away: location, camera, time taken, serial numbers, hidden preview images, appended data. Open a row for every item, grouped as identifying metadata, hidden data and colour profile. Nothing is changed yet. The scan reads the file's structure; to also search the pixels for steganography, turn on **Deep scan** or use *Scan the pixels too* on one file.
+2. **Clean.** Every file is rebuilt from its pixels and passes both checks before it is offered back. Each verified file gets a small seal engraved from its SHA-256 (the same file always gets the same seal); open the row for the checks, the full hash, and the list of what was removed.
+3. **Take the clean files**: download one, download all as a ZIP (its entries carry no dates), or **save to a folder** on disk. Saving creates the folder if needed and never replaces an existing file; a name that is taken gets a number instead (`photo.clean (2).jpg`).
+
+**Options** holds the same switches as the command line: output format, quality, colour profile handling, keeping JPEG data bit-exact, LSB scrubbing, orientation, extra PNG compression, and the **deep scan** that also searches the pixels for steganography.
+
+| Option | Meaning |
+|---|---|
+| `--port N` | Port on `127.0.0.1` (default 8765; a free port is used if it is taken). |
+| `--no-browser` | Print the link instead of opening the browser. Use it on a computer shared with other users (see below). |
+
+How it stays private:
+
+* Originals are never written to disk. They are read from the request, cleaned in memory, and only the verified clean output is kept, in a private temporary folder that is deleted when you stop the app (Ctrl+C).
+* The terminal prints a link with a secret, single-use key. The page trades that key for an access token, which it keeps only in that browser tab, and the terminal then prints a fresh link. Each link replaces the previous tab's token, so only the newest tab can use the app. No cookies are used (browsers share cookies between all local ports), and requests addressed to any other host name are refused. Other websites open in your browser cannot drive the app or read your images.
+* On a computer shared with other users, start it with `--no-browser` and open the printed link yourself: opening a browser passes the link on its command line, which other local users can briefly see. If someone else uses a link first, your tab says "already used"; restart with `--no-browser`.
+* If the scan finds signs of steganography in the pixels and *Scrub least-significant bits* is off, the cleaned file is marked "Payload kept" instead of getting the seal.
+* The server keeps no log of file names, and the page loads nothing from the internet (its typeface, Schibsted Grotesk, ships with the app under the SIL Open Font License).
 
 ## Usage
 
@@ -129,7 +156,7 @@ Not supported, with a clear error: camera RAW files (DNG, CR2/CR3, NEF, ARW, …
 ## How it is tested
 
 * `imgstrip --self-test` builds 17 worst-case fixtures, one per format. Each is stuffed with metadata, thumbnails, trailers, private chunks, palette tricks, hidden alpha data and steganography, and every item carries a unique canary string. Each fixture is stripped in every mode and to every output format (189 runs). No canary may survive anywhere in the output bytes, and both the built-in inspector and, if installed, `exiftool` must find nothing.
-* The pytest suite (253 tests) covers every codec against independent decoders (ImageMagick for 16-bit data), the colour engine against LittleCMS, orientation 1–8, all CLI safety behaviours (no-clobber, atomic in-place writes, symlinks, hard links, FIFOs, collisions, permissions, stdin/stdout) and **fuzzing**: 680 randomly corrupted files must each produce either a verified-clean output or a clean error, never a crash, a memory blow-up or an unverified write.
+* The pytest suite (317 tests) covers every codec against independent decoders (ImageMagick for 16-bit data), the colour engine against LittleCMS, orientation 1–8, all CLI safety behaviours (no-clobber, atomic in-place writes, symlinks, hard links, FIFOs, collisions, permissions, stdin/stdout) the web app's security gates, round trips and signal handling, and **fuzzing**: 680 randomly corrupted files must each produce either a verified-clean output or a clean error, never a crash, a memory blow-up or an unverified write.
 * Trial run on the public [exif-samples](https://github.com/ianare/exif-samples) corpus: 104 real files from dozens of cameras and phones, including iPhone HEICs and deliberately broken files. 104 cleaned, 0 failures. Afterwards `exiftool` reported zero non-structural tags across all outputs, and all 16 orientation test images came out identical.
 
 ```console
