@@ -57,7 +57,6 @@ MAX_NAME = 180
 DEEP_SCAN_MAX_PIXELS = 40_000_000  # the pixel scan needs about 100 bytes per pixel
 PREVIEW_MAX_PIXELS = 100_000_000
 DEFAULT_SUFFIX = ".clean"
-LOSSY = {"JPEG", "WEBP", "AVIF", "HEIF"}
 STATIC_FILES = {
     "app.css": "text/css; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
@@ -75,10 +74,11 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, code: str | None = None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.code = code
 
 
 # --------------------------------------------------------------------------
@@ -259,22 +259,36 @@ class Session:
         self.dir = Path(workdir or tempfile.mkdtemp(prefix=TEMP_PREFIX))
         self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.dir, 0o700)
-        (self.dir / PID_FILE).write_text(str(os.getpid()))
+        self._lock_fd = _hold_lock(self.dir / PID_FILE)
         self._items: dict[str, Stored] = {}
         self._lock = threading.Lock()
         self._last_zip: str | None = None
+        self._retired: set[str] = set()
         self.jobs = threading.BoundedSemaphore(max(1, min(4, (os.cpu_count() or 2) // 2)))
 
     def redeem(self, key: str) -> str | None:
-        """Trade the current launch key for the API token, once; then issue the next key."""
+        """Trade the current launch key for a fresh API token, once; then issue the next key.
+
+        Each use replaces the token, so only the newest tab can drive the app.  If someone
+        else grabs a key first (a browser's command line is visible to other local users),
+        the user's next link locks them out again.
+        """
         with self._lock:
             if not _same(key, self.launch_key):
                 return None
             self.launch_key = secrets.token_urlsafe(32)
             nxt = self.launch_key
+            self._retired.add(hashlib.sha256(self.token.encode()).hexdigest())
+            self.token = secrets.token_urlsafe(32)
+            token = self.token
         if self.on_launch:
             self.on_launch(nxt)
-        return self.token
+        return token
+
+    def was_replaced(self, token: str | None) -> bool:
+        if not token:
+            return False
+        return hashlib.sha256(token.encode("utf-8", "surrogateescape")).hexdigest() in self._retired
 
     def replace_zip(self, rid: str) -> None:
         """Keep one ZIP at a time: each one is a full copy of the batch."""
@@ -312,6 +326,28 @@ class Session:
     def close(self) -> None:
         self.reset()
         shutil.rmtree(self.dir, ignore_errors=True)
+        if self._lock_fd is not None:
+            try:
+                os.close(self._lock_fd)
+            except OSError:
+                pass
+            self._lock_fd = None
+
+
+def _hold_lock(path: Path) -> int | None:
+    """Keep an exclusive lock on the session's pid file for as long as the run lives."""
+    try:
+        import fcntl
+    except ImportError:  # Windows: no sweeping, so just record the pid
+        path.write_text(f"{os.getpid()}\n")
+        return None
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # locked before the pid is even written
+    except OSError:
+        pass
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
 
 
 def _same(given: str | None, secret: str) -> bool:
@@ -324,22 +360,32 @@ PID_FILE = "owner.pid"
 
 
 def sweep_stale_sessions() -> None:
-    """Remove work folders left by runs that were killed before they could clean up."""
+    """Remove work folders left by runs that were killed before they could clean up.
+
+    A live run holds an exclusive lock on its pid file, so a folder whose lock can be
+    taken is abandoned. Unlike a pid check this also holds across PID namespaces and
+    containers that share the temporary folder.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        return
     if not hasattr(os, "getuid"):
         return
     for d in Path(tempfile.gettempdir()).glob(TEMP_PREFIX + "*"):
         try:
-            if not d.is_dir() or d.is_symlink() or d.stat().st_uid != os.getuid():
+            if d.is_symlink() or not d.is_dir() or d.stat().st_uid != os.getuid():
                 continue
-            pid = int((d / PID_FILE).read_text().strip())
-        except (OSError, ValueError):
+            fd = os.open(d / PID_FILE, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
             continue
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            shutil.rmtree(d, ignore_errors=True)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            pass  # alive (or not ours to judge)
+            continue  # a live run holds it
+        finally:
+            os.close(fd)
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def default_folder() -> str:
@@ -430,8 +476,13 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
     raw = camera_raw_kind(data)
     if report.format is None:
         decodable, size = _probe(data)
+    pixels_scanned = False
     if deep and decodable and not raw:
-        if size and size[0] * size[1] > DEEP_SCAN_MAX_PIXELS:
+        # The container summary does not always know the size (simple WebP, oversized GIF
+        # frames), so ask the decoder: the pixel scan costs about 100 bytes per pixel.
+        _, header_size = _probe(data)
+        dims = header_size or size
+        if not dims or dims[0] * dims[1] > DEEP_SCAN_MAX_PIXELS:
             notes.append(
                 f"The pixels were not scanned: the image is over {DEEP_SCAN_MAX_PIXELS // 1_000_000} megapixels."
             )
@@ -440,6 +491,7 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
 
             try:
                 findings += analyze_pixels(data)
+                pixels_scanned = True
             except StripError as exc:
                 notes.append(f"The pixel scan failed: {exc}")
             except MemoryError:
@@ -448,6 +500,7 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
         "format": report.format,
         "decodable": decodable,
         "raw": raw,
+        "pixels_scanned": pixels_scanned,
         "size": list(size) if size else None,
         "bytes": len(data),
         "deep": deep,
@@ -478,7 +531,9 @@ def preview_bytes(data: bytes, edge: int = 160) -> bytes:
         except Exception:  # noqa: BLE001 - a broken orientation tag must not block a preview
             pass
         if im.mode.startswith("I") or im.mode == "F":  # 16/32-bit and float: Pillow would clip, not scale
-            arr = np.asarray(im, dtype=np.float64)
+            im = im.convert("I") if im.mode.startswith("I;16") else im
+            im.thumbnail((edge, edge), Image.Resampling.LANCZOS)  # shrink before any float copy
+            arr = np.asarray(im, dtype=np.float32)
             lo, hi = float(arr.min()), float(arr.max())
             arr = (arr - lo) * (255.0 / (hi - lo)) if hi > lo else np.zeros_like(arr)
             im = Image.fromarray(arr.clip(0, 255).astype(np.uint8), "L")
@@ -509,7 +564,7 @@ def clean_payload(session: Session, data: bytes, filename: str, options: Options
         "size": list(result.size),
         "frames": result.frames,
         "pixels_exact": result.pixels_exact,
-        "lossy": result.output_format in LOSSY and not result.pixels_exact,
+        "lossy": not result.verified_exact,
         "scrubbed": options.scrub_lsb,
         "bytes_in": len(data),
         "bytes_out": len(result.data),
@@ -646,8 +701,8 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, status: int, payload) -> None:
         self._send(status, json.dumps(payload).encode(), "application/json")
 
-    def _error(self, status: int, message: str) -> None:
-        self._json(status, {"error": message})
+    def _error(self, status: int, message: str, code: str | None = None) -> None:
+        self._json(status, {"error": message, **({"code": code} if code else {})})
 
     def _allowed_hosts(self) -> set[str]:
         return {f"127.0.0.1:{self.port}", f"localhost:{self.port}", f"[::1]:{self.port}"}
@@ -664,6 +719,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _token_ok(self) -> bool:
         return _same(self.headers.get("X-Imgstrip-Token"), self.session.token)
+
+    def _require_token(self) -> None:
+        if self._token_ok():
+            return
+        if self.session.was_replaced(self.headers.get("X-Imgstrip-Token")):
+            raise ApiError(403, "imgstrip was opened in another tab.", code="replaced")
+        raise ApiError(403, "This request did not come from the imgstrip page.", code="expired")
 
     def _body(self, limit: int) -> bytes:
         if self.headers.get("Transfer-Encoding"):
@@ -724,12 +786,13 @@ class Handler(BaseHTTPRequestHandler):
                 # link can download them; everything else needs the token.
                 return self._result(url.path[len("/api/result/") :])
             if url.path == "/api/info":
-                if not (self._origin_ok() and self._token_ok()):
+                if not self._origin_ok():
                     raise ApiError(403, "This request did not come from the imgstrip page.")
+                self._require_token()
                 return self._json(200, self._info())
             raise ApiError(404, "Not found.")
         except ApiError as exc:
-            self._error(exc.status, exc.message)
+            self._error(exc.status, exc.message, exc.code)
         except Exception as exc:  # noqa: BLE001 - one bad request must never take the server down
             self._error(500, f"Internal error ({type(exc).__name__}).")
 
@@ -753,8 +816,7 @@ class Handler(BaseHTTPRequestHandler):
                 if token is None:
                     raise ApiError(403, "This link has already been used.")
                 return self._json(200, {"token": token})
-            if not self._token_ok():
-                raise ApiError(403, "This request did not come from the imgstrip page.")
+            self._require_token()
             if route == ("POST", "/api/inspect"):
                 data = self._upload()
                 deep = query.get("deep", ["0"])[0] == "1"
@@ -792,7 +854,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": bool(_ID.fullmatch(rid)) and self.session.delete(rid)})
             raise ApiError(404, "Not found.")
         except ApiError as exc:
-            self._error(exc.status, exc.message)
+            self._error(exc.status, exc.message, exc.code)
         except Exception as exc:  # noqa: BLE001 - one bad file must never take the server down
             self._error(500, f"Internal error ({type(exc).__name__}: {exc}).")
 
@@ -881,12 +943,13 @@ def main(argv: list[str] | None = None) -> int:
     atexit.register(session.close)
     # Closing the terminal (SIGHUP) or `kill` (SIGTERM) must still delete the cleaned files.
     for name in ("SIGTERM", "SIGHUP"):
-        if hasattr(signal, name):
-            signal.signal(getattr(signal, name), _stop_on_signal)
+        sig = getattr(signal, name, None)
+        if sig is not None and signal.getsignal(sig) is not signal.SIG_IGN:  # respect nohup
+            signal.signal(sig, _stop_on_signal)
 
     def on_launch(key: str) -> None:
         print(
-            f"Opened in a browser tab. Each link works once; to open another tab use:\n  {launch_url(httpd, key)}",
+            f"Opened in a browser tab (earlier tabs stop working). Each link works once; next link:\n  {launch_url(httpd, key)}",
             flush=True,
         )
 

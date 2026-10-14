@@ -92,14 +92,20 @@ def test_launch_key_is_single_use_and_rotates(app):
     first = app.session.launch_key
     status, res = app.json("POST", "/api/session", {"key": "wrong"}, auth=False)
     assert status == 403 and issued == []
+    old_token = app.session.token
     status, res = app.json("POST", "/api/session", {"key": first}, auth=False)
-    assert status == 200 and res["token"] == app.session.token
+    assert status == 200 and res["token"] == app.session.token != old_token
     assert issued == [app.session.launch_key] and app.session.launch_key != first
     status, res = app.json("POST", "/api/session", {"key": first}, auth=False)
     assert status == 403 and "already been used" in res["error"]
+    tab_one = res_token = app.session.token
     status, res = app.json("POST", "/api/session", {"key": issued[0]}, auth=False)
-    assert status == 200
-    assert app.session.token not in app.session.launch_key
+    assert status == 200 and res["token"] != res_token
+    # the newest tab wins: the earlier tab's token now says it was replaced
+    res, body = app.request("GET", "/api/info", auth=False, headers={"X-Imgstrip-Token": tab_one})
+    assert res.status == 403 and json.loads(body)["code"] == "replaced"
+    res, body = app.request("GET", "/api/info", auth=False, headers={"X-Imgstrip-Token": "never-issued"})
+    assert res.status == 403 and json.loads(body)["code"] == "expired"
 
 
 def test_launch_key_needs_same_origin(app):
@@ -535,17 +541,17 @@ def test_stale_work_folders_are_swept(tmp_path, monkeypatch):
     monkeypatch.setattr(web.tempfile, "gettempdir", lambda: str(tmp_path))
     dead = tmp_path / "imgstrip-web-dead"
     dead.mkdir()
-    proc = subprocess.Popen([sys.executable, "-c", "pass"])
-    proc.wait()
-    (dead / web.PID_FILE).write_text(str(proc.pid))
+    (dead / web.PID_FILE).write_text(str(os.getpid()))  # a pid that looks alive, but no lock is held
     (dead / "result").write_bytes(b"clean pixels")
-    alive = tmp_path / "imgstrip-web-alive"
-    alive.mkdir()
-    (alive / web.PID_FILE).write_text(str(os.getpid()))
+    live = web.Session(str(tmp_path / "imgstrip-web-live"))  # holds its lock, whatever its pid says
+    (live.dir / web.PID_FILE).write_text("999999999")
     other = tmp_path / "unrelated"
     other.mkdir()
+    linked = tmp_path / "imgstrip-web-link"
+    linked.symlink_to(other)
     web.sweep_stale_sessions()
-    assert not dead.exists() and alive.exists() and other.exists()
+    assert not dead.exists() and live.dir.exists() and other.exists() and linked.is_symlink()
+    live.close()
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX only")
@@ -584,4 +590,66 @@ def test_signals_still_delete_cleaned_files(tmp_path, sig):
     deadline = time.time() + 5
     while list(tmp_path.glob("imgstrip-web-*")) and time.time() < deadline:
         time.sleep(0.05)
+    assert list(tmp_path.glob("imgstrip-web-*")) == []
+
+
+def test_verification_wording_follows_what_was_proved(app):
+    # a photo squeezed into a GIF palette is verified within a tolerance, not exactly
+    gif = app.clean(fixtures.png_everything(), "photo.png", {"format": "gif"})
+    assert gif["output_format"] == "GIF" and gif["lossy"]
+    # a palette image fits a GIF exactly
+    palette = app.clean(fixtures.png_palette_tricks(), "logo.png", {"format": "gif"})
+    assert not palette["lossy"]
+    # the LSB scrub changes pixels on purpose, but the PNG still decodes to exactly what was written
+    scrubbed = app.clean(fixtures.png_everything(), "photo.png", {"scrub_lsb": True})
+    assert scrubbed["scrubbed"] and not scrubbed["lossy"] and not scrubbed["pixels_exact"]
+    jpeg = app.clean(fixtures.jpeg_everything(), "photo.jpg")
+    assert jpeg["lossy"] and not jpeg["scrubbed"]
+
+
+def test_pixels_scanned_flag(app, monkeypatch):
+    res, body = app.upload("/api/inspect?deep=1", fixtures.png_lsb_stego(), "memo.png")
+    assert json.loads(body)["pixels_scanned"] is True
+    res, body = app.upload("/api/inspect", fixtures.png_lsb_stego(), "memo.png")
+    assert json.loads(body)["pixels_scanned"] is False
+    monkeypatch.setattr(web, "DEEP_SCAN_MAX_PIXELS", 1000)
+    res, body = app.upload("/api/inspect?deep=1", fixtures.png_lsb_stego(), "memo.png")
+    report = json.loads(body)
+    assert report["deep"] is True and report["pixels_scanned"] is False
+
+
+def test_deep_scan_size_comes_from_the_decoder(app, monkeypatch):
+    """A simple lossless WebP has no size in the container summary; the cap must still apply."""
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (1, 2, 3)).save(buf, "WEBP", lossless=True)
+    monkeypatch.setattr(web, "DEEP_SCAN_MAX_PIXELS", 1000)
+    res, body = app.upload("/api/inspect?deep=1", buf.getvalue(), "a.webp")
+    report = json.loads(body)
+    assert report["pixels_scanned"] is False and any("not scanned" in n for n in report["notes"])
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX only")
+def test_nohup_is_respected(tmp_path):
+    env = {**os.environ, "TMPDIR": str(tmp_path)}
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "imgstrip.web", "--no-browser", "--port", "0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+        preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN),
+    )
+    try:
+        proc.stdout.readline()
+        proc.stdout.readline()
+        proc.send_signal(signal.SIGHUP)
+        time.sleep(0.5)
+        assert proc.poll() is None  # still running, as nohup asked
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=20)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
     assert list(tmp_path.glob("imgstrip-web-*")) == []
