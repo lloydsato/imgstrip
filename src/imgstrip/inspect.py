@@ -25,6 +25,15 @@ STRUCTURE = "structure"  # anomalies: bad checksums, unknown structures
 
 _MAX_TEXT_INFLATE = 64 << 20
 
+# Every container reports an embedded C2PA manifest store with this text in its label, so the
+# credential code can tell "the credential we just wrote" from every other kind of metadata.
+C2PA_LABEL = "C2PA content credentials"
+C2PA_BMFF_UUID = bytes.fromhex("d8fec3d61b0e483c92975828877ec481")
+
+
+def is_c2pa_finding(finding: "Finding") -> bool:
+    return C2PA_LABEL in finding.label
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -747,6 +756,8 @@ def _inspect_webp(d: bytes, r: Report) -> None:
             _exif_findings(body[6:] if body.startswith(b"Exif\x00\x00") else body, r)
         elif fourcc == b"XMP ":
             r.add(METADATA, "XMP", _xmp_detail(body))
+        elif fourcc == b"C2PA":
+            r.add(METADATA, C2PA_LABEL, f"{size} bytes")
         else:
             r.add(HIDDEN, f"Unknown chunk '{fourcc.decode('latin-1')}'", f"{size} bytes")
     if image_chunks == 0:
@@ -843,6 +854,8 @@ def _gif_app_extension(d: bytes, pos: int, data: bytes, r: Report) -> None:
         # Loop count is the only rendering-relevant application data.
         if not (len(rest) == 3 and rest[0] == 1):
             r.add(HIDDEN, "Non-standard NETSCAPE extension", f"{len(rest)} bytes")
+    elif app == b"C2PA_GIF\x01\x00\x00":
+        r.add(METADATA, C2PA_LABEL, f"{len(rest)} bytes")
     elif app == b"XMP DataXMP":
         r.add(METADATA, "XMP", _xmp_detail(rest))
     elif app == b"ICCRGBG1012":
@@ -950,6 +963,7 @@ _TIFF_NAMES = {
     37500: "Maker notes",
     50708: "Unique camera model (DNG)",
     50735: "Camera serial number (DNG)",
+    52545: C2PA_LABEL,
 }
 _TIFF_SUBIFD_TAGS = {34665: "EXIF", 34853: "GPS", 40965: "Interoperability", 330: "Sub-images (SubIFDs)"}
 _TIFF_TEXT_TAGS = {269, 270, 271, 272, 285, 305, 306, 315, 316, 33432}
@@ -1301,6 +1315,8 @@ def _inspect_isobmff(d: bytes, r: Report) -> None:
         elif typ == b"moov":
             r.info["sequence"] = True
             _moov(d, s, e, r)
+        elif typ == b"uuid" and d[s - 16 : s] == C2PA_BMFF_UUID:
+            r.add(METADATA, C2PA_LABEL, f"{e - s} bytes")
         elif typ == b"uuid":
             r.add(HIDDEN, "Vendor-specific 'uuid' box", f"{e - s} bytes")
         else:

@@ -120,6 +120,52 @@ def _check(name: str, data: bytes, options: Options, label: str, verbose: bool) 
     return problems
 
 
+def _credential_self_test(fx: dict, verbose: bool) -> tuple[int, list[str]]:
+    """With the optional C2PA support installed: sign every fixture that can carry a credential.
+
+    Each signed file must hold exactly one credential and nothing else, still contain no canary, read back as a
+    valid imgstrip credential, and be reported as invalid after a single flipped pixel byte.
+    """
+    from . import credentials
+
+    if not credentials.available():
+        print("  Content Credentials: optional C2PA support not installed (skipped)")
+        return 0, []
+    test = credentials.make_test_identity("Self Test")
+    problems: list[str] = []
+    runs = 0
+    for name, data in fx.items():
+        options = Options()
+        try:
+            result = strip_image(data, options)
+        except StripError:
+            continue
+        if result.output_format not in credentials.SIGNABLE:
+            continue
+        runs += 1
+        label = f"{name}: credentials"
+        try:
+            evidence = credentials.gather_evidence(data, result, options)
+            signed = credentials.sign(result.data, evidence, test.identity).data
+            cred = credentials.read_credential(signed)
+        except StripError as exc:
+            problems.append(f"{label}: {exc}")
+            continue
+        if fixtures.CANARY in signed:
+            problems.append(f"{label}: canary string survived")
+        if not (cred.imgstrip and cred.pixels_only and cred.state == "Valid"):
+            problems.append(f"{label}: the credential did not read back as valid ({cred.problems or cred.notes})")
+        # Change one byte of the picture data (ISO-BMFF files keep it in 'mdat', the others near the end).
+        broken = bytearray(signed)
+        spot = signed.find(b"mdat") + 16 if result.output_format in ("AVIF", "HEIF") else len(signed) - 6
+        broken[spot] ^= 1
+        if credentials.read_credential(bytes(broken)).state != "Invalid":
+            problems.append(f"{label}: a changed picture byte was not detected")
+        if verbose:
+            print(f"  {'ok ' if not problems else 'BAD'} {name:28} signed, verified, tamper detected")
+    return runs, problems
+
+
 def run_self_test(verbose: bool = False) -> int:
     start = time.time()
     print("imgstrip self test: building fixtures ...")
@@ -146,11 +192,14 @@ def run_self_test(verbose: bool = False) -> int:
         for label, opts in variants:
             runs += 1
             problems += [f"{name}: {p}" for p in _check(name, data, opts, label, verbose)]
+    credential_runs, credential_problems = _credential_self_test(fx, verbose)
+    problems += credential_problems
     elapsed = time.time() - start
     if problems:
-        print(f"FAILED: {len(problems)} problem(s) in {runs} runs ({elapsed:.1f}s)")
+        print(f"FAILED: {len(problems)} problem(s) in {runs + credential_runs} runs ({elapsed:.1f}s)")
         for p in problems:
             print("  - " + p)
         return 1
-    print(f"PASSED: {runs} strip runs, no metadata or canaries survived ({elapsed:.1f}s)")
+    extra = f" and {credential_runs} signing runs (Content Credentials)" if credential_runs else ""
+    print(f"PASSED: {runs} strip runs{extra}, no metadata or canaries survived ({elapsed:.1f}s)")
     return 0

@@ -15,7 +15,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
+# Content Credentials (C2PA) signing: optional, because it brings a native library.
+# Tested with c2pa-python 0.38.
+c2pa = ["c2pa-python>=0.38,<1", "cryptography>=42"]
+test = ["pytest>=7", "c2pa-python>=0.38,<1", "cryptography>=42"]
 
 [project.scripts]
 imgstrip = "imgstrip.cli:entry"

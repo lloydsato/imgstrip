@@ -1435,3 +1435,56 @@ def strip_image(data: bytes, options: Options | None = None) -> Result:
         raise StripError("file is empty")
     before = inspect_bytes(data)
     return _Job(data, options or Options(), before).run()
+
+
+def _canonical_array(frame: Frame) -> np.ndarray:
+    """A comparable view of one decoded frame: what a viewer would show, nothing hidden.
+
+    Palette, grey and RGB images all become RGBA (so a PNG that was re-written as a palette
+    image still compares equal); colour stored under fully transparent pixels is zeroed, as
+    the engine deliberately drops it.  32-bit and float frames keep their native values.
+    """
+    if frame.array is not None:
+        return frame.array
+    mode = frame.image.mode
+    if mode in ("I;16", "I", "F"):
+        return np.asarray(frame.image)
+    rgba = _rgba_array(frame).copy()
+    rgba[rgba[..., 3] == 0] = 0
+    return rgba
+
+
+def canonical_frames(data: bytes, max_pixels: int = 300_000_000) -> list[np.ndarray]:
+    """Decode every frame the engine would keep from ``data``, as comparable arrays.
+
+    No orientation, colour management or other normalisation is applied, so the arrays of
+    an original and of its cleaned copy are equal exactly when the cleaned file shows the
+    very same pixel values (nothing is rotated, re-encoded, converted or scrubbed).
+    """
+    caught: list[str] = []
+    with _pillow_guard(caught, max_pixels):
+        try:
+            job = _Job(data, Options(max_pixels=max_pixels), inspect_bytes(data))
+            im = open_image(data)
+            src = canonical_format(im.format)
+            indices, _loop = job._select_frames(im, src, src)
+            if len(indices) == 1:
+                if indices[0]:
+                    im.seek(indices[0])
+                kind = codecs.high_bit_depth_kind(im)
+                if kind:
+                    try:
+                        return [codecs.decode_16bit(lambda: open_image(data), indices[0], kind)]
+                    except (ValueError, OSError):
+                        pass  # the same fallback the engine takes
+            frames = job._decode_frames(im, indices, animated=len(indices) > 1)
+            job._apply_clap(frames)
+            return [_canonical_array(f) for f in frames]
+        except StripError:
+            raise
+        except Image.DecompressionBombError:
+            raise StripError("image is too large to compare") from None
+        except MemoryError:
+            raise StripError("not enough memory to compare these images") from None
+        except Exception as exc:  # noqa: BLE001 - decoders raise anything on corrupt data
+            raise StripError(f"cannot decode image ({type(exc).__name__}: {exc})") from exc
