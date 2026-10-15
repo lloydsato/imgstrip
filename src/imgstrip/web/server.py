@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import base64
+import binascii
 import hashlib
 import hmac
 import io
@@ -45,6 +47,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import __version__
+from .. import credentials
 from ..cli import RAW_EXTENSIONS, atomic_write, output_extension
 from ..core import EXTENSIONS, OUTPUT_FORMATS, Options, StripError, heif_available, strip_image
 from ..inspect import HIDDEN, METADATA, Finding, inspect_bytes
@@ -265,6 +268,34 @@ class Session:
         self._last_zip: str | None = None
         self._retired: set[str] = set()
         self.jobs = threading.BoundedSemaphore(max(1, min(4, (os.cpu_count() or 2) // 2)))
+        # Content Credentials.  The signing key lives here, in memory only: it is never written to
+        # disk, never logged and never sent back to the page.  Receipts hold the secrets that open
+        # each source commitment and are likewise kept in memory until the user downloads them.
+        self._identity = None
+        self._assessment = None
+        self._anchors: bytes | None = None
+        self._receipts: list[dict] = []
+
+    def set_identity(self, identity, assessment, anchors: bytes | None) -> None:
+        with self._lock:
+            self._identity, self._assessment, self._anchors = identity, assessment, anchors
+
+    def forget_identity(self) -> None:
+        with self._lock:
+            self._identity = self._assessment = self._anchors = None
+
+    def signing_state(self):
+        """(identity, assessment, anchors) as one consistent snapshot."""
+        with self._lock:
+            return self._identity, self._assessment, self._anchors
+
+    def add_receipt(self, receipt: dict) -> None:
+        with self._lock:
+            self._receipts.append(receipt)
+
+    def receipts(self) -> list[dict]:
+        with self._lock:
+            return list(self._receipts)
 
     def redeem(self, key: str) -> str | None:
         """Trade the current launch key for a fresh API token, once; then issue the next key.
@@ -325,6 +356,9 @@ class Session:
 
     def close(self) -> None:
         self.reset()
+        self.forget_identity()
+        with self._lock:
+            self._receipts = []
         shutil.rmtree(self.dir, ignore_errors=True)
         if self._lock_fd is not None:
             try:
@@ -449,6 +483,99 @@ def parse_options(raw: dict) -> Options:
     )
 
 
+def parse_credentials(raw, anchors: bytes | None) -> credentials.Config | None:
+    """The page's Content Credentials request, or None when the tick box is off."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ApiError(400, "credentials must be an object")
+    sign = raw.get("sign", False)
+    if not isinstance(sign, bool):
+        raise ApiError(400, "credentials.sign must be true or false")
+    if not sign:
+        return None
+    date = raw.get("date", "day")
+    detail = raw.get("detail", "minimal")
+    commit = raw.get("commit", False)
+    if date not in credentials.DATE_PRECISIONS:
+        raise ApiError(400, "credentials.date must be day or minute")
+    if detail not in credentials.DETAILS:
+        raise ApiError(400, "credentials.detail must be minimal or full")
+    if not isinstance(commit, bool):
+        raise ApiError(400, "credentials.commit must be true or false")
+    return credentials.Config(date_precision=date, detail=detail, commit_source=commit, anchors=anchors)
+
+
+def _b64(value, what: str, *, required: bool = True, limit: int = 256 << 10) -> bytes | None:
+    if value in (None, ""):
+        if required:
+            raise ApiError(400, f"The {what} is missing.")
+        return None
+    if not isinstance(value, str):
+        raise ApiError(400, f"The {what} must be sent as base64 text.")
+    try:
+        data = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        raise ApiError(400, f"The {what} could not be decoded.")
+    if len(data) > limit:
+        raise ApiError(413, f"The {what} is too large to be a certificate or key.")
+    return data
+
+
+def credentials_info() -> dict:
+    return {
+        "available": credentials.available(),
+        "sdk": credentials.sdk_version(),
+        "formats": list(credentials.SIGNABLE),
+        "hint": credentials.INSTALL_HINT,
+    }
+
+
+def load_identity_payload(session: Session, payload: dict) -> dict:
+    """Load a signing identity into this run's memory (never to disk) and judge it."""
+    if not credentials.available():
+        raise ApiError(501, credentials.INSTALL_HINT)
+    cert = _b64(payload.get("cert"), "certificate")
+    key = _b64(payload.get("key"), "private key", required=False)
+    anchors_raw = _b64(payload.get("anchors"), "trust-anchor file", required=False)
+    passphrase = payload.get("passphrase")
+    if passphrase is not None and not isinstance(passphrase, str):
+        raise ApiError(400, "The passphrase must be text.")
+    try:
+        anchors = credentials.load_anchors(anchors_raw) if anchors_raw else None
+        identity = credentials.load_identity(cert, key, passphrase.encode("utf-8") if passphrase else None)
+        assessment = credentials.assess(identity, anchors)
+    except credentials.PassphraseRequired as exc:
+        raise ApiError(422, str(exc), code="passphrase")
+    except credentials.CredentialError as exc:
+        raise ApiError(422, str(exc))
+    except Exception:  # noqa: BLE001 - never echo a library's message back: it may quote key data
+        raise ApiError(422, "The certificate or key could not be read.")
+    blocking = [n for n in assessment.notices if n.severity == "error"]
+    if blocking:
+        raise ApiError(422, blocking[0].message)
+    session.set_identity(identity, assessment, anchors)
+    return {"identity": assessment.as_dict()}
+
+
+def test_identity_payload(session: Session, payload: dict) -> dict:
+    if not credentials.available():
+        raise ApiError(501, credentials.INSTALL_HINT)
+    org = payload.get("organization") or "Test Newsroom"
+    if not isinstance(org, str) or not 1 <= len(org.strip()) <= 64:
+        raise ApiError(400, "The organisation name must be 1 to 64 characters.")
+    try:
+        test = credentials.make_test_identity(org.strip())
+        anchors = test.root_pem if payload.get("trust_test_ca") else None
+        assessment = credentials.assess(test.identity, anchors)
+    except credentials.CredentialError as exc:
+        raise ApiError(422, str(exc))
+    except Exception:  # noqa: BLE001
+        raise ApiError(422, "The test identity could not be created.")
+    session.set_identity(test.identity, assessment, anchors)
+    return {"identity": assessment.as_dict(), "root_pem": test.root_pem.decode("ascii")}
+
+
 # --------------------------------------------------------------------------
 # Work
 # --------------------------------------------------------------------------
@@ -497,10 +624,17 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
                 notes.append(f"The pixel scan failed: {exc}")
             except MemoryError:
                 notes.append("The pixel scan ran out of memory.")
+    credential = None
+    if any(credentials.is_c2pa_finding(f) for f in findings) and credentials.available():
+        try:
+            credential = credentials.read_credential(data).as_dict()
+        except Exception:  # noqa: BLE001 - the extra verdict is informational; the scan stands without it
+            credential = None
     return {
         "format": report.format,
         "decodable": decodable,
         "raw": raw,
+        "credential": credential,
         "pixels_scanned": pixels_scanned,
         "size": list(size) if size else None,
         "bytes": len(data),
@@ -545,9 +679,35 @@ def preview_bytes(data: bytes, edge: int = 160) -> bytes:
         return out.getvalue()
 
 
-def clean_payload(session: Session, data: bytes, filename: str, options: Options) -> dict:
+def _credential_payload(signed, evidence, assessment, config) -> dict:
+    c, s = signed.credential, signed.credential.sanitization or {}
+    return {
+        "signed": True,
+        "signer": c.signer,
+        "signer_name": c.signer_name,
+        "state": c.state,
+        "label": c.label,
+        "date": s.get("date"),
+        "pixel_integrity": s.get("pixel_integrity"),
+        "detail": config.detail,  # what the credential itself records: operations and fidelity only in "full"
+        "operations": evidence.operations,
+        "psnr_db": evidence.psnr_db,
+        "committed": "source_commitment" in s,
+        "warnings": [n.message for n in assessment.notices if n.severity == "warning"] if assessment else [],
+    }
+
+
+def clean_payload(
+    session: Session, data: bytes, filename: str, options: Options, config: credentials.Config | None = None
+) -> dict:
     if Path(filename).suffix.lower() in RAW_EXTENSIONS:
         raise ApiError(422, "Camera RAW files are not supported. Export the photo to TIFF, PNG or JPEG first.")
+    identity = assessment = None
+    if config is not None:
+        identity, assessment, anchors = session.signing_state()
+        if identity is None:
+            raise ApiError(409, "Load a signing identity first, or turn off Content Credentials.", code="identity")
+        config.anchors = anchors
     try:
         result = strip_image(data, options)
     except MemoryError:
@@ -555,8 +715,25 @@ def clean_payload(session: Session, data: bytes, filename: str, options: Options
     except StripError as exc:
         message = str(exc)
         raise ApiError(422, message[:1].upper() + message[1:])
+    final, cred_payload, extra_warnings = result.data, None, []
+    if config is not None:
+        reason = credentials.unsignable_reason(result.output_format)
+        if reason:
+            raise ApiError(422, reason)
+        try:
+            evidence = credentials.gather_evidence(data, result, options)
+            signed = credentials.sign(result.data, evidence, identity, config)
+        except MemoryError:
+            raise ApiError(422, "Out of memory while signing this image.")
+        except credentials.CredentialError as exc:
+            raise ApiError(422, f"Could not sign: {exc}")
+        final = signed.data
+        cred_payload = _credential_payload(signed, evidence, assessment, config)
+        extra_warnings = credentials.source_warnings(evidence)
+        if signed.receipt:
+            session.add_receipt(signed.receipt)
     name = clean_name(filename, result.output_format)
-    rid = session.put(result.data, name, _MIME.get(result.output_format, "application/octet-stream"))
+    rid = session.put(final, name, _MIME.get(result.output_format, "application/octet-stream"))
     return {
         "id": rid,
         "filename": name,
@@ -569,11 +746,12 @@ def clean_payload(session: Session, data: bytes, filename: str, options: Options
         "scrubbed": options.scrub_lsb,
         "prnu": result.prnu_applied,
         "bytes_in": len(data),
-        "bytes_out": len(result.data),
-        "sha256": hashlib.sha256(result.data).hexdigest(),
+        "bytes_out": len(final),
+        "sha256": hashlib.sha256(final).hexdigest(),
         "removed": findings_payload(result.removed),
         "actions": result.actions,
-        "warnings": list(result.warnings),
+        "warnings": list(result.warnings) + extra_warnings,
+        "credentials": cred_payload,
     }
 
 
@@ -840,8 +1018,24 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     raise ApiError(400, "Options are not valid JSON.")
                 options = parse_options(raw)
+                config = parse_credentials(raw.get("credentials") if isinstance(raw, dict) else None, None)
                 with self.session.jobs:
-                    return self._json(200, clean_payload(self.session, data, filename, options))
+                    return self._json(200, clean_payload(self.session, data, filename, options, config))
+            if route == ("POST", "/api/identity"):
+                return self._json(200, load_identity_payload(self.session, self._json_body()))
+            if route == ("POST", "/api/identity/test"):
+                return self._json(200, test_identity_payload(self.session, self._json_body()))
+            if route == ("DELETE", "/api/identity"):
+                self._body(MAX_JSON)
+                self.session.forget_identity()
+                return self._json(200, {"ok": True})
+            if route == ("POST", "/api/receipts"):
+                self._body(MAX_JSON)
+                receipts = self.session.receipts()
+                if not receipts:
+                    raise ApiError(404, "There are no receipts to download.")
+                body = json.dumps(credentials.receipts_document(receipts), indent=2).encode()
+                return self._send(200, body, "application/json")
             if route == ("POST", "/api/zip"):
                 return self._json(200, zip_results(self.session, self._ids(self._json_body())))
             if route == ("POST", "/api/save"):
@@ -881,7 +1075,14 @@ class Handler(BaseHTTPRequestHandler):
             "heif": heif_available(),
             "folder": display_path(default_folder()),
             "max_upload": MAX_UPLOAD,
+            "credentials": credentials_info(),
+            "identity": self._identity_state(),
+            "receipts": len(self.session.receipts()),
         }
+
+    def _identity_state(self) -> dict | None:
+        _, assessment, _ = self.session.signing_state()
+        return assessment.as_dict() if assessment is not None else None
 
     def _result(self, rid: str) -> None:
         item = self.session.get(rid) if _ID.fullmatch(rid) else None
