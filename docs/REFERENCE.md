@@ -83,7 +83,7 @@ Originals are never modified unless you pass `--in-place`. Existing outputs are 
 
 | Option | Meaning |
 |---|---|
-| `-o PATH` | Output file (single input) or directory (several inputs, `-r`). `-` = stdout. |
+| `-o PATH` | Output file (single input) or directory (several inputs, `-r`). `-` = stdout. An output file name's extension picks the format (`-o clean.png` writes a PNG); a `--format` that contradicts it is refused. |
 | `-i`, `--in-place` | Replace the originals atomically, keeping their permission bits. |
 | `-r` | Recurse into directories. Hidden directories are skipped. |
 | `--format FMT` | Output format: `jpeg png webp gif tiff bmp avif heif`. Default: same as input. |

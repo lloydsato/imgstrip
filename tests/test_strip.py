@@ -300,6 +300,41 @@ def test_sanitized_profile_preserves_appearance(fx):
     assert np.abs(a - b).max() <= 1
 
 
+def _profile_with_short_curves() -> bytes:
+    """A profile LittleCMS accepts, whose tone curves claim more table entries than they hold."""
+    import struct
+
+    icc = bytearray(fixtures.rgb_profile("Short curves", fixtures.ADOBE_RGB))
+    curve = b"curv\x00\x00\x00\x00" + struct.pack(">I", 4096) + np.linspace(0, 65535, 256).astype(">u2").tobytes()
+    (count,) = struct.unpack_from(">I", icc, 128)
+    for i in range(count):
+        sig = icc[132 + 12 * i : 136 + 12 * i]
+        if sig in (b"rTRC", b"gTRC", b"bTRC"):
+            struct.pack_into(">II", icc, 136 + 12 * i, len(icc), len(curve))
+    icc += curve
+    struct.pack_into(">I", icc, 0, len(icc))
+    return bytes(icc)
+
+
+@pytest.mark.parametrize(
+    "source, options",
+    [("jpeg", Options(icc="sanitize")), ("jpeg", Options(icc="sanitize", jpeg_lossless=True)), ("png16", Options())],
+)
+def test_a_malformed_profile_falls_back_instead_of_failing(source, options):
+    from imgstrip.codecs import encode_png
+
+    profile = _profile_with_short_curves()
+    if source == "jpeg":
+        buf = io.BytesIO()
+        Image.fromarray(fixtures.photo()).save(buf, "JPEG", icc_profile=profile)
+        data = buf.getvalue()
+    else:
+        data = encode_png(fixtures.photo(40, 30).astype(np.uint16) * 257, 16, 2, icc=profile)
+    result = strip_image(data, options)
+    assert any("ICC profile" in w for w in result.warnings)
+    assert_clean(result.data)
+
+
 def test_quality_option():
     buf = io.BytesIO()
     Image.fromarray(fixtures.photo(200, 150)).save(buf, "JPEG", quality=95)
