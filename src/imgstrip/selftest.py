@@ -136,6 +136,7 @@ def run_self_test(verbose: bool = False) -> int:
         variants = [
             ("default", Options()),
             ("scrub-lsb", Options(scrub_lsb=True)),
+            ("scrub-prnu", Options(scrub_prnu=True)),
             ("icc=sanitize", Options(icc="sanitize")),
         ]
         if name.endswith(".jpg") and "mpo" not in name:

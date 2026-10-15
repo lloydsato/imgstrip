@@ -19,7 +19,7 @@
   };
   const OPTION_DEFAULTS = {
     format: '', quality: '', icc: 'convert',
-    deep: false, jpeg_lossless: false, scrub_lsb: false, auto_orient: true, optimize: false,
+    deep: false, jpeg_lossless: false, scrub_lsb: false, scrub_prnu: false, auto_orient: true, optimize: false,
   };
   const OPTIONS_KEY = 'imgstrip.options.v1';
   const TOKEN_KEY = 'imgstrip.token';
@@ -146,6 +146,7 @@
       icc: o.icc,
       jpeg_lossless: !!o.jpeg_lossless,
       scrub_lsb: !!o.scrub_lsb,
+      scrub_prnu: !!o.scrub_prnu,
       auto_orient: !!o.auto_orient,
       optimize: !!o.optimize,
     };
@@ -720,6 +721,11 @@
       if (refused(item)) out.push(note(`Cleaning again with the current options failed: ${item.error} This is the earlier clean file.`, 'error'));
       if (!kept && !res.scrubbed && !res.lossy) {
         out.push(note('Data hidden inside the pixel values themselves is not removed. Turn on Scrub least-significant bits in Options to destroy it.'));
+      }
+      if (res.prnu) {
+        out.push(note("The camera's sensor noise pattern was scrambled by a random warp of the pixels. Matching this photo to its camera should now fail, but unlike the checks above that cannot be proven."));
+      } else if (res.output_format !== 'GIF' && !res.warnings.some((w) => w.includes('sensor-fingerprint'))) {
+        out.push(note("The pixels still carry the camera's sensor noise pattern, which can link this photo to one camera. Turn on Disrupt camera fingerprint in Options to scramble it."));
       }
       if (res.removed.length) out.push(...groupList(res.removed, true));
       else if (!kept) out.push(note('Nothing beside the picture was found. The file was still rebuilt from its pixels.', 'ok'));

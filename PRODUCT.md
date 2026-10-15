@@ -36,7 +36,7 @@ Most metadata removers delete the tags they recognise and copy everything else. 
 ## Capabilities and Constraints
 
 - **Inspect** a file without changing it: the container's metadata and hidden data, grouped as metadata, embedded images and hidden payloads. Optional **deep scan** decodes the pixels and looks for colour under transparent pixels, palette tricks and LSB steganography (two detectors must agree).
-- **Clean** in batches, with options: output format (same as input, JPEG, PNG, WebP, GIF, TIFF, BMP, AVIF, HEIF), lossy quality, lossless JPEG mode, colour profile handling (convert to sRGB / rebuilt anonymous profile / drop), auto-orient, LSB scrub, extra PNG compression.
+- **Clean** in batches, with options: output format (same as input, JPEG, PNG, WebP, GIF, TIFF, BMP, AVIF, HEIF), lossy quality, lossless JPEG mode, colour profile handling (convert to sRGB / rebuilt anonymous profile / drop), auto-orient, LSB scrub, camera-fingerprint (PRNU) disruption, extra PNG compression. The advanced switches live in the Options tray; the PRNU switch is off by default because it deliberately moves pixels (a smooth random warp of a few pixels), and it cannot be combined with bit-exact JPEG mode.
 - Report per file: formats, dimensions, frames, size before and after, every removed item, actions taken, warnings, and whether pixels are exact.
 - Reads JPEG/MPO, PNG/APNG, WebP, GIF, TIFF, BMP, HEIC/HEIF (needs pillow-heif), AVIF, plus ICO, PSD, TGA, QOI, JPEG 2000, PCX, SGI, PNM, ICNS, DDS (written as PNG).
 - Not supported, with a clear error: camera RAW files, 16-bit Lab TIFF, 16-bit PSD, vector formats.
@@ -47,7 +47,7 @@ Most metadata removers delete the tags they recognise and copy everything else. 
 
 - Name: **imgstrip** (lowercase).
 - Character (user-pinned for the web app): mini, premium-feeling and simple.
-- Voice: plain, precise, honest about limits. Says exactly what was found and removed; never overclaims. The README's "Limits" section (visible content stays, robust watermarks can survive, file names can leak, in-place mode does not securely erase) is product truth and must not be softened.
+- Voice: plain, precise, honest about limits. Says exactly what was found and removed; never overclaims. The README's "Limits" section (visible content stays, robust watermarks can survive, file names can leak, the camera's sensor fingerprint stays unless disrupted and its removal can never be proven, in-place mode does not securely erase) is product truth and must not be softened.
 
 ## Evidence on Hand
 

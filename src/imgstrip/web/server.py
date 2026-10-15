@@ -444,6 +444,7 @@ def parse_options(raw: dict) -> Options:
         icc=icc,
         auto_orient=flag("auto_orient", True),
         scrub_lsb=flag("scrub_lsb", False),
+        scrub_prnu=flag("scrub_prnu", False),
         optimize=flag("optimize", False),
     )
 
@@ -566,6 +567,7 @@ def clean_payload(session: Session, data: bytes, filename: str, options: Options
         "pixels_exact": result.pixels_exact,
         "lossy": not result.verified_exact,
         "scrubbed": options.scrub_lsb,
+        "prnu": result.prnu_applied,
         "bytes_in": len(data),
         "bytes_out": len(result.data),
         "sha256": hashlib.sha256(result.data).hexdigest(),
