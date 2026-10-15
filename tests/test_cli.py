@@ -234,7 +234,7 @@ def test_stdout_option(jpg):
 
 
 def test_usage_errors():
-    for args in (["-i", "-o", "x", "a.jpg"], ["--deep", "a.jpg"], ["--quality", "0", "a.jpg"], []):
+    for args in (["-i", "-o", "x", "a.jpg"], ["--deep", "--c2pa-verify", "a.jpg"], ["--quality", "0", "a.jpg"], []):
         with pytest.raises(SystemExit) as exc:
             main(args)
         assert exc.value.code == 2

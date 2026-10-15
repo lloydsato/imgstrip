@@ -347,10 +347,21 @@
   const isDamaged = (r) => !!(r && r.format && r.error);
   const unreadable = (r) => !!(r && (!r.decodable || r.raw));
   const wantDeep = (item) => !!(state.options.deep || item.deepOnce);
-  const isStego = (f) => /steganograph/i.test(f.label);
-  const hasStego = (r) => !!(r && r.findings.some(isStego));
-  // A clean file whose pixels still carry a detected payload (Scrub was off) earns no seal.
-  const keptPayload = (item) => !!(item.result && !item.result.scrubbed && hasStego(item.report));
+  // What can honestly be said about data hidden in the pixel values: one of four states (detected,
+  // scrubbed, not_detected, not_scanned) worded by the server, so this page cannot drift from the
+  // command line. "not_detected" is never proof of absence, and the caveat always travels with it.
+  const scanVerdict = (r) => (r && r.steganography) || null;
+  const hasStego = (r) => { const v = scanVerdict(r); return !!(v && v.state === 'detected'); };
+  // The engine's own account if it scrubbed (never the option that was asked for), else the scan of the original.
+  const stegoOf = (item) => {
+    const scan = scanVerdict(item.report);
+    const out = item.result && item.result.steganography;
+    if (out && out.state === 'scrubbed') return out;
+    if (scan && (scan.state === 'detected' || scan.state === 'not_detected')) return scan;
+    return out || scan;
+  };
+  // A clean file whose pixels still carry a detected payload (nothing scrubbed it) earns no seal.
+  const keptPayload = (item) => !!(item.result && (stegoOf(item) || {}).state === 'detected');
   const refused = (item) => !!(item.error && item.state === 'clean' && item.failedKey === optionsKey());
 
   function newItem(file) {
@@ -435,6 +446,13 @@
       (i.state === 'clean' && i.result.key !== key && i.failedKey !== key));
   }
 
+  function cleanHeaders(item, options) {
+    const headers = { 'X-Filename': encodeURIComponent(item.name), 'X-Options': options };
+    const scan = scanVerdict(item.report);
+    if (scan && (scan.state === 'detected' || scan.state === 'not_detected')) headers['X-Scan'] = scan.state;
+    return headers;
+  }
+
   async function cleanAll() {
     const todo = cleanable();
     if (!todo.length || state.run) return;
@@ -457,7 +475,7 @@
       renderItem(item);
       try {
         const result = await cleanQueue(() => (alive(item, epoch)
-          ? api('/api/clean', { body: item.file, headers: { 'X-Filename': encodeURIComponent(item.name), 'X-Options': options } })
+          ? api('/api/clean', { body: item.file, headers: cleanHeaders(item, options) })
           : Promise.reject(GONE)));
         result.key = key;
         if (!alive(item, epoch)) { discard(result.id); leave(); return; }
@@ -626,7 +644,8 @@
           h('span', { class: stale ? '' : 'status-ok', text: stale ? 'Clean, old options' : 'Clean' }),
           h('span', { class: 'seal-tip', id: `tip-${item.id}`, role: 'tooltip' },
             h('strong', { text: 'Verified clean' }),
-            h('span', { text: 'Every byte accounted for · ' + (res.lossy ? 'pixels within tolerance' : 'pixels exact') }),
+            h('span', { text: 'Structure verified · ' + (res.lossy ? 'pixels within tolerance' : 'pixels exact') }),
+            h('span', { text: `Hidden data in pixels: ${(stegoOf(item) || { headline: 'not scanned' }).headline}` }),
             h('code', { text: `SHA-256 ${res.sha256.slice(0, 16)}…` })),
         ];
       }
@@ -637,7 +656,8 @@
         if (n) return [h('span', { class: 'status-count', text: `${n} to remove` })];
         if (isDamaged(r)) return [icon('alert'), h('span', { class: 'status-fail', text: 'Damaged' })];
         if (r && !r.format) return [h('span', { text: 'Not inspected' })];
-        return [h('span', { text: r && r.pixels_scanned ? 'Nothing found' : 'No metadata · pixels not scanned' })];
+        const v = scanVerdict(r);
+        return [h('span', { text: v && v.state === 'not_detected' ? 'No metadata · not detected in pixels' : 'No metadata · pixels not scanned' })];
       }
     }
   }
@@ -703,6 +723,16 @@
         h('span', { class: 'item-detail', text: f.detail || '—' }))))));
   }
 
+  // The pixel-level verdict, in the server's words. Shown with its caveat every time, so a scan that found
+  // nothing is never read as proof that nothing is hidden.
+  function stegoBlock(v) {
+    if (!v) return [];
+    const head = `Hidden data in the pixels: ${v.headline}. ${capital(v.summary)}.`;
+    return [h('section', { class: 'group' },
+      note(head, v.state === 'detected' ? 'warn' : ''),
+      v.state === 'not_scanned' ? null : note(v.caveat))];
+  }
+
   function note(text, kind = '') {
     const glyph = kind === 'warn' || kind === 'error' ? 'alert' : kind === 'ok' ? 'check' : 'info';
     return h('p', { class: `note${kind ? ` is-${kind}` : ''}` }, icon(glyph), h('span', { text }));
@@ -758,7 +788,7 @@
     if (item.state === 'clean' && item.result) {
       const res = item.result;
       const checks = h('div', { class: 'checks' },
-        h('p', { class: 'check' }, icon('check'), h('span', { text: 'Every byte of the new file is accounted for.' })),
+        h('p', { class: 'check' }, icon('check'), h('span', { text: 'Every segment, chunk and box of the new file is accounted for, and the places meant to be empty are empty.' })),
         h('p', { class: 'check' }, icon('check'), h('span', {
           text: res.lossy
             ? `It decodes back to the written pixels within ${formatName(res.output_format)} re-encoding tolerance.`
@@ -772,7 +802,7 @@
           }, icon('copy'))));
       const kept = keptPayload(item);
       if (kept) {
-        out.push(note('A likely LSB steganography payload is still in this file\'s pixels, because Scrub least-significant bits was off. Turn it on in Options and clean again to destroy it.', 'warn'));
+        out.push(note('A steganography payload was detected in this file\'s pixels and is still there, because nothing scrubbed it. Turn on Scrub least-significant bits in Options and clean again to destroy it.', 'warn'));
         out.push(h('div', { class: 'verified is-partial' }, checks));
       } else {
         const animate = !item.sealDrawn;
@@ -782,18 +812,16 @@
       if (res.credentials) out.push(credentialBlock(res));
       const frames = res.frames > 1 ? ` · ${res.frames} frames` : '';
       out.push(h('p', { class: 'meta-line', text: `${formatName(res.input_format)} ${bytes(res.bytes_in)} → ${formatName(res.output_format)} ${bytes(res.bytes_out)} · ${res.size[0]}×${res.size[1]}${frames} · saved as ${res.filename}` }));
+      out.push(...stegoBlock(stegoOf(item)));
       if (res.key !== optionsKey()) out.push(note('Cleaned with earlier options. Clean again to apply the current ones.', 'warn'));
       if (refused(item)) out.push(note(`Cleaning again with the current options failed: ${item.error} This is the earlier clean file.`, 'error'));
-      if (!kept && !res.scrubbed && !res.lossy) {
-        out.push(note('Data hidden inside the pixel values themselves is not removed. Turn on Scrub least-significant bits in Options to destroy it.'));
-      }
       if (res.prnu) {
         out.push(note("The camera's sensor noise pattern was scrambled by a random warp of the pixels. Matching this photo to its camera should now fail, but unlike the checks above that cannot be proven."));
       } else if (res.output_format !== 'GIF' && !res.warnings.some((w) => w.includes('sensor-fingerprint'))) {
         out.push(note("The pixels still carry the camera's sensor noise pattern, which can link this photo to one camera. Turn on Disrupt camera fingerprint in Options to scramble it."));
       }
       if (res.removed.length) out.push(...groupList(res.removed, true));
-      else if (!kept) out.push(note('Nothing beside the picture was found. The file was still rebuilt from its pixels.', 'ok'));
+      else if (!kept) out.push(note('Nothing beside the picture was found in the file\'s structure. The file was still rebuilt from its pixels.', 'ok'));
       if (res.actions.length) {
         out.push(h('section', { class: 'group' }, h('h3', { class: 'group-title', text: 'Changed' }),
           h('ul', { class: 'actions-list' }, res.actions.map((a) => h('li', { text: capital(a) })))));
@@ -818,17 +846,19 @@
       ])));
     }
     if (r.credential && r.credential.present) out.push(foundCredential(r.credential));
+    const verdict = scanVerdict(r);
     if (hasStego(r) && !state.options.scrub_lsb) {
-      out.push(note('Likely LSB steganography. Cleaning removes everything else, but keeps this payload unless Scrub least-significant bits is on in Options.', 'warn'));
+      out.push(note('Cleaning removes everything else, but keeps this payload unless Scrub least-significant bits is on in Options.', 'warn'));
     }
     if (r.findings.length) out.push(...groupList(r.findings, false));
     if (isDamaged(r)) out.push(note(`The file's structure is damaged (${r.error}). Cleaning rebuilds it from its pixels if they can still be decoded.`, 'warn'));
     if (!r.format) out.push(note(`imgstrip can't list what a ${r.decodable} file holds, but cleaning rebuilds the image from its pixels alone.`));
     else if (!r.findings.length && !r.error) {
-      out.push(note(r.pixels_scanned
-        ? 'Nothing beside the picture was found, in the file or in its pixels. Cleaning still rebuilds it from its pixels.'
-        : 'No metadata found. The pixels were not searched, and anything hidden in them survives cleaning unless Scrub least-significant bits is on.'));
+      out.push(note(verdict && verdict.state === 'not_detected'
+        ? 'Nothing beside the picture was found in the file\'s structure. Cleaning still rebuilds it from its pixels.'
+        : 'No metadata found. Cleaning still rebuilds the file from its pixels, but anything hidden in the pixel values can survive unless Scrub least-significant bits is on.'));
     }
+    if (verdict && verdict.state !== 'not_scanned') out.push(...stegoBlock(verdict));
     for (const n of r.notes) out.push(note(n, 'warn'));
     if (!r.deep && item.state === 'scanned') {
       out.push(h('div', { class: 'detail-tools' }, h('button', {
@@ -878,7 +908,7 @@
     if (state.run) s.push(h('span', { text: `Cleaning ${Math.min(state.run.done + 1, state.run.total)} of ${state.run.total}…` }));
     else if (scanning) s.push(h('span', { text: `Scanning ${plural(scanning, 'image')}…` }));
     else if (!clean.length) {
-      s.push(found ? h('span', { class: 'is-reveal', text: plural(found, 'revealing item') }) : h('span', { text: 'Nothing revealing found' }));
+      s.push(found ? h('span', { class: 'is-reveal', text: plural(found, 'revealing item') }) : h('span', { text: 'No metadata found' }));
       s.push(` in ${plural(items.length, 'image')}`);
     } else {
       if (clean.length > payloads) s.push(h('span', { class: 'is-clean', text: `${clean.length - payloads} clean` }));

@@ -8,15 +8,22 @@ module decodes the image and looks for data hidden *in* the pixels:
 * LSB steganography, estimated with Sample Pair Analysis (Dumitrescu, Wu &
   Wang, 2003), which estimates the fraction of least-significant bits that
   were overwritten by a hidden message.
+
+The LSB test is statistical and covers one family of methods.  ``scan_pixels``
+therefore returns, besides the findings, a ``stego.Verdict`` that says what was
+and was not tested; "not detected" is never "nothing is hidden".
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 import numpy as np
 from PIL import Image
 
+from . import stego
 from .core import StripError, _pillow_guard, canonical_format, open_image
-from .inspect import HIDDEN, Finding, sniff_format
+from .inspect import HIDDEN, Finding, sniff_format, unused_palette_entries
 
 # Thresholds for the joint estimate min(SPA, WS), calibrated on 75 real
 # camera photos (worst clean image: 0.117) with simulated LSB-replacement
@@ -24,6 +31,9 @@ from .inspect import HIDDEN, Finding, sniff_format
 SPA_LIKELY = 0.18
 SPA_POSSIBLE = 0.12
 _MIN_PAIRS = 4096
+# Pixels examined across all frames of an animation (each frame costs about 100 bytes per pixel while it is
+# tested, but frames are tested one at a time, so this bounds time, not memory).
+_FRAME_PIXEL_BUDGET = 100_000_000
 
 
 def spa_estimate(channel: np.ndarray) -> float | None:
@@ -99,47 +109,114 @@ def _lossless(im: Image.Image, data: bytes, fmt: str) -> bool:
     return fmt in ("PNG", "BMP", "PPM", "QOI", "TGA", "PCX", "SGI")
 
 
+@dataclass
+class PixelScan:
+    findings: list[Finding] = field(default_factory=list)
+    verdict: stego.Verdict = field(default_factory=lambda: stego.not_scanned("the pixels were not scanned"))
+
+
 def analyze_pixels(data: bytes) -> list[Finding]:
+    return scan_pixels(data).findings
+
+
+_LOSSY = {"JPEG", "MPO", "AVIF", "HEIF", "HEIC", "WEBP"}
+
+
+def _untestable_reason(fmt: str, lossless: bool, modes: set[str], too_small: bool) -> str:
+    if "P" in modes or fmt == "GIF":
+        return "palette image: only unused and duplicate palette entries were checked"
+    if not lossless:
+        if fmt in _LOSSY:
+            return f"{fmt} is lossy: it stores compressed picture data, not the sample values the LSB tests read"
+        return f"{fmt} images are not covered by the LSB tests (they need losslessly stored 8-bit samples)"
+    other = modes - {"L", "LA", "RGB", "RGBA"}
+    if other:
+        return (
+            f"{', '.join(sorted(other))} images are not covered by the LSB tests (they need 8-bit grey or RGB samples)"
+        )
+    if too_small:
+        return "too few pixels for a reliable estimate"
+    return "no image data the LSB tests can read"
+
+
+def scan_pixels(data: bytes) -> PixelScan:
+    """Look inside the pixels of ``data``: findings, plus an honest verdict on what was covered."""
     findings: list[Finding] = []
     caught: list[str] = []
     with _pillow_guard(caught):  # default 300 MP limit
         im = open_image(data)
         fmt = canonical_format(im.format)
-        try:
-            im.load()
-        except Exception as exc:  # noqa: BLE001 - decoders raise arbitrary errors on corrupt data
-            raise StripError(f"cannot decode image: {exc}") from None
-        if im.mode == "P":
-            findings += _palette_findings(im)
-            rgba = np.asarray(im.convert("RGBA"))
-        elif im.mode in ("RGBA", "LA", "PA"):
-            rgba = np.asarray(im.convert("RGBA"))
-        else:
-            rgba = None
-        if rgba is not None:
-            hidden = (rgba[..., 3] == 0) & (rgba[..., :3] != 0).any(axis=-1)
-            if hidden.any():
-                findings.append(
-                    Finding(HIDDEN, "Colour data under fully transparent pixels", f"{int(hidden.sum())} pixels")
-                )
-        if _lossless(im, data, sniff_format(data) or fmt) and im.mode in ("L", "LA", "RGB", "RGBA"):
+        sniffed = sniff_format(data) or fmt
+        n_frames = getattr(im, "n_frames", 1) or 1
+        estimates: dict[str, float] = {}
+        tested = 0
+        modes: set[str] = set()
+        too_small = False
+        lossless = True
+        hidden_alpha = 0
+        palette_labels: set[str] = set()
+        budget = _FRAME_PIXEL_BUDGET
+        for index in range(n_frames):
+            if index:
+                if budget <= 0:
+                    break
+                try:
+                    im.seek(index)
+                except Exception as exc:  # noqa: BLE001 - decoders raise arbitrary errors on corrupt data
+                    raise StripError(f"cannot decode frame {index + 1}: {exc}") from None
+            try:
+                im.load()
+            except Exception as exc:  # noqa: BLE001 - decoders raise arbitrary errors on corrupt data
+                raise StripError(f"cannot decode image: {exc}") from None
+            budget -= im.size[0] * im.size[1]
+            modes.add(im.mode)
+            if im.mode == "P":
+                for f in _palette_findings(im):
+                    if f.label not in palette_labels:
+                        palette_labels.add(f.label)
+                        findings.append(f)
+                rgba = np.asarray(im.convert("RGBA"))
+            elif im.mode in ("RGBA", "LA", "PA"):
+                rgba = np.asarray(im.convert("RGBA"))
+            else:
+                rgba = None
+            if rgba is not None:
+                hidden_alpha += int(((rgba[..., 3] == 0) & (rgba[..., :3] != 0).any(axis=-1)).sum())
+            frame_lossless = _lossless(im, data, sniffed)
+            lossless = lossless and frame_lossless
+            if not (frame_lossless and im.mode in ("L", "LA", "RGB", "RGBA")):
+                continue
             arr = np.asarray(im)
             if arr.ndim == 2:
                 arr = arr[..., None]
             names = {"L": "L", "LA": "L", "RGB": "RGB", "RGBA": "RGB"}[im.mode]
-            estimates = {}
+            got = False
             for i, name in enumerate(names):
                 est = lsb_payload_estimate(arr[..., i])
                 if est is not None:
-                    estimates[name] = est
-            if estimates:
-                worst = max(estimates.values())
-                detail = "estimated payload " + ", ".join(f"{k}={v:.0%}" for k, v in estimates.items())
-                if worst >= SPA_LIKELY:
-                    findings.append(Finding(HIDDEN, "Likely LSB steganography", detail + " of capacity"))
-                elif worst >= SPA_POSSIBLE:
-                    findings.append(Finding(HIDDEN, "Possible LSB steganography", detail + " of capacity"))
-    return findings
+                    estimates[name] = max(estimates.get(name, 0.0), est)
+                    got = True
+            if got:
+                tested += 1
+            else:
+                too_small = True
+        if hidden_alpha:
+            findings.append(Finding(HIDDEN, "Colour data under fully transparent pixels", f"{hidden_alpha} pixels"))
+    if not tested:
+        return PixelScan(findings, stego.not_scanned(_untestable_reason(fmt, lossless, modes, too_small)))
+    coverage = "".join(estimates) + (" channels" if len(estimates) > 1 else " channel")
+    complete = tested == n_frames
+    if n_frames > 1:
+        coverage += f", {tested} of {n_frames} frames"
+    worst = max(estimates.values())
+    detail = "estimated payload " + ", ".join(f"{k}={v:.0%}" for k, v in estimates.items()) + " of capacity"
+    if worst >= SPA_LIKELY:
+        findings.append(Finding(HIDDEN, "Likely LSB steganography", detail))
+        return PixelScan(findings, stego.Verdict(stego.DETECTED, stego.LIKELY, detail, complete))
+    if worst >= SPA_POSSIBLE:
+        findings.append(Finding(HIDDEN, "Possible LSB steganography", detail))
+        return PixelScan(findings, stego.Verdict(stego.DETECTED, stego.POSSIBLE, detail, complete))
+    return PixelScan(findings, stego.Verdict(stego.NOT_DETECTED, detail=coverage, complete=complete))
 
 
 def _palette_findings(im: Image.Image) -> list[Finding]:
@@ -148,10 +225,9 @@ def _palette_findings(im: Image.Image) -> list[Finding]:
     pal = im.getpalette("RGB") or []
     n = len(pal) // 3
     used = np.flatnonzero(np.bincount(idx.ravel(), minlength=256))
-    unused = [i for i in range(n) if i not in set(used.tolist())]
-    nonzero_unused = [i for i in unused if any(pal[3 * i : 3 * i + 3])]
-    if nonzero_unused:
-        out.append(Finding(HIDDEN, "Unused palette entries with colour data", f"{len(nonzero_unused)} of {n} entries"))
+    unused = unused_palette_entries(im)
+    if unused:
+        out.append(Finding(HIDDEN, "Unused palette entries with colour data", f"{unused} of {n} entries"))
     colors = [tuple(pal[3 * i : 3 * i + 3]) for i in used.tolist() if i < n]
     if len(colors) != len(set(colors)):
         out.append(
