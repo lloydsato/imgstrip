@@ -42,6 +42,7 @@ def rebuild(data: bytes, orientation: int = 1, icc: bytes | None = None) -> tupl
     body = bytearray()
     had_jfif = False
     adobe_transform = None
+    sequential = False
     while True:
         if pos >= n:
             raise JpegError("missing end-of-image marker")
@@ -73,11 +74,17 @@ def rebuild(data: bytes, orientation: int = 1, icc: bytes | None = None) -> tupl
         elif marker == 0xEE and payload.startswith(b"Adobe") and len(payload) >= 12:
             adobe_transform = payload[11]
         elif marker == 0xDA:
+            if sequential and len(payload) >= 4:
+                # A sequential scan always covers coefficients 0..63 in one pass, so decoders ignore these three
+                # bytes; write their standard values rather than copy whatever the original put there.
+                payload = payload[:-3] + b"\x00\x3f\x00"
             body += _segment(marker, payload)
             end = _scan_end(data, pos)
             body += data[pos:end]
             pos = end
         elif marker in _KEEP:
+            if marker in (0xC0, 0xC1):
+                sequential = True
             body += _segment(marker, payload)
     trailing = data[pos:]
     dropped = trailing.count(b"\xff\xd8\xff")

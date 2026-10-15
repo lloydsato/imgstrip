@@ -434,6 +434,79 @@ def cmyk_jpeg() -> bytes:
     return _insert_after_soi(data, _jpeg_segment(0xFE, b"CANARY-COMMENT cmyk"))
 
 
+def bmp_hidden_fields() -> bytes:
+    """An 8-bit BMP that hides data wherever a decoder never looks.
+
+    Row padding, the reserved byte of every palette entry, palette entries no pixel uses, a print resolution, the
+    unused 'important colours' count and the reserved words of the file header.
+    """
+    width, height, entries = 13, 9, 16
+    palette = bytearray()
+    for i in range(entries):
+        if i < 8:  # used entries: a colour, and a reserved byte that carries data
+            palette += bytes((i * 30, 255 - i * 30, 40 * (i % 3), b"CANARY-P"[i]))
+        else:  # unused entries: data in plain sight
+            palette += b"CANARY-HIDDEN-IN-THE-PALETTE...."[4 * (i - 8) : 4 * (i - 7)]
+    rng = np.random.default_rng(3)
+    rows = bytearray()
+    for y in range(height):
+        rows += rng.integers(0, 8, width).astype(np.uint8).tobytes()
+        rows += b"CANARY-HIDDEN-"[3 * y : 3 * y + 3].ljust(3, b"!")  # a row is padded to 16 bytes
+    dib = struct.pack("<IiiHHIIiiII", 40, width, height, 1, 8, 0, len(rows), 11811, 11811, entries, 7)
+    start = 14 + len(dib) + len(palette)
+    return b"BM" + struct.pack("<IHHI", start + len(rows), 0x4143, 0x4E41, start) + dib + bytes(palette) + bytes(rows)
+
+
+def gif_hidden_fields() -> bytes:
+    """A GIF whose 256-entry colour table holds data in the entries its pixels never use, and reserved header bits."""
+    im = Image.fromarray(np.random.default_rng(5).integers(0, 3, (20, 24)).astype(np.uint8), "P")
+    table = bytearray(768)
+    table[:9] = bytes([0, 0, 0, 255, 0, 0, 0, 255, 0])
+    text = b"CANARY-HIDDEN-IN-THE-COLOUR-TABLE"
+    table[300 : 300 + len(text)] = text
+    im.putpalette(bytes(table))
+    buf = io.BytesIO()
+    im.save(buf, "GIF", optimize=False)
+    data = bytearray(buf.getvalue())
+    data[11] = 77  # the background index
+    pos = 13 + 768
+    data[pos + 9] |= 0x18  # the two reserved bits of the frame header
+    return bytes(data)
+
+
+def tiff_hidden_fields() -> bytes:
+    """A palette TIFF with data in the low bytes of its colour map, and in the unused half of its tag fields."""
+    im = Image.fromarray(np.random.default_rng(6).integers(0, 4, (14, 18)).astype(np.uint8), "P")
+    im.putpalette([0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255])
+    buf = io.BytesIO()
+    im.save(buf, "TIFF", compression="raw")
+    data = bytearray(buf.getvalue())
+    e = "<" if data[:2] == b"II" else ">"
+    ifd = struct.unpack_from(e + "I", data, 4)[0]
+    for k in range(struct.unpack_from(e + "H", data, ifd)[0]):
+        entry = ifd + 2 + 12 * k
+        tag, kind, count = struct.unpack_from(e + "HHI", data, entry)
+        if tag == 320:  # the colour map: 256 sixteen-bit entries per channel; decoders keep the high byte only
+            start = struct.unpack_from(e + "I", data, entry + 8)[0]
+            for i, ch in enumerate(b"CANARY-HIDDEN-IN-THE-COLOUR-MAP"):
+                data[start + 2 * (10 + i) + (0 if e == "<" else 1)] = ch
+        elif kind == 3 and count == 1:  # an inline SHORT fills two of its four bytes
+            data[entry + 10 : entry + 12] = b"CA"
+    return bytes(data)
+
+
+def jpeg_scan_tricks() -> bytes:
+    """A JPEG with data in fields baseline decoders ignore: the scan's spectral parameters and the JFIF version."""
+    buf = io.BytesIO()
+    Image.fromarray(photo(48, 40)).save(buf, "JPEG", quality=90)
+    data = bytearray(buf.getvalue())
+    sos = data.index(b"\xff\xda")
+    (length,) = struct.unpack_from(">H", data, sos + 2)
+    data[sos + 2 + length - 3 : sos + 2 + length] = b"\x01\x3f\x11"
+    data[data.index(b"JFIF") + 5] = 9
+    return _insert_after_soi(bytes(data), _jpeg_segment(0xFE, b"CANARY-COMMENT scan tricks"))
+
+
 def all_fixtures() -> dict[str, bytes]:
     out = {
         "jpeg_everything.jpg": jpeg_everything(),
@@ -452,6 +525,10 @@ def all_fixtures() -> dict[str, bytes]:
         "bmp_trailer.bmp": bmp_with_trailer(),
         "avif_everything.avif": avif_everything(),
         "cmyk.jpg": cmyk_jpeg(),
+        "bmp_hidden_fields.bmp": bmp_hidden_fields(),
+        "gif_hidden_fields.gif": gif_hidden_fields(),
+        "tiff_hidden_fields.tif": tiff_hidden_fields(),
+        "jpeg_scan_tricks.jpg": jpeg_scan_tricks(),
     }
     heic = heic_everything()
     if heic is not None:

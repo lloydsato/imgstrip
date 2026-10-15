@@ -80,7 +80,7 @@
             <label class="switch">
               <input type="checkbox" role="switch" name="deep">
               <span class="switch-track" aria-hidden="true"></span>
-              <span class="switch-text"><span>Deep scan</span><span class="hint">Also search the pixels for steganography and hidden colour. Slower.</span></span>
+              <span class="switch-text"><span>Deep scan</span><span class="hint">Also search the pixels for steganography and hidden colour. Slower. It can find a payload, never prove there is none.</span></span>
             </label>
             <label class="switch">
               <input type="checkbox" role="switch" name="jpeg_lossless">
@@ -90,7 +90,7 @@
             <label class="switch">
               <input type="checkbox" role="switch" name="scrub_lsb">
               <span class="switch-track" aria-hidden="true"></span>
-              <span class="switch-text"><span>Scrub least-significant bits</span><span class="hint">Destroys LSB steganography. Changes pixels by at most 1.</span></span>
+              <span class="switch-text"><span>Scrub least-significant bits</span><span class="hint">Destroys LSB steganography. Changes pixels by at most 1. Other ways of hiding data are not covered.</span></span>
             </label>
             <label class="switch">
               <input type="checkbox" role="switch" name="scrub_prnu">
@@ -238,7 +238,7 @@
         <li><strong>The picture itself stays.</strong> Faces, reflections, street signs and landmarks can still identify people and places. imgstrip never alters what the image shows.</li>
         <li><strong>Robust watermarks can survive.</strong> Marks built to outlast re-encoding (Digimarc, SynthID and similar) live in the pixels. imgstrip removes C2PA manifests, not content watermarks.</li>
         <li><strong>File names can leak.</strong> Names like IMG_20240517_133700 carry a date. Cleaned files keep the original name plus <code>.clean</code>; rename them before sharing if that matters.</li>
-        <li><strong>Data hidden in the pixels can survive.</strong> Lossless cleaning keeps every pixel value, so a steganography payload stored in them stays unless <em>Scrub least-significant bits</em> is on. <em>Deep scan</em> looks for one first.</li>
+        <li><strong>Data hidden in the pixels can survive.</strong> Lossless cleaning keeps every pixel value, so a steganography payload stored in them stays unless <em>Scrub least-significant bits</em> is on. <em>Deep scan</em> looks for one first, but a scan that finds nothing is not proof that nothing is hidden, and scrubbing covers LSB payloads only.</li>
         <li><strong>The camera's sensor fingerprint stays.</strong> Every sensor leaves a faint noise pattern in the pixels, and anyone holding other photos from the same camera can match it. Cleaning keeps it. <em>Disrupt camera fingerprint</em> scrambles it and defeats the standard matching test, but absence can't be proven.</li>
         <li><strong>Lossy formats are re-encoded.</strong> JPEG, WebP, AVIF and HEIF lose a little quality. <em>Keep JPEG data bit-exact</em> avoids that for JPEGs, but keeps any data hidden in the JPEG coefficients.</li>
         <li><strong>Content Credentials vouch for processing only.</strong> If you sign, the credential says what you did to the file, not who took the picture or that it is real. It carries no trusted timestamp (imgstrip never goes online), so viewers treat it as invalid once your certificate expires, and shows "Unverified" unless the certificate's issuer is on the C2PA Trust List.</li>

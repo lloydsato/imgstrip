@@ -459,19 +459,29 @@ def _frame_palette(pixels: np.ndarray, transparent: np.ndarray | None, reserve_t
 
 
 def _quantize_rect(pixels: np.ndarray, transparent: np.ndarray | None, reserve_transparent: bool):
-    """Lossy fallback for rectangles with more colours than GIF allows."""
+    """Lossy fallback for rectangles with more colours than GIF allows.
+
+    The palette is compacted to the colours the quantised pixels actually use and zero-padded, like the exact
+    path: a quantiser can leave entries nothing refers to, and an unreferenced entry is space for hidden data.
+    """
     colors = 255 if reserve_transparent else 256
     rgb = Image.fromarray(np.ascontiguousarray(pixels[..., :3]), "RGB")
     q = rgb.quantize(colors=colors, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG)
     index = np.asarray(q).copy()
     pal = np.frombuffer(bytes(q.getpalette("RGB")[: 3 * colors]), np.uint8).reshape(-1, 3)
+    visible = index if transparent is None or not transparent.any() else index[~transparent]
+    used = np.unique(visible)
+    remap = np.zeros(256, np.uint8)
+    remap[used] = np.arange(len(used), dtype=np.uint8)
+    index = remap[index]
     t_index = None
     if reserve_transparent:
-        t_index = colors
+        t_index = len(used)
         if transparent is not None:
             index[transparent] = t_index
-    full = np.zeros((256, 3), np.uint8)
-    full[: len(pal)] = pal
+    n = len(used) + (1 if reserve_transparent else 0)
+    full = np.zeros((max(2, 1 << max(1, (n - 1).bit_length())), 3), np.uint8)
+    full[: len(used)] = pal[used]
     return index, full.tobytes(), t_index
 
 
