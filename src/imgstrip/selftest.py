@@ -6,8 +6,10 @@ format, and checks that
 
 * no canary survives anywhere in the output bytes,
 * the strict container inspector finds nothing,
-* the output decodes to the expected picture, and
-* (when installed) exiftool reports no metadata tags either.
+* the output decodes to the expected picture,
+* (when installed) exiftool reports no metadata tags either, and
+* readers that share no code with imgstrip or Pillow (a strict PNG reader written for this purpose, plus
+  ImageMagick and FFmpeg when installed) read the output and see the same pixels.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import subprocess
 import tempfile
 import time
 
-from . import fixtures
+from . import fixtures, oracles
 from .core import OUTPUT_FORMATS, Options, StripError, heif_available, strip_image
 from .inspect import inspect_bytes
 
@@ -78,7 +80,9 @@ def exiftool_findings(data: bytes, suffix: str, allow_icc: bool = False) -> list
     return bad
 
 
-def _check(name: str, data: bytes, options: Options, label: str, verbose: bool) -> list[str]:
+def _check(
+    name: str, data: bytes, options: Options, label: str, verbose: bool, readers: dict[str, int] | None = None
+) -> list[str]:
     problems: list[str] = []
     try:
         result = strip_image(data, options)
@@ -112,6 +116,11 @@ def _check(name: str, data: bytes, options: Options, label: str, verbose: bool) 
         tool = [t for t in tool if not (options.jpeg_lossless and "Orientation" in t)]
         if tool:
             problems.append(f"{label}: exiftool reports {tool}")
+    second = oracles.differential(out, result.output_format, result.verified_exact, allow_icc=options.icc == "sanitize")
+    problems += [f"{label}: {p}" for p in second.problems]
+    if readers is not None:
+        for reader in second.readers:
+            readers[reader] = readers.get(reader, 0) + 1
     if verbose:
         status = "ok " if not problems else "BAD"
         print(
@@ -175,7 +184,9 @@ def run_self_test(verbose: bool = False) -> int:
         f"  {len(fx)} fixtures; exiftool cross-check {'enabled' if exiftool else 'not available'}; "
         f"HEIF {'enabled' if heif_available() else 'not available'}"
     )
+    print(f"  independent readers: {', '.join(oracles.available())}")
     problems: list[str] = []
+    readers: dict[str, int] = {}
     runs = 0
     formats = [f for f in OUTPUT_FORMATS if f != "HEIF" or heif_available()]
     for name, data in fx.items():
@@ -191,7 +202,7 @@ def run_self_test(verbose: bool = False) -> int:
             variants.append((f"to {fmt.lower()}", Options(format=fmt)))
         for label, opts in variants:
             runs += 1
-            problems += [f"{name}: {p}" for p in _check(name, data, opts, label, verbose)]
+            problems += [f"{name}: {p}" for p in _check(name, data, opts, label, verbose, readers)]
     credential_runs, credential_problems = _credential_self_test(fx, verbose)
     problems += credential_problems
     elapsed = time.time() - start
@@ -201,5 +212,12 @@ def run_self_test(verbose: bool = False) -> int:
             print("  - " + p)
         return 1
     extra = f" and {credential_runs} signing runs (Content Credentials)" if credential_runs else ""
-    print(f"PASSED: {runs} strip runs{extra}, no metadata or canaries survived ({elapsed:.1f}s)")
+    agreed = (
+        "; independent readers saw the same pixels ("
+        + ", ".join(f"{name} on {count} outputs" for name, count in sorted(readers.items()))
+        + ")"
+        if readers
+        else ""
+    )
+    print(f"PASSED: {runs} strip runs{extra}, no metadata or canaries survived{agreed} ({elapsed:.1f}s)")
     return 0

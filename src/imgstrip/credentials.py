@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import __version__, jumbf
+from . import __version__, jumbf, stego
 from .core import Options, Result, StripError, canonical_frames
 from .inspect import Finding, inspect_bytes, is_c2pa_finding, sniff_format
 
@@ -873,7 +873,7 @@ def _operations(result: Result, options: Options, source_frames: int) -> list[st
         ops.add("colour-converted")
     if result.prnu_applied:
         ops.add("sensor-fingerprint-disrupted")
-    if any(a.startswith("randomised the least-significant bit") for a in result.actions):
+    if result.lsb_scrub in (stego.SCRUB_APPLIED, stego.SCRUB_PARTIAL):  # what was done, not what was asked
         ops.add("lsb-scrubbed")
     if result.frames != source_frames:
         ops.add("frames-dropped")

@@ -15,7 +15,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import __version__
+from . import __version__, stego
 from .core import EXTENSIONS, OUTPUT_FORMATS, Options, StripError, strip_image
 from .inspect import inspect_bytes
 
@@ -142,6 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  imgstrip -r ~/Pictures -o ~/clean  mirror a folder tree\n"
             "  imgstrip -i *.png                  replace files in place (atomically)\n"
             "  imgstrip --check --deep img.png    report metadata and run steganalysis\n"
+            "  imgstrip --scrub-lsb img.png       also destroy LSB steganography\n"
             "  cat a.heic | imgstrip - --format jpeg > a.jpg\n"
             "\nexit status: 0 success/clean, 1 errors, 2 usage, 3 --check found data"
         ),
@@ -271,7 +272,10 @@ def build_parser() -> argparse.ArgumentParser:
     mode = p.add_argument_group("modes")
     mode.add_argument("--check", action="store_true", help="only report metadata/hidden data; write nothing")
     mode.add_argument(
-        "--deep", action="store_true", help="with --check: also decode pixels (steganalysis, hidden colour, palettes)"
+        "--deep",
+        action="store_true",
+        help="also decode the pixels (steganalysis, hidden colour, palettes), with --check or when cleaning; "
+        "'not detected' is never proof that nothing is hidden",
     )
     mode.add_argument("-n", "--dry-run", action="store_true", help="process everything in memory but write nothing")
     mode.add_argument("--json", action="store_true", help="machine-readable JSON output")
@@ -430,6 +434,18 @@ def _findings_payload(findings) -> list[dict]:
     return [{"category": f.category, "label": f.label, "detail": f.detail} for f in findings]
 
 
+def pixel_scan(data: bytes):
+    """Scan the pixels; a failure becomes a 'not scanned' verdict instead of an error."""
+    from .analysis import PixelScan, scan_pixels
+
+    try:
+        return scan_pixels(data)
+    except StripError as exc:
+        return PixelScan([], stego.not_scanned(f"pixel analysis failed: {exc}"))
+    except MemoryError:
+        return PixelScan([], stego.not_scanned("pixel analysis ran out of memory"))
+
+
 def check_one(task: Task, deep: bool) -> Outcome:
     try:
         data = _read(task.source)
@@ -444,19 +460,18 @@ def check_one(task: Task, deep: bool) -> Outcome:
         if task.from_walk:
             return Outcome(task, "skipped", message="not a recognised image container")
         notes.append("container format not inspected (only pixel analysis available)")
+    verdict = stego.not_scanned("the pixels were not scanned (add --deep to test them)")
     if deep:
-        from .analysis import analyze_pixels
-
-        try:
-            findings += analyze_pixels(data)
-        except StripError as exc:
-            notes.append(f"pixel analysis failed: {exc}")
+        scan = pixel_scan(data)
+        findings += scan.findings
+        verdict = scan.verdict
     payload = {
         "format": report.format,
         "size": report.info.get("size"),
         "clean": not findings and report.error is None,
         "error": report.error,
         "findings": _findings_payload(findings),
+        "steganography": verdict.as_dict(),
         "notes": notes,
     }
     if any("C2PA content credentials" in f.label for f in findings):
@@ -487,6 +502,8 @@ def strip_one(task: Task, options: Options, args, single: bool) -> Outcome:
         return Outcome(task, "failed", message=str(exc))
     except MemoryError:
         return Outcome(task, "failed", message="out of memory")
+    scan = pixel_scan(data) if args.deep else None
+    verdict = stego.for_output(scan.verdict if scan else None, result.lsb_scrub, copied=result.verified_exact)
     evidence = None
     if args.c2pa:
         from . import credentials
@@ -513,7 +530,12 @@ def strip_one(task: Task, options: Options, args, single: bool) -> Outcome:
         "removed": _findings_payload(result.removed),
         "actions": result.actions,
         "warnings": list(result.warnings),
+        "steganography": verdict.as_dict(),
     }
+    if verdict.payload_kept:
+        payload["warnings"].append(
+            "a pixel payload was detected and is still in the cleaned file: run again with --scrub-lsb to destroy it"
+        )
     outcome = Outcome(task, "cleaned", destination=dest, payload=payload)
     outcome.payload["_data"] = result.data
     if evidence is not None:
@@ -869,6 +891,14 @@ def _credential_lines(cred: dict) -> list[str]:
     return lines
 
 
+def _stego_line(v: dict) -> str:
+    """One report line for a steganography verdict (see stego.py for the four states)."""
+    text = f"steganography: {v['headline']}: {v['summary']}"
+    if v["state"] != stego.NOT_SCANNED:  # the reason already says nothing was tested
+        text += f". {v['caveat']}"
+    return text
+
+
 _PIXEL_WORDS = {
     "identical": "identical to the file received",
     "equivalent": "same picture, re-encoded (not bit-identical)",
@@ -938,6 +968,7 @@ class Reporter:
                 print(f"           [structure] {pl['error']}", file=p)
             for note in pl.get("notes", []):
                 print(f"           note: {note}", file=p)
+            print(f"           {_stego_line(pl['steganography'])}", file=p)
             if pl.get("credential"):
                 for line in _credential_lines(pl["credential"]):
                     print(f"           {line}", file=p)
@@ -960,6 +991,9 @@ class Reporter:
                 if f["label"] not in labels:
                     labels.append(f["label"])
             print(f"           removed: {', '.join(labels)}", file=p)
+        verdict = pl["steganography"]
+        if a.deep or a.verbose or verdict["state"] in (stego.SCRUBBED, stego.DETECTED):
+            print(f"           {_stego_line(verdict)}", file=p)
         for w in pl["warnings"]:
             print(f"           warning: {w}", file=p)
         cred = pl.get("credentials")
@@ -1046,8 +1080,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--in-place and --output are mutually exclusive")
     if args.in_place and (args.random_name or STDIO in args.paths):
         parser.error("--in-place cannot be combined with --random-name or stdin")
-    if args.deep and not args.check:
-        parser.error("--deep requires --check")
+    if args.deep and args.c2pa_verify:
+        parser.error("--deep applies to --check and to cleaning, not to --c2pa-verify")
     if args.quality is not None and not 1 <= args.quality <= 100:
         parser.error("--quality must be between 1 and 100")
     if args.jobs < 1:

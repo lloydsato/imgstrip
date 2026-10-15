@@ -23,8 +23,8 @@ from PIL import Image, ImageCms, UnidentifiedImageError
 
 from . import codecs
 from . import icc as iccmod
-from . import prnu
-from .inspect import Finding, Report, inspect_bytes
+from . import prnu, stego
+from .inspect import Finding, Report, inspect_bytes, transparent_palette_colour, unused_palette_entries
 
 try:  # optional HEIC/HEIF support
     import pillow_heif
@@ -155,6 +155,10 @@ class Result:
     # The sensor-fingerprint disruption was requested and applied (it is skipped, with a
     # warning, for palette images, transparent colour keys and tiny images).
     prnu_applied: bool = False
+    # What the engine did about --scrub-lsb (stego.SCRUB_*): "off" when it was not requested, and
+    # "not_applied" when it was requested but could not be done (bit-exact JPEG, 1-bit or float
+    # images).  Reports and credentials must use this, never the option.
+    lsb_scrub: str = stego.SCRUB_OFF
 
 
 # --------------------------------------------------------------------------
@@ -472,6 +476,7 @@ class _Job:
         self.embed_icc: bytes | None = None
         self.exact = True
         self.prnu_applied = False
+        self.lsb_scrub = stego.SCRUB_OFF if not options.scrub_lsb else stego.SCRUB_NOT_APPLIED
 
     # -- entry point ------------------------------------------------------
 
@@ -584,6 +589,7 @@ class _Job:
             input_report=self.before,
             verified_exact=exact,
             prnu_applied=self.prnu_applied,
+            lsb_scrub=self.lsb_scrub,
         )
 
     # -- format / frame selection -----------------------------------------
@@ -941,6 +947,7 @@ class _Job:
     def _scrub_lsb(self, frames: list[Frame]) -> None:
         rng = np.random.default_rng(int.from_bytes(os.urandom(16), "big"))
         skipped = set()
+        scrubbed = 0
         for f in frames:
             if f.array is None and f.image.mode == "P":
                 rgba = _palette_to_rgba(f)
@@ -950,6 +957,7 @@ class _Job:
             if f.array is not None:
                 arr = f.array
                 f.array = self._randomize_lsb(arr, rng, arr.shape[2] in (2, 4), 0xFFFF)
+                scrubbed += 1
                 continue
             mode = f.image.mode
             if mode in ("L", "LA", "RGB", "RGBA", "CMYK"):
@@ -958,13 +966,17 @@ class _Job:
                     arr = arr[..., None]
                 out = self._randomize_lsb(arr, rng, mode in ("LA", "RGBA"), 0xFF)
                 f.image = _from_array(out[..., 0] if mode == "L" else out, mode)
+                scrubbed += 1
             elif mode == "I;16":
                 arr = np.asarray(f.image).astype(np.uint16)[..., None]
                 f.image = _from_array(self._randomize_lsb(arr, rng, False, 0xFFFF)[..., 0], "I;16")
+                scrubbed += 1
             else:
                 skipped.add(mode)
-        self.exact = False
-        self.actions.append("randomised the least-significant bit of every colour sample (anti-steganography)")
+        if scrubbed:
+            self.exact = False
+            self.actions.append("randomised the least-significant bit of every colour sample (anti-steganography)")
+            self.lsb_scrub = stego.SCRUB_APPLIED if scrubbed == len(frames) else stego.SCRUB_PARTIAL
         if skipped:
             self.warnings.append(f"LSB scrubbing not applicable to {', '.join(sorted(skipped))} images")
 
@@ -1348,8 +1360,29 @@ class _Job:
             error = _mean_error(got, want, alpha, exact=tolerance == 0.0)
             if tolerance == 0.0 and error:
                 raise VerificationError(f"frame {i}: pixels changed during lossless re-encoding")
+            if tolerance == 0.0:
+                self._verify_nothing_hidden_in_pixels(i, check, got, alpha, frame.array is not None)
             if error > tolerance:
                 raise VerificationError(f"frame {i}: re-encoded image deviates too much (mean error {error:.1f})")
+
+    @staticmethod
+    def _verify_nothing_hidden_in_pixels(i: int, check: Image.Image, got: np.ndarray, alpha: bool, wide: bool) -> None:
+        """Lossless output must not keep data the viewer never sees, whatever container it sits in.
+
+        The container inspector cannot see these (they are values inside the pixel data or colour table), and the
+        pixel comparison above ignores them (colour under a fully transparent pixel is invisible).
+        """
+        if check.mode == "P":
+            unused = unused_palette_entries(check)
+            if unused:
+                raise VerificationError(f"frame {i}: {unused} unused palette entries hold colour data")
+            clear = transparent_palette_colour(check)
+            if clear:
+                raise VerificationError(f"frame {i}: {clear} fully transparent palette entries hold colour data")
+        elif alpha and (wide or check.mode in ("LA", "RGBA")):
+            hidden = int(((got[..., -1] == 0) & (got[..., :-1] != 0).any(axis=-1)).sum())
+            if hidden:
+                raise VerificationError(f"frame {i}: colour data hidden under {hidden} fully transparent pixels")
 
     # -- lossless JPEG ----------------------------------------------------------
 
@@ -1426,6 +1459,7 @@ class _Job:
             frames=1,
             pixels_exact=True,
             input_report=self.before,
+            lsb_scrub=self.lsb_scrub,
         )
 
 
