@@ -92,6 +92,11 @@
               <span class="switch-text"><span>Scrub least-significant bits</span><span class="hint">Destroys LSB steganography. Changes pixels by at most 1.</span></span>
             </label>
             <label class="switch">
+              <input type="checkbox" role="switch" name="scrub_prnu">
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-text"><span>Disrupt camera fingerprint</span><span class="hint">Scrambles the sensor noise that can link a photo to one camera. Shifts parts of the picture by a few pixels.</span></span>
+            </label>
+            <label class="switch">
               <input type="checkbox" role="switch" name="auto_orient" checked>
               <span class="switch-track" aria-hidden="true"></span>
               <span class="switch-text"><span>Apply orientation</span><span class="hint">Rotate the pixels so the photo stays upright without its tag.</span></span>
@@ -170,6 +175,7 @@
         <li><strong>Robust watermarks can survive.</strong> Marks built to outlast re-encoding (Digimarc, SynthID and similar) live in the pixels. imgstrip removes C2PA manifests, not content watermarks.</li>
         <li><strong>File names can leak.</strong> Names like IMG_20240517_133700 carry a date. Cleaned files keep the original name plus <code>.clean</code>; rename them before sharing if that matters.</li>
         <li><strong>Data hidden in the pixels can survive.</strong> Lossless cleaning keeps every pixel value, so a steganography payload stored in them stays unless <em>Scrub least-significant bits</em> is on. <em>Deep scan</em> looks for one first.</li>
+        <li><strong>The camera's sensor fingerprint stays.</strong> Every sensor leaves a faint noise pattern in the pixels, and anyone holding other photos from the same camera can match it. Cleaning keeps it. <em>Disrupt camera fingerprint</em> scrambles it and defeats the standard matching test, but absence can't be proven.</li>
         <li><strong>Lossy formats are re-encoded.</strong> JPEG, WebP, AVIF and HEIF lose a little quality. <em>Keep JPEG data bit-exact</em> avoids that for JPEGs, but keeps any data hidden in the JPEG coefficients.</li>
         <li><strong>Originals stay as they are.</strong> imgstrip never modifies or deletes them; securely erasing old copies is up to you.</li>
       </ul>
