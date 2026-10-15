@@ -234,7 +234,7 @@ body.is-dragging .window { box-shadow: 0 0 0 2px var(--focus), var(--window-shad
 .hint { font-weight: 400; color: var(--ink-3); }
 .select { position: relative; display: block; }
 .select .icon { position: absolute; right: 9px; top: 9px; width: 18px; height: 18px; color: var(--ink-3); pointer-events: none; }
-select, input[type="text"] {
+select, input[type="text"], input[type="password"] {
   width: 100%; height: 36px;
   border: 1px solid var(--field-line); border-radius: var(--r-ctl);
   background-color: var(--panel); color: var(--ink);
@@ -242,11 +242,11 @@ select, input[type="text"] {
   transition: border-color var(--fast) var(--ease);
 }
 select { appearance: none; -webkit-appearance: none; padding: 0 32px 0 11px; text-overflow: ellipsis; cursor: pointer; }
-input[type="text"] { padding: 0 11px; font-family: var(--mono); font-size: 0.8125rem; }
+input[type="text"], input[type="password"] { padding: 0 11px; font-family: var(--mono); font-size: 0.8125rem; }
 input[aria-invalid="true"] { border-color: var(--warn); }
-select:focus-visible, input[type="text"]:focus-visible { outline-offset: 0; border-color: var(--focus); }
+select:focus-visible, input[type="text"]:focus-visible, input[type="password"]:focus-visible { outline-offset: 0; border-color: var(--focus); }
 input::placeholder { color: var(--ink-3); opacity: 1; }
-@media (hover: hover) { select:hover, input[type="text"]:hover { border-color: var(--ink-2); } }
+@media (hover: hover) { select:hover, input[type="text"]:hover, input[type="password"]:hover { border-color: var(--ink-2); } }
 
 .switches {
   grid-column: 1 / -1;
@@ -518,6 +518,64 @@ body.tips-off .seal-tip { display: none !important; }
 }
 body.is-dragging .drop-veil { opacity: 1; }
 
+
+/* ---- content credentials (optional) ------------------------------------------------- */
+
+#credentials[data-open="true"] { border-top: 1px solid var(--line); }
+.cred { display: grid; gap: 12px; padding: 16px 18px 18px; background: var(--sunken); }
+.cred > * { min-width: 0; }
+.cred-title { font-size: var(--t-sm); font-weight: 650; color: var(--ink); }
+.cred-title .hint { margin-left: 6px; font-size: var(--t-xs); }
+.cred-lede { max-width: 64ch; font-size: var(--t-xs); line-height: 1.5; color: var(--ink-2); }
+
+.cred-identity { display: grid; gap: 10px; }
+.cred-card {
+  display: grid; gap: 8px; padding: 12px 14px;
+  border-radius: var(--r-ctl); background: var(--panel); box-shadow: inset 0 0 0 1px var(--line);
+}
+.cred-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cred-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: var(--t-sm); font-weight: 650; overflow-wrap: anywhere; }
+.cred-name .icon { width: 17px; height: 17px; flex: none; color: var(--ink-3); }
+.cred-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 14px; font-size: var(--t-xs); color: var(--ink-2); }
+.cred-facts dt { color: var(--ink-3); }
+.cred-facts dd { overflow-wrap: anywhere; }
+.cred-facts .mono { font-size: 0.6875rem; }
+.cred-empty { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; font-size: var(--t-sm); color: var(--ink-2); }
+.cred-empty p { flex: 1 1 14em; }
+.cred-notes { display: grid; gap: 6px; }
+.cred-notes .note { font-size: var(--t-xs); max-width: none; }
+
+.cred-load { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+.cred-load .cred-error, .cred-load .cred-actions { grid-column: 1 / -1; }
+.cred-actions { display: flex; gap: 8px; }
+input[type="file"] { width: 100%; min-width: 0; font-size: var(--t-xs); color: var(--ink-2); }
+input[type="file"]::file-selector-button {
+  height: 32px; margin-right: 10px; padding: 0 12px;
+  border: 1px solid var(--field-line); border-radius: var(--r-ctl);
+  background: var(--panel); color: var(--ink); font: inherit; font-size: var(--t-sm); font-weight: 560; cursor: pointer;
+}
+input[type="file"]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--r-ctl); }
+
+.cred-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+.cred-commit { grid-column: 1 / -1; padding-top: 2px; }
+.cred-hints { display: grid; gap: 6px; }
+.cred-hints .note { font-size: var(--t-xs); max-width: none; }
+.cred-receipts { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+.cred-receipts .note { font-size: var(--t-xs); flex: 1 1 18em; max-width: none; }
+
+/* a signed file's credential, in its detail */
+.credential {
+  display: grid; gap: 6px; padding: 12px 14px;
+  border-radius: var(--r-ctl); background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line);
+  font-size: var(--t-sm);
+}
+.credential .group-title .icon { width: 16px; height: 16px; color: var(--ink-3); }
+.credential-line { color: var(--ink-2); }
+.credential-line strong { color: var(--ink); font-weight: 600; }
+.credential-state { font-size: var(--t-xs); color: var(--ink-3); }
+.credential .note { font-size: var(--t-xs); }
+.credential.is-found { background: var(--panel); }
+
 /* ---- narrow screens --------------------------------------------------------------- */
 
 @media (max-width: 640px) {
@@ -525,6 +583,8 @@ body.is-dragging .drop-veil { opacity: 1; }
   .bar { padding: 0 6px 0 14px; }
   .options { grid-template-columns: minmax(0, 1fr); padding: 14px; }
   .switches { grid-template-columns: minmax(0, 1fr); }
+  .cred { padding: 14px; }
+  .cred-load, .cred-settings { grid-template-columns: minmax(0, 1fr); }
   .body { padding: 10px; }
   .well { padding: 24px 18px 20px; }
   /* the name gets the full width; the status drops under it */
@@ -564,7 +624,8 @@ body.is-dragging .drop-veil { opacity: 1; }
   .switch-track::after { background: CanvasText; }
   .switch input:checked + .switch-track { background: Highlight; }
   .switch input:checked + .switch-track::after { background: HighlightText; }
-  .status-count, .reveals, .verified, .items { outline: 1px solid CanvasText; }
+  .status-count, .reveals, .verified, .items, .credential, .cred-card { outline: 1px solid CanvasText; }
+  input[type="file"]::file-selector-button { border-color: ButtonText; }
   .btn-plate { border-color: ButtonText; }
   .btn[aria-disabled="true"] { color: GrayText; border-color: GrayText; }
   .seal-tip { border: 1px solid CanvasText; }

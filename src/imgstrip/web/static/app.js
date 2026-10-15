@@ -20,6 +20,15 @@
   const OPTION_DEFAULTS = {
     format: '', quality: '', icc: 'convert',
     deep: false, jpeg_lossless: false, scrub_lsb: false, scrub_prnu: false, auto_orient: true, optimize: false,
+    c2pa: false, c2pa_date: 'day', c2pa_detail: 'minimal', c2pa_commit: false,
+  };
+  // Never carried from one launch to the next: signing needs an identity loaded in this very run,
+  // and committing to the original is a deliberate act each time.
+  const VOLATILE = ['c2pa', 'c2pa_commit'];
+  const PIXELS = {
+    identical: 'The pixels are identical to the file you received.',
+    equivalent: 'The picture is the same, but it was re-encoded, so pixel values are not bit-identical.',
+    altered: 'The pixels were deliberately altered to protect the source.',
   };
   const OPTIONS_KEY = 'imgstrip.options.v1';
   const TOKEN_KEY = 'imgstrip.token';
@@ -45,6 +54,10 @@
     saving: false,
     gate: null,
     lastFolder: null,
+    identity: null, // what the server says about the loaded signing identity (never the key)
+    testRoot: null, // PEM of the test CA when a test identity was made here
+    receipts: 0,
+    loadingIdentity: false,
   };
 
   const els = {
@@ -55,6 +68,12 @@
     optionsToggle: $('#optionsToggle'), optionsForm: $('#optionsForm'), limits: $('#limits'),
     limitsToggle: $('#limitsToggle'), clear: $('#clear'), choose: $('#choose'), announce: $('#announce'),
     gate: $('#gate'), gateTitle: $('#gateTitle'), gateText: $('#gateText'),
+    credentials: $('#credentials'), credIdentity: $('#credIdentity'), identityForm: $('#identityForm'),
+    identityError: $('#identityError'), identityLoad: $('#identityLoad'), credCert: $('#cred-cert'),
+    credKey: $('#cred-key'), credPass: $('#cred-pass'), credAnchors: $('#cred-anchors'),
+    credDate: $('#cred-date'), credDetail: $('#cred-detail'), credCommit: $('#cred-commit'),
+    credHints: $('#credHints'), credReceipts: $('#credReceipts'), receiptText: $('#receiptText'),
+    c2paSwitch: $('#c2paSwitch'), c2paHint: $('#c2paHint'),
   };
 
   // ---------------------------------------------------------------- helpers
@@ -130,7 +149,7 @@
       const saved = JSON.parse(storage('localStorage').get(OPTIONS_KEY) || '{}');
       const out = { ...OPTION_DEFAULTS };
       for (const k of Object.keys(OPTION_DEFAULTS)) {
-        if (saved && typeof saved[k] === typeof OPTION_DEFAULTS[k]) out[k] = saved[k];
+        if (!VOLATILE.includes(k) && saved && typeof saved[k] === typeof OPTION_DEFAULTS[k]) out[k] = saved[k];
       }
       return out;
     } catch {
@@ -138,9 +157,11 @@
     }
   }
 
+  const signing = () => !!state.options.c2pa;
+
   function cleanOptions() {
     const o = state.options;
-    return {
+    const out = {
       format: o.format || null,
       quality: o.quality ? Number(o.quality) : null,
       icc: o.icc,
@@ -150,13 +171,16 @@
       auto_orient: !!o.auto_orient,
       optimize: !!o.optimize,
     };
+    if (o.c2pa) out.credentials = { sign: true, date: o.c2pa_date, detail: o.c2pa_detail, commit: !!o.c2pa_commit };
+    return out;
   }
-  const optionsKey = () => JSON.stringify(cleanOptions());
+  // A different identity is a different result, so it is part of the key.
+  const optionsKey = () => JSON.stringify([cleanOptions(), signing() && state.identity ? state.identity.fingerprint : null]);
 
   // ---------------------------------------------------------------- API
 
   class HttpError extends Error {
-    constructor(message, status) { super(message); this.status = status; }
+    constructor(message, status, code = null) { super(message); this.status = status; this.code = code; }
   }
 
   async function api(path, { method = 'POST', body, json, headers = {}, auth = true } = {}) {
@@ -187,7 +211,7 @@
         try { const j = await res.json(); message = j.error || message; code = j.code || null; } catch { /* keep default */ }
       }
       if (res.status === 403 && auth) showGate(code === 'replaced' ? 'replaced' : 'expired');
-      throw new HttpError(message, res.status);
+      throw new HttpError(message, res.status, code);
     }
     return type.includes('application/json') ? res.json() : res.blob();
   }
@@ -414,6 +438,11 @@
   async function cleanAll() {
     const todo = cleanable();
     if (!todo.length || state.run) return;
+    if (signing() && !state.identity) {
+      openCredentials();
+      showNote('Load a signing identity first, or turn off Sign with Content Credentials.', 'error');
+      return;
+    }
     const key = optionsKey();
     const options = encodeURIComponent(JSON.stringify(cleanOptions()));
     const epoch = state.epoch;
@@ -434,6 +463,7 @@
         if (!alive(item, epoch)) { discard(result.id); leave(); return; }
         if (previous) discard(previous.id);
         Object.assign(item, { result, state: 'clean', error: null, failedKey: null, justCleaned: true, sealDrawn: false });
+        if (result.credentials && result.credentials.committed) { state.receipts += 1; renderReceipts(); }
       } catch (err) {
         if (err === GONE || !alive(item, epoch)) { leave(); return; }
         item.error = err.message;
@@ -553,7 +583,7 @@
     const r = item.report;
     if (item.state === 'clean' && item.result) {
       const res = item.result;
-      return { text: `${formatName(res.output_format)} · ${res.size[0]}×${res.size[1]} · ${bytes(res.bytes_out)}` };
+      return { text: `${formatName(res.output_format)} · ${res.size[0]}×${res.size[1]} · ${bytes(res.bytes_out)}${res.credentials ? ' · signed' : ''}` };
     }
     if (item.state === 'unsupported') {
       return { text: r.raw ? `Camera RAW (${r.raw}) isn't supported` : "Not an image imgstrip can read" };
@@ -678,6 +708,40 @@
     return h('p', { class: `note${kind ? ` is-${kind}` : ''}` }, icon(glyph), h('span', { text }));
   }
 
+  // What a signed file's credential says and how public viewers will read it.
+  function credentialBlock(res) {
+    const c = res.credentials;
+    const who = c.signer || 'an unnamed signer';
+    const lines = [
+      h('p', { class: 'credential-line' }, h('strong', { text: `Signed by ${who}` }), ` · ${c.date}`),
+      h('p', { class: 'credential-line', text: PIXELS[c.pixel_integrity] || '' }),
+    ];
+    // What was done is always shown to you; it goes into the credential only at detail "full".
+    const where = c.detail === 'full' ? 'Recorded in the credential' : 'Not recorded in the credential';
+    if (c.operations && c.operations.length) lines.push(h('p', { class: 'credential-state', text: `${where}: operations ${c.operations.join(', ')}.` }));
+    if (c.psnr_db !== null && c.psnr_db !== undefined) lines.push(h('p', { class: 'credential-state', text: `${where}: measured fidelity ${c.psnr_db} dB PSNR.` }));
+    lines.push(h('p', { class: 'credential-state', text: `Public viewers will see: ${c.label}.` }));
+    for (const w of c.warnings || []) lines.push(note(w, 'warn'));
+    if (c.pixel_integrity === 'equivalent' && res.output_format === 'JPEG' && !state.options.jpeg_lossless) {
+      lines.push(note('To be able to say "identical", turn on Keep JPEG data bit-exact in Options and clean again.'));
+    }
+    if (c.committed) lines.push(note('It holds a sealed fingerprint of the original. Download the receipts in Options and keep them as private as the original.'));
+    lines.push(note('This credential vouches for what you did to the file, not for who took the picture or that it is genuine.'));
+    return h('section', { class: 'credential' }, h('h3', { class: 'group-title' }, icon('key'), 'Content Credential'), ...lines);
+  }
+
+  // A credential the scanned file already carries (cleaning removes it).
+  function foundCredential(c) {
+    const lines = [];
+    const who = c.signer ? `Signed by ${c.signer}` : 'Signer unknown';
+    lines.push(h('p', { class: 'credential-line' }, h('strong', { text: who }), c.state ? ` · ${c.label}` : ''));
+    if (c.sanitization) lines.push(h('p', { class: 'credential-line', text: `An imgstrip sanitisation credential from ${c.sanitization.date}. ${PIXELS[c.sanitization.pixel_integrity] || ''}` }));
+    if (c.declared_ai) lines.push(note('It declares this image AI-generated or AI-edited. Cleaning removes that label from the copy.', 'warn'));
+    for (const p of c.problems || []) lines.push(note(`Problem: ${p}`, 'warn'));
+    lines.push(note('Cleaning removes Content Credentials like any other metadata, so the copy is no longer signed by whoever signed this file.'));
+    return h('section', { class: 'credential is-found' }, h('h3', { class: 'group-title' }, icon('key'), 'Content Credentials found'), ...lines);
+  }
+
   function detailContent(item) {
     const r = item.report;
     // Rows clip long names; the detail repeats the whole name only when the row cut it off.
@@ -715,6 +779,7 @@
         item.sealDrawn = true;
         out.push(h('div', { class: 'verified' }, seal(res.sha256, { detail: true, animate }), checks));
       }
+      if (res.credentials) out.push(credentialBlock(res));
       const frames = res.frames > 1 ? ` · ${res.frames} frames` : '';
       out.push(h('p', { class: 'meta-line', text: `${formatName(res.input_format)} ${bytes(res.bytes_in)} → ${formatName(res.output_format)} ${bytes(res.bytes_out)} · ${res.size[0]}×${res.size[1]}${frames} · saved as ${res.filename}` }));
       if (res.key !== optionsKey()) out.push(note('Cleaned with earlier options. Clean again to apply the current ones.', 'warn'));
@@ -752,6 +817,7 @@
         h('dd', { class: x.key === 'location' || x.key === 'serial' ? 'mono' : null, text: x.value }),
       ])));
     }
+    if (r.credential && r.credential.present) out.push(foundCredential(r.credential));
     if (hasStego(r) && !state.options.scrub_lsb) {
       out.push(note('Likely LSB steganography. Cleaning removes everything else, but keeps this payload unless Scrub least-significant bits is on in Options.', 'warn'));
     }
@@ -971,10 +1037,12 @@
     }
     form.addEventListener('change', (e) => {
       const f = e.target;
+      if (!f.name) return;
       const beforeKey = optionsKey();
       const beforeDeep = state.options.deep;
       state.options[f.name] = f.type === 'checkbox' ? f.checked : f.value;
-      local.set(OPTIONS_KEY, JSON.stringify(state.options));
+      local.set(OPTIONS_KEY, JSON.stringify(persistable()));
+      if (f.name === 'c2pa') syncCredentials({ focus: state.options.c2pa });
       if (f.name === 'deep' && beforeDeep !== state.options.deep) {
         // Files still waiting re-check the setting when their scan returns (see scan()).
         for (const item of state.items) if (item.state === 'scanned' || item.state === 'scanfailed') scan(item);
@@ -986,6 +1054,226 @@
       }
     });
     form.addEventListener('submit', (e) => e.preventDefault());
+  }
+
+  // ---------------------------------------------------------------- content credentials
+
+  const persistable = () => Object.fromEntries(Object.entries(state.options).filter(([k]) => !VOLATILE.includes(k)));
+
+  function openCredentials() {
+    setOpen(els.options, els.optionsToggle, true);
+    const target = els.credIdentity.querySelector('[data-key="load"]') || els.credIdentity.querySelector('button');
+    if (target) window.setTimeout(() => target.focus(), 60);
+  }
+
+  function adoptIdentity(identity) {
+    state.identity = identity;
+    syncCredentials();
+    for (const item of state.items) renderItem(item);
+    render();
+  }
+
+  function showIdentityError(text) {
+    els.identityError.replaceChildren(icon('alert'), h('span', { text }));
+    els.identityError.hidden = false;
+  }
+
+  function resetIdentityForm() {
+    els.identityForm.reset(); // clears the passphrase and the chosen files
+    els.identityError.hidden = true;
+  }
+
+  function closeIdentityForm(focusLoad) {
+    resetIdentityForm();
+    els.identityForm.hidden = true;
+    if (focusLoad) {
+      const target = els.credIdentity.querySelector('[data-key="load"]');
+      if (target) target.focus();
+    }
+  }
+
+  async function fileToBase64(file) {
+    if (file.size > 256 * 1024) throw new Error(`${file.name} is too large to be a certificate or a key.`);
+    const buf = new Uint8Array(await file.arrayBuffer());
+    let bin = '';
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    return btoa(bin);
+  }
+
+  async function submitIdentity(event) {
+    event.preventDefault();
+    if (state.loadingIdentity) return;
+    const cert = els.credCert.files[0];
+    if (!cert) {
+      showIdentityError('Choose your certificate file first.');
+      els.credCert.focus();
+      return;
+    }
+    state.loadingIdentity = true;
+    setBusy(els.identityLoad, true);
+    els.identityError.hidden = true;
+    let needPassphrase = false;
+    try {
+      const key = els.credKey.files[0];
+      const anchors = els.credAnchors.files[0];
+      const body = {
+        cert: await fileToBase64(cert),
+        key: key ? await fileToBase64(key) : null,
+        anchors: anchors ? await fileToBase64(anchors) : null,
+        passphrase: els.credPass.value || null,
+      };
+      const res = await api('/api/identity', { json: body });
+      state.testRoot = null;
+      closeIdentityForm(false);
+      adoptIdentity(res.identity);
+      announce(`Signing identity loaded: ${res.identity.signer}.`);
+      const warn = res.identity.notices.find((n) => n.severity === 'warning');
+      if (!warn) els.credIdentity.querySelector('button')?.focus();
+    } catch (err) {
+      showIdentityError(err.message);
+      needPassphrase = err.code === 'passphrase';
+    } finally {
+      els.credPass.value = ''; // never kept longer than the request needs it
+      state.loadingIdentity = false;
+      setBusy(els.identityLoad, false);
+    }
+    if (needPassphrase) els.credPass.focus();
+  }
+
+  async function useTestIdentity() {
+    try {
+      const res = await api('/api/identity/test', { json: { organization: 'Test Newsroom' } });
+      state.testRoot = res.root_pem;
+      adoptIdentity(res.identity);
+      announce('Test identity created. Credentials made with it show as Unverified to public viewers.');
+    } catch (err) {
+      els.identityForm.hidden = false;
+      showIdentityError(err.message);
+    }
+  }
+
+  async function removeIdentity() {
+    try { await api('/api/identity', { method: 'DELETE' }); } catch { /* the page forgets it either way */ }
+    state.testRoot = null;
+    adoptIdentity(null);
+    announce('Signing identity removed from memory.');
+    const target = els.credIdentity.querySelector('[data-key="load"]');
+    if (target) target.focus();
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    triggerDownload(url, filename);
+    window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  async function downloadReceipts() {
+    try {
+      const blob = await api('/api/receipts', { json: {} });
+      downloadBlob(blob, 'imgstrip-receipts.json');
+      announce('Receipts downloaded. Keep them as private as the originals.');
+    } catch (err) {
+      showNote(err.message, 'error');
+    }
+  }
+
+  function renderIdentity() {
+    const box = els.credIdentity;
+    const caps = state.info && state.info.credentials;
+    box.replaceChildren();
+    if (!caps || !caps.available) {
+      box.append(note(`${(caps && caps.hint) || "Content Credentials need optional support: pip install 'imgstrip[c2pa]'"}`, 'warn'));
+      return;
+    }
+    const id = state.identity;
+    if (!id) {
+      box.append(h('div', { class: 'cred-empty' },
+        h('p', { text: 'No signing identity loaded.' }),
+        h('button', { class: 'btn btn-secondary btn-small', type: 'button', 'data-key': 'load', onclick: () => { els.identityForm.hidden = false; els.credCert.focus(); } },
+          icon('key'), h('span', { text: 'Load certificate' })),
+        h('button', { class: 'btn btn-quiet btn-small', type: 'button', 'data-key': 'test', onclick: useTestIdentity }, h('span', { text: 'Try a test identity' }))));
+      return;
+    }
+    const facts = [
+      ['Signer', id.common_name && id.common_name !== id.signer ? `${id.signer} (${id.common_name})` : id.signer],
+      ['Issued by', id.issuer],
+      ['Valid', `${id.valid_from} to ${id.valid_until}`],
+      ['Key', id.key],
+      ['SHA-256', id.fingerprint],
+    ];
+    const kinds = { error: 'error', warning: 'warn', info: '' };
+    const card = h('div', { class: 'cred-card' },
+      h('div', { class: 'cred-card-head' },
+        h('p', { class: 'cred-name' }, icon('key'), h('span', { text: id.signer })),
+        h('button', { class: 'btn btn-quiet btn-small', type: 'button', 'data-key': 'remove', onclick: removeIdentity, 'aria-label': 'Remove the signing identity from memory' }, h('span', { text: 'Remove' }))),
+      h('dl', { class: 'cred-facts' }, facts.map(([k, v]) => [h('dt', { text: k }), h('dd', { class: k === 'SHA-256' ? 'mono' : null, text: v })])),
+      h('div', { class: 'cred-notes' }, id.notices.map((n) => note(n.message, kinds[n.severity]))));
+    box.append(card);
+    if (id.test && state.testRoot) {
+      box.append(h('div', { class: 'cred-empty' },
+        h('p', { text: "Add this test root to a viewer's trust anchors to see its credentials as Trusted." }),
+        h('button', { class: 'btn btn-secondary btn-small', type: 'button', onclick: () => downloadBlob(new Blob([state.testRoot], { type: 'application/x-pem-file' }), 'test-root-ca.pem') },
+          icon('download'), h('span', { text: 'Download test root' }))));
+    }
+  }
+
+  function renderCredHints() {
+    const o = state.options;
+    const hints = [];
+    if (!o.jpeg_lossless) hints.push('JPEG files are re-encoded, so their credential will say the picture is "equivalent", not "identical". Turn on Keep JPEG data bit-exact to be able to say "identical".');
+    if (o.scrub_lsb || o.scrub_prnu) hints.push('Pixel scrubbing is on, so the credential will say the pixels were deliberately altered to protect the source.');
+    if (o.c2pa_commit) hints.push('The receipt holds the secret that proves which original a signed image came from. Anyone who gets it and the original can prove that link: keep it offline and as private as the original.');
+    els.credHints.replaceChildren(...hints.map((t) => note(t)));
+  }
+
+  function renderReceipts() {
+    els.credReceipts.hidden = !state.receipts;
+    if (state.receipts) {
+      els.receiptText.textContent = `${plural(state.receipts, 'receipt')} held in memory. They are lost when you stop imgstrip-web, so download them if you will need to audit these images.`;
+    }
+  }
+
+  function syncCredentials({ focus = false } = {}) {
+    const caps = state.info && state.info.credentials;
+    const available = !!(caps && caps.available);
+    const input = els.c2paSwitch.querySelector('input');
+    input.disabled = !available;
+    els.c2paHint.textContent = available
+      ? 'Adds a signed note (C2PA) that you removed the metadata, and whether the picture is unchanged. Optional.'
+      : "Needs the optional C2PA support: pip install 'imgstrip[c2pa]'";
+    const on = available && !!state.options.c2pa;
+    input.checked = on;
+    setOpen(els.credentials, null, on);
+    renderIdentity();
+    renderCredHints();
+    renderReceipts();
+    if (on && focus) {
+      const target = els.credIdentity.querySelector('[data-key="load"]');
+      if (target && !state.identity) window.setTimeout(() => target.focus(), 120);
+    }
+  }
+
+  function initCredentials(info) {
+    state.identity = info.identity || null;
+    state.receipts = info.receipts || 0;
+    els.credDate.value = state.options.c2pa_date;
+    els.credDetail.value = state.options.c2pa_detail;
+    els.credCommit.checked = !!state.options.c2pa_commit;
+    els.credentials.addEventListener('change', (e) => {
+      const f = e.target;
+      if (f === els.credDate) state.options.c2pa_date = f.value;
+      else if (f === els.credDetail) state.options.c2pa_detail = f.value;
+      else if (f === els.credCommit) state.options.c2pa_commit = f.checked;
+      else return;
+      local.set(OPTIONS_KEY, JSON.stringify(persistable()));
+      renderCredHints();
+      for (const item of state.items) renderItem(item);
+      render();
+    });
+    els.identityForm.addEventListener('submit', submitIdentity);
+    $('#identityCancel').addEventListener('click', () => closeIdentityForm(true));
+    $('#receiptDownload').addEventListener('click', downloadReceipts);
+    syncCredentials();
   }
 
   // ---------------------------------------------------------------- brand marks
@@ -1106,6 +1394,7 @@
       return;
     }
     initOptions(state.info);
+    initCredentials(state.info);
     render();
   }
 
