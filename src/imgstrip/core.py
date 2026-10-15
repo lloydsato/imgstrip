@@ -23,6 +23,7 @@ from PIL import Image, ImageCms, UnidentifiedImageError
 
 from . import codecs
 from . import icc as iccmod
+from . import prnu
 from .inspect import Finding, Report, inspect_bytes
 
 try:  # optional HEIC/HEIF support
@@ -115,6 +116,7 @@ class Options:
     icc: str = "convert"  # convert | sanitize | drop
     auto_orient: bool = True  # bake EXIF orientation into the pixels
     scrub_lsb: bool = False  # randomise least-significant bits (anti-steganography)
+    scrub_prnu: bool = False  # desynchronise the camera sensor fingerprint (see prnu.py)
     optimize: bool = False  # extra compression trials for PNG
     max_pixels: int = 300_000_000
 
@@ -150,6 +152,9 @@ class Result:
     # tolerance).  Unlike pixels_exact this ignores deliberate pixel changes such as
     # the LSB scrub; it is false for lossy encodes and for quantised GIF frames.
     verified_exact: bool = True
+    # The sensor-fingerprint disruption was requested and applied (it is skipped, with a
+    # warning, for palette images, transparent colour keys and tiny images).
+    prnu_applied: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -466,6 +471,7 @@ class _Job:
         self.warnings: list[str] = []
         self.embed_icc: bytes | None = None
         self.exact = True
+        self.prnu_applied = False
 
     # -- entry point ------------------------------------------------------
 
@@ -509,6 +515,12 @@ class _Job:
         if self.opts.jpeg_lossless and out == "JPEG":
             if src != "JPEG":
                 raise StripError("--jpeg-lossless requires a JPEG input")
+            if self.opts.scrub_prnu:
+                # Fail closed: silently skipping would leave the user believing the fingerprint is gone.
+                raise StripError(
+                    "the sensor-fingerprint scrub changes pixels, so it cannot be combined with bit-exact JPEG "
+                    "mode (--jpeg-lossless)"
+                )
             return self._jpeg_lossless(im)
 
         indices, loop = self._select_frames(im, src, out)
@@ -548,7 +560,9 @@ class _Job:
         if icc:
             self._color_manage(frames, icc, out)
         self._scrub_transparent(frames)
-        if self.opts.scrub_lsb:
+        if self.opts.scrub_prnu:
+            self._scrub_prnu(frames)
+        if self.opts.scrub_lsb:  # last, so the final low bits are random whatever the warp did
             self._scrub_lsb(frames)
         data, expected, exact = self._encode(frames, out, loop, src)
         self._verify(data, out, expected, exact)
@@ -569,6 +583,7 @@ class _Job:
             pixels_exact=exact and self.exact,
             input_report=self.before,
             verified_exact=exact,
+            prnu_applied=self.prnu_applied,
         )
 
     # -- format / frame selection -----------------------------------------
@@ -869,6 +884,59 @@ class _Job:
                 f.image = _from_array(arr, img.mode)
         if cleared:
             self.actions.append(f"cleared hidden colour data under {cleared} fully transparent pixels")
+
+    def _scrub_prnu(self, frames: list[Frame]) -> None:
+        """Desynchronise the camera's sensor fingerprint with one random smooth warp.
+
+        Every frame gets the same warp, so animated files do not flicker.  Palette
+        images, colour-keyed images and tiny images cannot carry a usable
+        fingerprint (and cannot be resampled without changing their colours), so
+        they are left alone and the user is told.
+        """
+        width, height = frames[0].size
+        if any(f.size != (width, height) for f in frames):
+            self.warnings.append("sensor-fingerprint scrub skipped: the frames differ in size")
+            return
+        if not prnu.supported(width, height):
+            self.warnings.append(
+                f"sensor-fingerprint scrub skipped: the image is under {prnu.MIN_SIDE} pixels on a side, "
+                "too small to hold a usable fingerprint"
+            )
+            return
+        modes = ("L", "LA", "RGB", "RGBA", "CMYK", "I;16")
+        for f in frames:
+            if f.key is not None or f.alpha is not None or (f.array is None and f.image.mode not in modes):
+                self.warnings.append(
+                    "sensor-fingerprint scrub skipped: palette and colour-keyed images carry no camera fingerprint "
+                    "and cannot be resampled without changing their colours"
+                )
+                return
+        warp = prnu.plan(width, height, self._prnu_luma(frames[0]), prnu.new_rng())
+        for f in frames:
+            if f.array is not None:
+                f.array = prnu.warp_array16(f.array, warp)
+            elif f.image.mode == "I;16":
+                arr = np.asarray(f.image).astype(np.uint16)[..., None]
+                f.image = _from_array(prnu.warp_array16(arr, warp)[..., 0], "I;16")
+            else:
+                f.image = prnu.warp_image(f.image, warp)
+        self.exact = False
+        self.prnu_applied = True
+        self.actions.append(
+            "disrupted the camera sensor fingerprint (PRNU) with a smooth random warp "
+            f"(typically {warp.rms:.1f} px, at most {warp.max_shift:.0f} px)"
+        )
+
+    @staticmethod
+    def _prnu_luma(frame: Frame) -> Image.Image:
+        """An 8-bit luminance image of the frame, used only to find edges."""
+        if frame.array is not None:
+            arr = frame.array
+            colour = arr[..., :-1] if arr.shape[2] in (2, 4) else arr
+            return Image.fromarray((colour.mean(axis=2, dtype=np.float32) / 257.0).astype(np.uint8), "L")
+        if frame.image.mode == "I;16":
+            return Image.fromarray((np.asarray(frame.image).astype(np.uint16) >> 8).astype(np.uint8), "L")
+        return frame.image.convert("L")
 
     def _scrub_lsb(self, frames: list[Frame]) -> None:
         rng = np.random.default_rng(int.from_bytes(os.urandom(16), "big"))

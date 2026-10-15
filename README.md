@@ -46,7 +46,7 @@ The web app is the same engine behind a small window in your browser. It runs on
 2. **Clean.** Every file is rebuilt from its pixels and passes both checks before it is offered back. Each verified file gets a small seal engraved from its SHA-256 (the same file always gets the same seal); open the row for the checks, the full hash, and the list of what was removed.
 3. **Take the clean files**: download one, download all as a ZIP (its entries carry no dates), or **save to a folder** on disk. Saving creates the folder if needed and never replaces an existing file; a name that is taken gets a number instead (`photo.clean (2).jpg`).
 
-**Options** holds the same switches as the command line: output format, quality, colour profile handling, keeping JPEG data bit-exact, LSB scrubbing, orientation, extra PNG compression, and the **deep scan** that also searches the pixels for steganography.
+**Options** holds the same switches as the command line: output format, quality, colour profile handling, keeping JPEG data bit-exact, LSB scrubbing, **disrupting the camera's sensor fingerprint**, orientation, extra PNG compression, and the **deep scan** that also searches the pixels for steganography.
 
 | Option | Meaning |
 |---|---|
@@ -70,6 +70,7 @@ imgstrip -r ~/Pictures -o ~/clean      # whole folder tree, mirrored into ~/clea
 imgstrip -i *.png                      # replace originals in place (atomic rename)
 imgstrip --random-name -o out/ *.jpg   # also hide the original file names
 imgstrip IMG_1234.heic --format jpeg   # convert while cleaning
+imgstrip --scrub-prnu photo.jpg        # also scramble the camera's sensor fingerprint (see below)
 cat in.webp | imgstrip - > out.webp    # stdin -> stdout
 
 imgstrip --check photo.jpg             # report what a file contains, change nothing
@@ -89,6 +90,7 @@ Originals are never modified unless you pass `--in-place`. Existing outputs are 
 | `--icc convert\|sanitize\|drop` | Colour profiles: convert pixels to sRGB (default), embed a rebuilt anonymous profile, or discard. |
 | `--no-auto-orient` | Don't rotate pixels according to EXIF orientation. |
 | `--scrub-lsb` | Randomise the least-significant bit of every sample to destroy LSB steganography. |
+| `--scrub-prnu` | Disrupt the camera's sensor fingerprint (PRNU) with a smooth random warp that moves parts of the picture by a few pixels. Not combinable with `--jpeg-lossless`. See [Camera sensor fingerprint](#camera-sensor-fingerprint-prnu). |
 | `--optimize` | Try extra PNG compression strategies (slower, smaller). |
 | `--max-pixels N` | Refuse images larger than N pixels (default 300 million). Also protects against decompression bombs. |
 | `-n`, `--dry-run` | Do all the work in memory, write nothing. |
@@ -112,7 +114,7 @@ Exit status: `0` success (or `--check`: everything clean), `1` at least one file
 
 * **Orientation** is baked into the pixels. A photo that displayed upright still displays upright, without the tag. Only EXIF/TIFF orientation is honoured; viewers ignore XMP orientation, so imgstrip does too.
 * **Colours**: images with a non-sRGB profile (Display P3, Adobe RGB, ProPhoto, CMYK, gray, or PNG gamma/chromaticity chunks) are converted to sRGB with LittleCMS. Profiles that are numerically equivalent to sRGB are dropped without touching pixels. `--icc sanitize` instead keeps the colour space by embedding a profile rebuilt from scratch (colorimetric data only, fixed header, no text, no dates). imgstrip verifies it is colorimetrically identical to the original.
-* **Lossless formats** (PNG, GIF, TIFF, BMP, lossless WebP) keep their pixels bit-for-bit. PNGs may get a smaller, equivalent colour type (for example RGB with ≤ 256 colours becomes a palette image).
+* **Lossless formats** (PNG, GIF, TIFF, BMP, lossless WebP) keep their pixels bit-for-bit (unless you ask for `--scrub-lsb` or `--scrub-prnu`, which change pixels on purpose). PNGs may get a smaller, equivalent colour type (for example RGB with ≤ 256 colours becomes a palette image).
 * **16-bit images** (PNG, TIFF, PPM/PGM) keep full 16-bit precision, even though Pillow itself truncates 16-bit colour to 8 bits. imgstrip recovers the low bytes with a second decoding pass, and has its own 16-bit PNG/TIFF encoders and colour engine. Output was verified bit-identical against ImageMagick.
 * **JPEG** is re-encoded at quality 95 with the original chroma subsampling. Re-encoding also destroys JPEG-domain steganography and the quantisation-table "fingerprint" of the camera. To avoid any generation loss, use `--jpeg-lossless`: the compressed image data is copied bit-for-bit and everything around it is rebuilt from scratch. That mode cannot rotate pixels, so a non-default orientation is kept as a minimal one-tag EXIF block, and DCT-domain content is preserved as-is.
 * **Animations** (GIF, APNG, WebP, AVIF) keep all frames, frame timing and loop count. GIFs are written by a custom encoder that keeps every frame's colours exact.
@@ -128,6 +130,38 @@ Exit status: `0` success (or `--check`: everything clean), `1` at least one file
 * **LSB steganography**, estimated with two independent detectors, Sample Pair Analysis (Dumitrescu, Wu & Wang) and Weighted-Stego analysis (Fridrich & Goljan, with the Ker–Böhme predictor). A file is flagged only when both agree. The thresholds were calibrated on 75 real camera photos: the worst clean photo scored 0.117, and every image with a ≥ 20 % simulated payload scored ≥ 0.195. Smaller payloads, or ±1 embedding instead of LSB replacement, can go undetected, and as with any statistical test a false positive is possible.
 
 `--scrub-lsb` replaces the least-significant bit of every colour sample with random noise (a change of at most 1/255, invisible). This destroys any LSB-embedded message regardless of whether it was detected. Fully opaque and fully transparent alpha values are preserved.
+
+## Camera sensor fingerprint (PRNU)
+
+Every image sensor has a tiny, permanent pattern of pixel-to-pixel sensitivity differences, the photo-response non-uniformity (PRNU). It is not metadata: it is in the pixels, it survives JPEG compression and colour conversion, and anyone who holds other photos from the same camera (or the camera itself) can estimate it and test whether a given picture came from that sensor ([Lukáš, Fridrich & Goljan, 2006](https://doi.org/10.1109/TIFS.2006.873602)). **Plain cleaning does not touch it**: in the simulation below, a cleaned photo is still matched to its camera with a peak-to-correlation energy (PCE) of about 10,000, where the usual threshold is 60.
+
+`--scrub-prnu` (web app: *Disrupt camera fingerprint*) is opt-in, because it changes pixels.
+
+**Why not just add noise?** The match is a correlation over millions of pixels, so noise a viewer cannot see leaves it intact: in the simulation, noise of 2 grey levels moved the PCE from 10,700 to 9,200, and even clearly visible noise (8 levels, PSNR 30 dB) left it at 4,500. The test suite keeps a regression test for this, so the scrub is never "simplified" to noise. A rigid shift or rotation does not work either, because the detector searches over shifts.
+
+**What it does instead** is *desynchronise* the sensor pattern. The detector is a matched filter: it needs every pixel's noise at the position the fingerprint expects. imgstrip moves every part of the picture by a different, smooth, random amount, so no global shift or rotation can line the noise up again:
+
+* the displacement field is smooth (correlation length 28 px at 1 MP) and has a *uniform* distribution of values, which leaves fewer pixels near their original position than a Gaussian field of the same size; what the detector can still see is, to a good approximation, the share of pixels that stayed put;
+* the amplitude grows with the fourth root of the pixel count (about 3.8 px typical at 1 MP, 7 px at 12 MP, at most 8 and 16 px): a larger image gives the detector more pixels to work with, so the warp has to be larger in pixels, though not relative to the picture (0.1–0.4 % of the width);
+* **edge-parallel**: where a single edge direction dominates (a horizon, a building edge, a doorframe) the motion perpendicular to the edge is removed, so the edge slides along itself instead of bending. On an isolated straight line this cut the mean displacement of the line from 2.5 px to 0.2 px (diagonals: 2.4 px to 0.5 px). Flat and textured regions, where any displacement is invisible and where the fingerprint is easiest to read, move freely;
+* one warp is used for every colour channel and every frame of an animation, so there is no colour fringing and nothing flickers. It is drawn from operating-system entropy, so it cannot be reproduced or undone;
+* bicubic resampling, with the border pinned so no sample ever leaves the image. 16-bit images keep full precision.
+
+Palette images (GIF, 8-bit PNG), colour-keyed images and images under 48 px on a side carry no usable fingerprint and cannot be resampled without changing their colours; they are left alone and the report says so. `--jpeg-lossless` copies the compressed data bit-for-bit and so cannot be combined with the scrub: the run fails rather than quietly doing nothing. The output is still verified: it decodes to exactly the pixels that were written.
+
+### How well does it work?
+
+Measured against simulated attackers, through the real engine and the default settings. A simulated camera with a multiplicative fingerprint (σ = 1.2 %, shot and read noise, JPEG q92) took photographs of real scenes (the scikit-image sample photos). The attacker estimated the fingerprint from 20–30 photos with the standard wavelet-denoising estimator and tested with PCE; two further attackers searched for local alignment tile by tile (32 and 64 px tiles). A second, unrelated camera is the control.
+
+| Image size | Cleaned only | With `--scrub-prnu` | Other camera (control) |
+|---|---|---|---|
+| 1 MP | PCE 10,600 | **23** (worst of 20 photos: 30) | 23 (worst 27) |
+| 6 MP | PCE 72,600 | **26–28** (worst of 12 photos: 34) | 26 (worst 28) |
+| 12 MP | PCE 117,000 | **27–30** (worst of 8 photos: 44) | 30 (worst 32) |
+
+Median PCE (the range is two independent runs); 60 is the usual "same camera" threshold, and every scrubbed photo stayed below it. The two tile-search attackers saw 2–6 % of the excess over the control level that unscrubbed photos show. Along the way the sweeps showed that a Gaussian field needs about 1.7 times the amplitude for the same result, and that an earlier 2.5 px base amplitude left 17 % of 1 MP photos above the threshold.
+
+**What this does not show.** It is a simulation: real sensors have additional structure (demosaicing, per-camera processing) that the model leaves out, and no real-camera corpus was available. An attacker who knows imgstrip's algorithm may do better with a purpose-built local-registration attack. At crossings of strong lines and in dense grids (brick, tiles, window frames) the motion cannot vanish without leaving that area aligned, so lines there can still wobble by a few pixels, and fine grain softens slightly where resampling falls between pixels. **Nothing here is a proof**: no tool can show that a fingerprint is gone from one file (there is nothing to compare it with), so `--check` does not report it and the report cannot give the file a seal for it. Treat it as a strong reduction of the standard attack, not as an erasure.
 
 ## Supported formats
 
@@ -149,14 +183,15 @@ Not supported, with a clear error: camera RAW files (DNG, CR2/CR3, NEF, ARW, …
 
 * **Visible content stays.** Faces, reflections, street signs and landmarks reveal more than any tag. imgstrip does not alter what the picture shows.
 * **Robust watermarks** designed to survive re-encoding (Digimarc, SynthID, C2PA "soft binding" watermarks and similar) live in the image content itself and can survive. imgstrip removes C2PA *manifests*, not content-level watermarks.
+* **The camera's sensor fingerprint (PRNU) stays** unless you turn on `--scrub-prnu`, and even then its absence cannot be proven. See [Camera sensor fingerprint](#camera-sensor-fingerprint-prnu) for what the scrub does, what it costs and how it was measured.
 * **File names** often contain timestamps (`IMG_20240517_133700.jpg`). Use `--random-name`.
 * **In-place mode does not securely erase** the old data. The original bytes may remain on disk, in SSD wear-levelling areas, snapshots, backups or cloud sync history. Other hard links to the file keep pointing at the original data (imgstrip warns about this).
-* Lossy formats (JPEG, lossy WebP, AVIF, HEIF) are re-encoded, which costs a little quality. Use `--jpeg-lossless` for JPEGs if that matters more than the camera-fingerprint and DCT-steganography protection.
+* Lossy formats (JPEG, lossy WebP, AVIF, HEIF) are re-encoded, which costs a little quality. Use `--jpeg-lossless` for JPEGs if that matters more than the quantisation-table fingerprint and DCT-steganography protection.
 
 ## How it is tested
 
-* `imgstrip --self-test` builds 17 worst-case fixtures, one per format. Each is stuffed with metadata, thumbnails, trailers, private chunks, palette tricks, hidden alpha data and steganography, and every item carries a unique canary string. Each fixture is stripped in every mode and to every output format (189 runs). No canary may survive anywhere in the output bytes, and both the built-in inspector and, if installed, `exiftool` must find nothing.
-* The pytest suite (317 tests) covers every codec against independent decoders (ImageMagick for 16-bit data), the colour engine against LittleCMS, orientation 1–8, all CLI safety behaviours (no-clobber, atomic in-place writes, symlinks, hard links, FIFOs, collisions, permissions, stdin/stdout) the web app's security gates, round trips and signal handling, and **fuzzing**: 680 randomly corrupted files must each produce either a verified-clean output or a clean error, never a crash, a memory blow-up or an unverified write.
+* `imgstrip --self-test` builds 17 worst-case fixtures, one per format. Each is stuffed with metadata, thumbnails, trailers, private chunks, palette tricks, hidden alpha data and steganography, and every item carries a unique canary string. Each fixture is stripped in every mode and to every output format (206 runs). No canary may survive anywhere in the output bytes, and both the built-in inspector and, if installed, `exiftool` must find nothing.
+* The pytest suite (359 tests) covers every codec against independent decoders (ImageMagick for 16-bit data), the colour engine against LittleCMS, orientation 1–8, all CLI safety behaviours (no-clobber, atomic in-place writes, symlinks, hard links, FIFOs, collisions, permissions, stdin/stdout) the web app's security gates, round trips and signal handling, the sensor-fingerprint scrub (an *oracle* detector that knows the camera's exact fingerprint must fail to match after the scrub and succeed before it, on every colour mode, 16-bit data, animations and the failure cases), and **fuzzing**: 680 randomly corrupted files must each produce either a verified-clean output or a clean error, never a crash, a memory blow-up or an unverified write.
 * Trial run on the public [exif-samples](https://github.com/ianare/exif-samples) corpus: 104 real files from dozens of cameras and phones, including iPhone HEICs and deliberately broken files. 104 cleaned, 0 failures. Afterwards `exiftool` reported zero non-structural tags across all outputs, and all 16 orientation test images came out identical.
 
 ```console
