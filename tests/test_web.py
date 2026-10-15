@@ -7,6 +7,7 @@ import http.client
 import io
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -15,6 +16,7 @@ import threading
 import time
 import urllib.parse
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -305,6 +307,8 @@ def test_clean_with_options(app):
         {"quality": True},
         {"icc": "keep"},
         {"scrub_lsb": "yes"},
+        {"scrub_prnu": "yes"},
+        {"scrub_prnu": 1},
         [],
     ],
 )
@@ -605,6 +609,35 @@ def test_verification_wording_follows_what_was_proved(app):
     assert scrubbed["scrubbed"] and not scrubbed["lossy"] and not scrubbed["pixels_exact"]
     jpeg = app.clean(fixtures.jpeg_everything(), "photo.jpg")
     assert jpeg["lossy"] and not jpeg["scrubbed"]
+
+
+def test_sensor_fingerprint_option(app):
+    default = app.clean(fixtures.png_everything(), "photo.png")
+    assert default["prnu"] is False
+    result = app.clean(fixtures.png_everything(), "photo.png", {"scrub_prnu": True})
+    assert result["prnu"] is True and not result["pixels_exact"] and not result["lossy"]
+    assert any("camera sensor fingerprint" in a for a in result["actions"])
+    # A palette image cannot carry a fingerprint: skipped, and the page is told why.
+    palette = app.clean(fixtures.png_palette_tricks(), "logo.png", {"scrub_prnu": True})
+    assert palette["prnu"] is False and any("sensor-fingerprint" in w for w in palette["warnings"])
+    # The bit-exact JPEG switch cannot honour it, so it fails instead of silently doing nothing.
+    res, body = app.upload(
+        "/api/clean", fixtures.jpeg_everything(), options={"scrub_prnu": True, "jpeg_lossless": True}
+    )
+    assert res.status == 422 and "cannot be combined" in json.loads(body)["error"]
+
+
+def test_every_option_in_the_page_reaches_the_server():
+    static = Path(web.__file__).parent / "static"
+    html = (static / "index.html").read_text()
+    js = (static / "app.js").read_text()
+    form = html[html.index('id="optionsForm"') : html.index("</form>", html.index('id="optionsForm"'))]
+    names = set(re.findall(r'<(?:input|select)[^>]*\bname="(\w+)"', form))
+    assert {"scrub_lsb", "scrub_prnu", "jpeg_lossless", "auto_orient", "optimize", "icc", "format", "quality"} <= names
+    send = js[js.index("function cleanOptions") : js.index("const optionsKey")]
+    for name in names - {"deep"}:  # the deep scan is a scan setting, not a clean option
+        assert re.search(rf"\b{name}\b", send), f"{name} is in the page but never sent to /api/clean"
+        assert re.search(rf"\b{name}\b", js[: js.index("const OPTIONS_KEY")]), f"{name} has no default"
 
 
 def test_pixels_scanned_flag(app, monkeypatch):

@@ -192,6 +192,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="randomise least-significant bits to destroy LSB steganography (changes pixels by at most 1)",
     )
+    proc.add_argument(
+        "--scrub-prnu",
+        action="store_true",
+        help="disrupt the camera sensor fingerprint (PRNU) with a smooth random warp "
+        "(moves pixels by a few pixels; cannot be combined with --jpeg-lossless)",
+    )
     proc.add_argument("--optimize", action="store_true", help="try extra compression strategies for PNG output")
     proc.add_argument(
         "--max-pixels",
@@ -223,6 +229,7 @@ def options_from_args(args) -> Options:
         icc=args.icc,
         auto_orient=not args.no_auto_orient,
         scrub_lsb=args.scrub_lsb,
+        scrub_prnu=args.scrub_prnu,
         optimize=args.optimize,
         max_pixels=args.max_pixels,
     )
