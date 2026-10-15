@@ -47,7 +47,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import __version__
-from .. import credentials
+from .. import credentials, stego
 from ..cli import RAW_EXTENSIONS, atomic_write, output_extension
 from ..core import EXTENSIONS, OUTPUT_FORMATS, Options, StripError, heif_available, strip_image
 from ..inspect import HIDDEN, METADATA, Finding, inspect_bytes
@@ -605,6 +605,9 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
     if report.format is None:
         decodable, size = _probe(data)
     pixels_scanned = False
+    verdict = stego.not_scanned("the pixels were not scanned (turn on Deep scan, or choose Scan the pixels too)")
+    if deep and (raw or not decodable):
+        verdict = stego.not_scanned("this file cannot be decoded, so its pixels cannot be tested")
     if deep and decodable and not raw:
         # The container summary does not always know the size (simple WebP, oversized GIF
         # frames), so ask the decoder: the pixel scan costs about 100 bytes per pixel.
@@ -614,16 +617,21 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
             notes.append(
                 f"The pixels were not scanned: the image is over {DEEP_SCAN_MAX_PIXELS // 1_000_000} megapixels."
             )
+            verdict = stego.not_scanned(f"the image is over {DEEP_SCAN_MAX_PIXELS // 1_000_000} megapixels")
         else:
-            from ..analysis import analyze_pixels
+            from ..analysis import scan_pixels
 
             try:
-                findings += analyze_pixels(data)
+                scan = scan_pixels(data)
+                findings += scan.findings
+                verdict = scan.verdict
                 pixels_scanned = True
             except StripError as exc:
                 notes.append(f"The pixel scan failed: {exc}")
+                verdict = stego.not_scanned(f"the pixel scan failed: {exc}")
             except MemoryError:
                 notes.append("The pixel scan ran out of memory.")
+                verdict = stego.not_scanned("the pixel scan ran out of memory")
     credential = None
     if any(credentials.is_c2pa_finding(f) for f in findings) and credentials.available():
         try:
@@ -642,6 +650,7 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
         "clean": not findings and report.error is None,
         "error": report.error,
         "findings": findings_payload(findings),
+        "steganography": verdict.as_dict(),
         "reveals": reveals(findings),
         "notes": notes,
     }
@@ -698,8 +707,14 @@ def _credential_payload(signed, evidence, assessment, config) -> dict:
 
 
 def clean_payload(
-    session: Session, data: bytes, filename: str, options: Options, config: credentials.Config | None = None
+    session: Session,
+    data: bytes,
+    filename: str,
+    options: Options,
+    config: credentials.Config | None = None,
+    scan_state: str | None = None,
 ) -> dict:
+    """Clean one file.  ``scan_state`` is what the page's pixel scan found in the original, if it ran."""
     if Path(filename).suffix.lower() in RAW_EXTENSIONS:
         raise ApiError(422, "Camera RAW files are not supported. Export the photo to TIFF, PNG or JPEG first.")
     identity = assessment = None
@@ -733,6 +748,9 @@ def clean_payload(
         if signed.receipt:
             session.add_receipt(signed.receipt)
     name = clean_name(filename, result.output_format)
+    scrubbed = result.lsb_scrub in (stego.SCRUB_APPLIED, stego.SCRUB_PARTIAL)
+    source = stego.Verdict(scan_state) if scrubbed and scan_state in (stego.DETECTED, stego.NOT_DETECTED) else None
+    verdict = stego.for_output(source, result.lsb_scrub, copied=result.verified_exact)
     rid = session.put(final, name, _MIME.get(result.output_format, "application/octet-stream"))
     return {
         "id": rid,
@@ -743,7 +761,8 @@ def clean_payload(
         "frames": result.frames,
         "pixels_exact": result.pixels_exact,
         "lossy": not result.verified_exact,
-        "scrubbed": options.scrub_lsb,
+        "scrubbed": scrubbed,  # what the engine did, not what was asked for
+        "steganography": verdict.as_dict(),
         "prnu": result.prnu_applied,
         "bytes_in": len(data),
         "bytes_out": len(final),
@@ -1019,8 +1038,11 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(400, "Options are not valid JSON.")
                 options = parse_options(raw)
                 config = parse_credentials(raw.get("credentials") if isinstance(raw, dict) else None, None)
+                scan_state = self.headers.get("X-Scan")
+                if scan_state not in (None, stego.DETECTED, stego.NOT_DETECTED):
+                    raise ApiError(400, "X-Scan must be detected or not_detected.")
                 with self.session.jobs:
-                    return self._json(200, clean_payload(self.session, data, filename, options, config))
+                    return self._json(200, clean_payload(self.session, data, filename, options, config, scan_state))
             if route == ("POST", "/api/identity"):
                 return self._json(200, load_identity_payload(self.session, self._json_body()))
             if route == ("POST", "/api/identity/test"):

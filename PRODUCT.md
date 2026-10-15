@@ -54,7 +54,7 @@ Most metadata removers delete the tags they recognise and copy everything else. 
 ## Evidence on Hand
 
 - README.md: worked example (a Nikon COOLPIX P6000 JPEG with EXIF, GPS, an embedded thumbnail and XMP), the full list of what gets removed, format support, and limits.
-- Test evidence stated in README.md: built-in self-test (17 worst-case fixtures, 189 runs), 253 pytest tests including fuzzing, and a trial on the public exif-samples corpus (104 files, 0 failures).
+- Test evidence stated in README.md: built-in self-test (21 worst-case fixtures, 255 runs, cross-checked by readers independent of imgstrip), 873 pytest tests including fuzzing, differential tests and a byte-flip audit of every format, and a trial on the public exif-samples corpus (104 files, 0 failures).
 - No testimonials, users, press or benchmarks exist. Do not invent any.
 
 ## Product Principles

@@ -343,6 +343,7 @@ def _inspect_jpeg(d: bytes, r: Report) -> None:
     pos = 2
     icc_chunks: list[tuple[int, bytes]] = []
     scans = 0
+    sequential = False
     while True:
         if pos >= n:
             raise _Malformed("missing end-of-image marker")
@@ -374,12 +375,16 @@ def _inspect_jpeg(d: bytes, r: Report) -> None:
             h, w = struct.unpack_from(">HH", payload, 1)
             r.info.setdefault("size", (w, h))
             r.info["components"] = payload[5]
+            sequential = marker in (0xC0, 0xC1)
         if marker == 0xE2 and payload.startswith(b"ICC_PROFILE\x00") and len(payload) >= 14:
             icc_chunks.append((payload[12], payload[14:]))
             continue
         _classify_jpeg_segment(marker, payload, r)
         if marker == 0xDA:
             scans += 1
+            # A sequential scan always covers coefficients 0..63 in one pass; decoders ignore these bytes.
+            if sequential and payload[-3:] != b"\x00\x3f\x00":
+                r.add(HIDDEN, "Non-standard scan parameters", payload[-3:].hex())
             pos = _skip_entropy(d, pos)
     if scans == 0:
         raise _Malformed("no image scan")
@@ -412,6 +417,8 @@ def _classify_jpeg_segment(m: int, p: bytes, r: Report) -> None:
         if p.startswith(b"JFIF\x00"):
             if len(p) < 14:
                 raise _Malformed("short JFIF header")
+            if p[5] != 1 or p[6] > 2:
+                r.add(HIDDEN, "Non-standard JFIF version", f"{p[5]}.{p[6]:02}")
             units, xd, yd, tw, th = struct.unpack_from(">BHHBB", p, 7)
             if tw or th:
                 r.add(HIDDEN, "JFIF thumbnail", f"{tw}x{th} pixels")
@@ -797,14 +804,21 @@ def _gif_subblocks(d: bytes, pos: int) -> tuple[bytes, int]:
 
 
 def _inspect_gif(d: bytes, r: Report) -> None:
-    w, h, packed, _bg, aspect = struct.unpack_from("<HHBBB", d, 6)
+    w, h, packed, bg, aspect = struct.unpack_from("<HHBBB", d, 6)
     r.info["size"] = (w, h)
+    outside = 0
+    if bg and not packed & 0x80:  # the background index points into a global table that is not there
+        r.add(HIDDEN, "Non-zero GIF background index without a global colour table", str(bg))
     if aspect:
         r.add(METADATA, "Pixel aspect ratio", str(aspect))
     pos = 13
+    global_table = b""
     if packed & 0x80:
-        pos += 3 << ((packed & 7) + 1)
+        size = 3 << ((packed & 7) + 1)
+        global_table = d[pos : pos + size]
+        pos += size
     frames = 0
+    transparent = None
     while True:
         if pos >= len(d):
             raise _Malformed("missing trailer")
@@ -814,12 +828,27 @@ def _inspect_gif(d: bytes, r: Report) -> None:
             break
         if block == 0x2C:
             frames += 1
-            (ipacked,) = struct.unpack_from("<B", d, pos + 9)
+            left, top, fw, fh, ipacked = struct.unpack_from("<HHHHB", d, pos + 1)
+            if left + fw > w or top + fh > h:
+                outside += 1
+            if ipacked & 0x18:  # two bits the format reserves
+                r.add(HIDDEN, "Non-zero reserved bits in a GIF frame header", f"{ipacked & 0x18:#04x}")
             pos += 10
+            table = global_table
             if ipacked & 0x80:
-                pos += 3 << ((ipacked & 7) + 1)
+                size = 3 << ((ipacked & 7) + 1)
+                table = d[pos : pos + size]
+                pos += size
+            min_code = d[pos]
             pos += 1  # LZW minimum code size
-            _, pos = _gif_subblocks(d, pos)
+            data, pos = _gif_subblocks(d, pos)
+            if 1 <= min_code <= 8:
+                used = _gif_used_indices(min_code, data)
+                if used is None:
+                    r.add(STRUCTURE, "Corrupt GIF image data")
+                else:
+                    _gif_palette(table, used, transparent, r)
+            transparent = None
         elif block == 0x21:
             label = d[pos + 1]
             pos += 2
@@ -827,6 +856,14 @@ def _inspect_gif(d: bytes, r: Report) -> None:
             if label == 0xF9:
                 if d[pos] != 4:
                     r.add(STRUCTURE, "Malformed graphic control extension")
+                else:
+                    packed_gce = d[pos + 1]
+                    if packed_gce & 0xE0:  # three bits the format reserves
+                        r.add(HIDDEN, "Non-zero reserved bits in a GIF graphic control extension")
+                    if packed_gce & 1:
+                        transparent = d[pos + 4]
+                    elif d[pos + 4]:  # the index only means something when the transparency flag is on
+                        r.add(HIDDEN, "Transparent colour index set without transparency", str(d[pos + 4]))
             elif label == 0xFE:
                 r.add(METADATA, "Comment", f"'{_printable(data)}'")
             elif label == 0x01:
@@ -841,7 +878,63 @@ def _inspect_gif(d: bytes, r: Report) -> None:
     r.info["frames"] = frames
     if frames == 0:
         raise _Malformed("no image data")
+    if outside:
+        r.add(HIDDEN, "Frame area outside the canvas", f"{outside} frame(s) extend past {w}x{h}; viewers clip them")
     _check_trailing(d, pos, r, "GIF trailer")
+
+
+def _gif_used_indices(min_code: int, data: bytes) -> int | None:
+    """The palette indices a frame uses, as a bit mask, by walking its LZW codes (None if they are corrupt).
+
+    Each table entry carries the set of indices it expands to, so no pixel is ever produced.
+    """
+    clear, eoi = 1 << min_code, (1 << min_code) + 1
+    first = list(range(clear)) + [0, 0]
+    seen = [1 << i for i in range(clear)] + [0, 0]
+    width, used, acc, bits, prev = min_code + 1, 0, 0, 0, None
+    for byte in data:
+        acc |= byte << bits
+        bits += 8
+        while bits >= width:
+            code = acc & ((1 << width) - 1)
+            acc >>= width
+            bits -= width
+            if code == clear:
+                del first[clear + 2 :]
+                del seen[clear + 2 :]
+                width, prev = min_code + 1, None
+                continue
+            if code == eoi:
+                return used
+            if prev is None:
+                if code >= clear:
+                    return None
+                used |= seen[code]
+                prev = code
+                continue
+            if code < len(first):
+                head, mask = first[code], seen[code]
+            elif code == len(first):
+                head, mask = first[prev], seen[prev] | (1 << first[prev])
+            else:
+                return None
+            if len(first) < 4096:
+                first.append(first[prev])
+                seen.append(seen[prev] | (1 << head))
+            used |= mask
+            prev = code
+            if len(first) == 1 << width and width < 12:
+                width += 1
+    return used
+
+
+def _gif_palette(table: bytes, used: int, transparent: int | None, r: Report) -> None:
+    entries = len(table) // 3
+    unused = sum(1 for i in range(entries) if not used >> i & 1 and any(table[3 * i : 3 * i + 3]))
+    if unused:
+        r.add(HIDDEN, "Unused palette entries with colour data", f"{unused} of {entries} entries")
+    if transparent is not None and transparent < entries and any(table[3 * transparent : 3 * transparent + 3]):
+        r.add(HIDDEN, "Colour data under a transparent palette entry")
 
 
 def _gif_app_extension(d: bytes, pos: int, data: bytes, r: Report) -> None:
@@ -978,6 +1071,7 @@ class _Tiff:
         if self.version not in (42, 43):
             raise _Malformed("bad TIFF version")
         self.ranges: list[tuple[int, int]] = []
+        self.padding = 0  # non-zero bytes in the unused tail of inline tag values
 
     def cover(self, start: int, length: int) -> None:
         if start < 0 or length < 0 or start + length > len(self.d):
@@ -1012,6 +1106,8 @@ class _Tiff:
                 raw = d[ptr : ptr + size]
             else:
                 raw = d[voff : voff + size]
+                # A value shorter than the field leaves its tail unused (a SHORT fills two of four bytes).
+                self.padding += sum(1 for b in d[voff + size : voff + inline] if b)
             entries.append((tag, typ, cnt, size, raw))
         (nxt,) = struct.unpack_from(e + ("Q" if self.big else "I"), d, off + hsize + esize * count)
         return entries, nxt
@@ -1049,6 +1145,8 @@ def _inspect_tiff(d: bytes, r: Report) -> None:
     if page == 0:
         raise _Malformed("no image directory")
     r.info["pages"] = page
+    if t.padding:
+        r.add(HIDDEN, "Non-zero padding inside TIFF tag fields", f"{t.padding} bytes")
     _tiff_gaps(t, r)
 
 
@@ -1071,6 +1169,8 @@ def _tiff_ifd(t: _Tiff, entries, r: Report, page: int, seen: set[int], sub: str 
                 r.add(STRUCTURE, "Strip/tile offset and byte-count tables disagree")
             for o, n in zip(offsets, counts, strict=False):  # mismatch reported above
                 t.cover(o, n)
+                if 259 in tags and t.values(*tags[259])[0] in (8, 32946):
+                    _tiff_deflate_strip(t.d[o : o + n], r)
     for tag, (typ, cnt, raw) in tags.items():
         if tag in _TIFF_SUBIFD_TAGS:
             for ptr in t.values(typ, cnt, raw) if typ in (4, 13, 16, 18) else []:
@@ -1090,6 +1190,13 @@ def _tiff_ifd(t: _Tiff, entries, r: Report, page: int, seen: set[int], sub: str 
             continue
         if sub is not None:
             continue  # contents of EXIF/GPS/sub-image IFDs are summarised by the parent finding
+        if tag == 320 and typ == 3:
+            # Decoders that work in 8 bits keep only the high byte of each entry; an entry that is not v * 257
+            # carries a low byte nobody sees.
+            values = t.values(typ, cnt, raw)
+            odd = sum(1 for v in values if (v & 0xFF) != (v >> 8))
+            if odd:
+                r.add(HIDDEN, "TIFF colour map holds more than 8 bits per entry", f"{odd} of {len(values)} values")
         if tag in _TIFF_STRUCTURAL or tag in (513, 514):
             continue
         if tag == 34675:
@@ -1103,6 +1210,30 @@ def _tiff_ifd(t: _Tiff, entries, r: Report, page: int, seen: set[int], sub: str 
             r.add(METADATA, _TIFF_NAMES[tag] + where, detail)
         else:
             r.add(METADATA, f"TIFF tag {tag}" + where, f"{len(raw)} bytes")
+
+
+def _tiff_deflate_strip(strip: bytes, r: Report) -> None:
+    """Decoders inflate a Deflate strip without checking it ends where the data does.
+
+    The strip is inflated in pieces and thrown away, so a whole page in one strip costs no memory; imgstrip's own
+    writer puts a page in a single strip.  Past 2 GiB of output the walk gives up: the limit on image size
+    applies before anything is decoded, and this only guards against a bomb.
+    """
+    inflater = zlib.decompressobj()
+    data, produced = strip, 0
+    try:
+        while data and not inflater.eof and produced < (2 << 30):
+            produced += len(inflater.decompress(data, 1 << 20))
+            data = inflater.unconsumed_tail
+    except zlib.error:
+        r.add(STRUCTURE, "Corrupt compressed TIFF strip")
+        return
+    if produced >= (2 << 30):
+        return
+    if not inflater.eof:
+        r.add(STRUCTURE, "Unterminated compressed TIFF strip")
+    elif inflater.unused_data:
+        r.add(HIDDEN, "Data after a compressed TIFF strip", f"{len(inflater.unused_data)} bytes")
 
 
 def _tiff_gps(t: _Tiff, entries, r: Report) -> None:
@@ -1164,8 +1295,13 @@ def _inspect_bmp(d: bytes, r: Report) -> None:
     if dib == 40 and comp in (3, 6):
         header_end += 12 if comp == 3 else 16
     used = [(0, header_end)]
+    if dib in (108, 124):
+        cs_type = d[14 + 56 : 14 + 60]
+        _bmp_colour_space(d, dib, cs_type, r)
     if dib == 124:
-        cs_type, _intent, prof_off, prof_size, reserved = struct.unpack_from("<4sIIII", d, 14 + 56)
+        # The V5 fields follow the endpoints and gamma: intent at +108, profile offset (from the start of the
+        # header) at +112, its size at +116 and a reserved word at +120.
+        _intent, prof_off, prof_size, reserved = struct.unpack_from("<IIII", d, 14 + 108)
         if cs_type == b"DEBM":  # 'MBED' stored little-endian
             start = 14 + prof_off
             if start + prof_size > len(d):
@@ -1176,21 +1312,33 @@ def _inspect_bmp(d: bytes, r: Report) -> None:
             start = 14 + prof_off
             r.add(METADATA, "Linked color profile path", f"'{_printable(d[start : start + prof_size])}'")
             used.append((start, start + prof_size))
+        elif prof_off or prof_size:
+            r.add(HIDDEN, "Profile fields set without a profile", f"offset {prof_off}, size {prof_size}")
         if reserved:
             r.add(HIDDEN, "Non-zero reserved V5 header field")
-    if bpp <= 8:
-        n_colors = colors or (1 << bpp)
-        used.append((header_end, header_end + pal_entry * n_colors))
-    elif colors:
-        used.append((header_end, header_end + pal_entry * colors))
+    n_colors = (colors or (1 << bpp)) if 0 < bpp <= 8 else colors  # bpp 0 is a JPEG or PNG stored inside the BMP
+    table_end = header_end + pal_entry * n_colors
+    if n_colors:
+        used.append((header_end, table_end))
+    if table_end > pix_off:
+        raise _Malformed("the headers or colour table run into the pixel data")
     if comp in (0, 3, 6):
         stride = ((w * bpp + 31) // 32) * 4
         pix_size = stride * abs(h)
     else:
+        stride = 0
         pix_size = img_size
     if pix_off + pix_size > len(d):
         raise _Malformed("pixel data overruns the file")
     used.append((pix_off, pix_off + pix_size))
+    if dib >= 40:
+        _bmp_header_fields(r, bpp, comp, img_size, pix_size, xppm, yppm, colors, _imp)
+    if 0 < bpp <= 8 and pal_entry == 4:
+        _bmp_palette(d, header_end, n_colors, r)
+        if comp == 0:
+            _bmp_indices(d, pix_off, w, abs(h), bpp, stride, n_colors, r)
+    if comp in (0, 3, 6) and bpp:
+        _bmp_row_padding(d, pix_off, w, abs(h), bpp, stride, r)
     used.sort()
     pos = 0
     gap = 0
@@ -1203,6 +1351,99 @@ def _inspect_bmp(d: bytes, r: Report) -> None:
     if file_size != len(d):
         r.add(STRUCTURE, "Header file size does not match the actual size", f"{file_size} vs {len(d)}")
     _check_trailing(d, pos, r, "pixel data")
+
+
+def unused_palette_entries(im) -> int:
+    """How many palette entries no pixel uses yet hold colour (they would carry data a viewer never shows)."""
+    import numpy as np
+
+    pal = im.getpalette("RGB") or []
+    n = len(pal) // 3
+    used = set(np.flatnonzero(np.bincount(np.asarray(im).ravel(), minlength=256)).tolist())
+    return sum(1 for i in range(n) if i not in used and any(pal[3 * i : 3 * i + 3]))
+
+
+def transparent_palette_colour(im) -> int:
+    """How many fully transparent palette entries hold colour (a viewer never shows it)."""
+    transparency = im.info.get("transparency")
+    pal = im.getpalette("RGB") or []
+    if isinstance(transparency, int):
+        clear = [transparency]
+    elif isinstance(transparency, (bytes, bytearray)):
+        clear = [i for i, a in enumerate(transparency) if a == 0]
+    else:
+        return 0
+    return sum(1 for i in clear if any(pal[3 * i : 3 * i + 3]))
+
+
+def _bmp_header_fields(
+    r: Report, bpp: int, comp: int, img_size: int, pix_size: int, xppm: int, yppm: int, colors: int, important: int
+) -> None:
+    """DIB header fields that no decoder needs, and that carry data or metadata when they are not at rest."""
+    if (xppm, yppm) not in ((0, 0), (2835, 2835), (3780, 3780)):  # none, or the 72 / 96 dpi encoders write by default
+        r.add(METADATA, "Print resolution (BMP)", f"{xppm * 0.0254:.0f}x{yppm * 0.0254:.0f} dpi")
+    if comp in (0, 3, 6) and img_size not in (0, pix_size):
+        r.add(HIDDEN, "BMP image size field disagrees with the pixel data", f"{img_size} vs {pix_size}")
+    palette = colors or (1 << bpp if bpp <= 8 else 0)
+    if important not in (0, palette):
+        r.add(HIDDEN, "Non-zero unused BMP header field", f"important colours {important}")
+
+
+def _bmp_colour_space(d: bytes, dib: int, cs_type: bytes, r: Report) -> None:
+    """Endpoints and gamma only mean something for a calibrated colour space; elsewhere they must be empty."""
+    endpoints_and_gamma = d[14 + 60 : 14 + 108]
+    if cs_type not in (b"\x00\x00\x00\x00", b"BGRs", b" niW", b"DEBM", b"KNIL"):
+        r.add(HIDDEN, "Unknown BMP colour space type", cs_type.hex())
+    elif cs_type == b"\x00\x00\x00\x00":  # LCS_CALIBRATED_RGB: the numbers are real colour data
+        if any(endpoints_and_gamma):
+            r.add(COLOR, "Calibrated colour space endpoints and gamma (BMP)")
+    elif any(endpoints_and_gamma):
+        r.add(HIDDEN, "Non-zero BMP colour endpoints under a colour space that ignores them")
+
+
+def _bmp_palette(d: bytes, start: int, entries: int, r: Report) -> None:
+    """Palette entries are B, G, R and a reserved byte; the reserved byte and unused entries must be at rest."""
+    table = d[start : start + 4 * entries]
+    if len(table) < 4 * entries:
+        return
+    if any(table[3::4]):
+        r.add(HIDDEN, "Non-zero reserved bytes in the BMP palette")
+
+
+def _bmp_indices(d: bytes, pix_off: int, w: int, h: int, bpp: int, stride: int, entries: int, r: Report) -> None:
+    """A pixel must point at a colour the table holds."""
+    import numpy as np
+
+    rows = np.frombuffer(d, dtype=np.uint8, count=stride * h, offset=pix_off).reshape(h, stride)
+    if bpp == 8:
+        top = int(rows[:, :w].max(initial=0))
+    elif bpp == 4:
+        packed = rows[:, : (w + 1) // 2]
+        nibbles = np.stack([packed >> 4, packed & 15], axis=-1).reshape(h, -1)[:, :w]
+        top = int(nibbles.max(initial=0))
+    elif bpp == 1:
+        top = int(np.unpackbits(rows, axis=1)[:, :w].max(initial=0))
+    else:
+        return
+    if top >= entries:
+        r.add(STRUCTURE, "Pixel refers to a palette entry that does not exist", f"entry {top} of {entries}")
+
+
+def _bmp_row_padding(d: bytes, pix_off: int, w: int, h: int, bpp: int, stride: int, r: Report) -> None:
+    """Every row is padded to four bytes, and a row of 1, 2 or 4-bit pixels may end in unused bits."""
+    row_bytes = (w * bpp + 7) // 8
+    pad = stride - row_bytes
+    spare_bits = (8 - (w * bpp) % 8) % 8
+    mask = (1 << spare_bits) - 1
+    dirty = 0
+    for y in range(h):
+        base = pix_off + y * stride
+        if pad and d[base + row_bytes : base + stride].strip(b"\x00"):
+            dirty += 1
+        elif spare_bits and d[base + row_bytes - 1] & mask:
+            dirty += 1
+    if dirty:
+        r.add(HIDDEN, "Non-zero padding at the end of BMP pixel rows", f"{dirty} of {h} rows")
 
 
 # --------------------------------------------------------------------------
@@ -1271,7 +1512,7 @@ _MOOV_LEAVES = {
 }
 
 
-def _boxes(d: bytes, start: int, end: int):
+def _boxes(d: bytes, start: int, end: int, top: bool = False):
     pos = start
     while pos < end:
         if pos + 8 > end:
@@ -1282,6 +1523,8 @@ def _boxes(d: bytes, start: int, end: int):
             (size,) = struct.unpack_from(">Q", d, pos + 8)
             hdr = 16
         elif size == 0:
+            if not top:  # only the last box of the file may run "to the end"; elsewhere it would swallow its siblings
+                raise _Malformed(f"box '{typ.decode('latin-1')}' claims to extend to the end inside another box")
             size = end - pos
         if size < hdr or pos + size > end:
             raise _Malformed(f"box '{typ.decode('latin-1')}' overruns its container")
@@ -1301,7 +1544,7 @@ def _cstr(d: bytes, pos: int, end: int) -> tuple[bytes, int]:
 def _inspect_isobmff(d: bytes, r: Report) -> None:
     ctx = {"items": {}, "props": [], "assoc": {}, "refs": [], "primary": None, "iloc": {}, "mdat": []}
     has_meta = False
-    for typ, s, e in _boxes(d, 0, len(d)):
+    for typ, s, e in _boxes(d, 0, len(d), top=True):
         if typ == b"ftyp":
             continue
         if typ == b"meta":

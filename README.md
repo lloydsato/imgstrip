@@ -4,10 +4,10 @@
 
 Most metadata removers delete the tags they recognise and copy everything else. imgstrip does the opposite: it decodes the image to raw pixels and writes a brand-new file from those pixels alone. Nothing from the original file is copied except pixel values. Before anything is written, every output is checked twice:
 
-1. A strict, format-aware parser walks every byte of the new file. Any segment, chunk, box, tag or byte it cannot account for makes the run fail (it fails closed).
+1. A strict, format-aware parser walks the whole structure of the new file. Any segment, chunk, box or tag it cannot account for makes the run fail (it fails closed), and so does a place that must be empty but is not: padding, reserved fields, palette entries no pixel uses, colour stored under fully transparent pixels. (It cannot vouch for slack inside compressed data; see [What "accounted for" means](#what-accounted-for-means).)
 2. The new file is decoded again and compared with the intended pixels: bit-exact for lossless formats, within a quality-dependent tolerance for lossy ones.
 
-If either check fails, nothing is written.
+If either check fails, nothing is written. `imgstrip --self-test` adds a third opinion: readers that share no code with imgstrip or Pillow must see the same pixels in every output ([how](#how-it-is-tested)).
 
 ```console
 $ imgstrip --check DSCN0010.jpg
@@ -31,7 +31,7 @@ Requires Python 3.10+.
 
 ```console
 pip install .            # installs Pillow, numpy and pillow-heif (for iPhone HEIC photos)
-imgstrip --self-test     # proves the installation works end to end
+imgstrip --self-test     # proves the installation works end to end, with independent readers cross-checking the output
 pip install '.[c2pa]'    # optional: Content Credentials (C2PA) signing, see below
 ```
 
@@ -43,7 +43,7 @@ imgstrip-web             # starts the app on this computer and opens it in your 
 
 The web app is the same engine behind a small window in your browser. It runs only on your own machine (on `127.0.0.1`), works offline, and never uploads anything.
 
-1. **Drop images** onto the window, choose them, or paste them. Each file is scanned straight away and its row says what it gives away: location, camera, time taken, serial numbers, hidden preview images, appended data. Open a row for every item, grouped as identifying metadata, hidden data and colour profile. Nothing is changed yet. The scan reads the file's structure; to also search the pixels for steganography, turn on **Deep scan** or use *Scan the pixels too* on one file.
+1. **Drop images** onto the window, choose them, or paste them. Each file is scanned straight away and its row says what it gives away: location, camera, time taken, serial numbers, hidden preview images, appended data. Open a row for every item, grouped as identifying metadata, hidden data and colour profile. Nothing is changed yet. The scan reads the file's structure; to also search the pixels for steganography, turn on **Deep scan** or use *Scan the pixels too* on one file. What it says about the pixels is always one of four verdicts (*detected*, *scrubbed*, *not detected*, *not scanned*), shown with what it does and does not mean ([below](#hidden-data-in-the-pixels-detected-scrubbed-not-detected)); a scan that finds nothing is never presented as proof that nothing is hidden.
 2. **Clean.** Every file is rebuilt from its pixels and passes both checks before it is offered back. Each verified file gets a small seal engraved from its SHA-256 (the same file always gets the same seal); open the row for the checks, the full hash, and the list of what was removed.
 3. **Take the clean files**: download one, download all as a ZIP (its entries carry no dates), or **save to a folder** on disk. Saving creates the folder if needed and never replaces an existing file; a name that is taken gets a number instead (`photo.clean (2).jpg`).
 
@@ -76,6 +76,7 @@ cat in.webp | imgstrip - > out.webp    # stdin -> stdout
 
 imgstrip --check photo.jpg             # report what a file contains, change nothing
 imgstrip --check --deep image.png      # also look for data hidden in the pixels
+imgstrip --deep photo.png              # clean, and say whether a pixel payload was found, kept or scrubbed
 ```
 
 Originals are never modified unless you pass `--in-place`. Existing outputs are never overwritten unless you pass `--force`.
@@ -90,7 +91,8 @@ Originals are never modified unless you pass `--in-place`. Existing outputs are 
 | `--jpeg-lossless` | Strip JPEGs without re-encoding (see below). |
 | `--icc convert\|sanitize\|drop` | Colour profiles: convert pixels to sRGB (default), embed a rebuilt anonymous profile, or discard. |
 | `--no-auto-orient` | Don't rotate pixels according to EXIF orientation. |
-| `--scrub-lsb` | Randomise the least-significant bit of every sample to destroy LSB steganography. |
+| `--scrub-lsb` | Randomise the least-significant bit of every sample to destroy LSB steganography. The report says "scrubbed" only if that happened: not with `--jpeg-lossless`, and "partly" if some frames could not be. |
+| `--deep` | Also decode the pixels and look for hidden data, with `--check` or while cleaning. A scan that finds nothing is not proof that nothing is hidden. See [below](#hidden-data-in-the-pixels-detected-scrubbed-not-detected). |
 | `--scrub-prnu` | Disrupt the camera's sensor fingerprint (PRNU) with a smooth random warp that moves parts of the picture by a few pixels. Not combinable with `--jpeg-lossless`. See [Camera sensor fingerprint](#camera-sensor-fingerprint-prnu). |
 | `--optimize` | Try extra PNG compression strategies (slower, smaller). |
 | `--max-pixels N` | Refuse images larger than N pixels (default 300 million). Also protects against decompression bombs. |
@@ -122,7 +124,7 @@ Exit status: `0` success (or `--check`: everything clean), `1` at least one file
 * **Multi-page TIFFs** keep their pages (thumbnail/mask pages are dropped).
 * Output files are new files, so the original file's timestamps, extended attributes (for example macOS "where from" download URLs) and ownership don't carry over. In-place mode keeps only the permission bits.
 
-## Looking for hidden data: `--check --deep`
+## Hidden data in the pixels: detected, scrubbed, not detected
 
 `--check` lists everything the container holds beside the pixels. `--deep` also decodes the pixels and looks for:
 
@@ -131,6 +133,17 @@ Exit status: `0` success (or `--check`: everything clean), `1` at least one file
 * **LSB steganography**, estimated with two independent detectors, Sample Pair Analysis (Dumitrescu, Wu & Wang) and Weighted-Stego analysis (Fridrich & Goljan, with the Ker–Böhme predictor). A file is flagged only when both agree. The thresholds were calibrated on 75 real camera photos: the worst clean photo scored 0.117, and every image with a ≥ 20 % simulated payload scored ≥ 0.195. Smaller payloads, or ±1 embedding instead of LSB replacement, can go undetected, and as with any statistical test a false positive is possible.
 
 `--scrub-lsb` replaces the least-significant bit of every colour sample with random noise (a change of at most 1/255, invisible). This destroys any LSB-embedded message regardless of whether it was detected. Fully opaque and fully transparent alpha values are preserved.
+
+A scan can find a payload but can never show there is none, and a scrub covers one family of methods. So every report (command line, `--json`, web app, Content Credentials) says one of four things about the pixels, in the same words, and never more:
+
+| Verdict | Means | Does not mean |
+|---|---|---|
+| **detected** (likely or possible) | The pixel statistics indicate LSB steganography. | A decoded message. It is evidence and can be a false alarm. A file whose bits were randomised by `--scrub-lsb` reads the same way (random bits look like a full payload), which is why *scrubbed* is a separate state and is never inferred by re-scanning. |
+| **scrubbed** | The least-significant bit of every colour sample was randomised while cleaning. Reported from what the engine did, not from the option: not for `--jpeg-lossless`, 1-bit or floating-point images, and *partly scrubbed* when only some frames or modes could be. | That nothing is hidden. Only LSB-replacement payloads are destroyed. |
+| **not detected** | The LSB tests ran and found nothing. | Proof of absence. Small payloads, ±1 embedding and every other method can go undetected. |
+| **not scanned** | Nothing was tested: `--deep` was not given, or the format has no sample values the tests can read (lossy formats, palette images, 16-bit, too few pixels). The reason is stated. | Anything about the pixels. |
+
+An animation is tested frame by frame (up to 100 megapixels in all; the report says how many frames were covered). A payload hidden only in a later frame is found. With `--deep` while cleaning, a flagged payload that nothing scrubbed is reported as kept, with a warning; the web app marks the file "Payload kept" and withholds the seal.
 
 ## Camera sensor fingerprint (PRNU)
 
@@ -268,6 +281,8 @@ Not supported, with a clear error: camera RAW files (DNG, CR2/CR3, NEF, ARW, …
 
 ## Limits: what no metadata tool can do
 
+* **A clean scan is not proof.** "Not detected" means the LSB tests found nothing, and "scrubbed" means LSB-replacement payloads were destroyed. Neither says that no hidden message exists. See [the four verdicts](#hidden-data-in-the-pixels-detected-scrubbed-not-detected).
+* **What "accounted for" means.** <a id="what-accounted-for-means"></a>The check on every output walks the whole structure of the file, requires every region that should be empty to be empty (row padding, reserved fields, palette entries no pixel uses, colour under transparent pixels, bytes after the end), and decodes it again. It cannot vouch individually for the bytes inside compressed data (deflate, LZW, JPEG entropy data, WebP and AV1/HEVC bitstreams), for JPEG quantisation and Huffman table entries no coefficient uses, for AVIF/HEIF header fields (flags, brands, handler names, codec configuration), or for how a TIFF value is represented. imgstrip's encoders write those from pixels, so nothing from the original reaches them, except in `--jpeg-lossless` mode, which keeps the original's compressed data and tables as they are. The test suite measures the rest: see [How it is tested](#how-it-is-tested).
 * **Visible content stays.** Faces, reflections, street signs and landmarks reveal more than any tag. imgstrip does not alter what the picture shows.
 * **Robust watermarks** designed to survive re-encoding (Digimarc, SynthID, C2PA "soft binding" watermarks and similar) live in the image content itself and can survive. imgstrip removes C2PA *manifests* (the original's Content Credentials), not content-level watermarks. If you opt in to signing, the only credential in the output is the new one it writes.
 * **The camera's sensor fingerprint (PRNU) stays** unless you turn on `--scrub-prnu`, and even then its absence cannot be proven. See [Camera sensor fingerprint](#camera-sensor-fingerprint-prnu) for what the scrub does, what it costs and how it was measured.
@@ -277,8 +292,12 @@ Not supported, with a clear error: camera RAW files (DNG, CR2/CR3, NEF, ARW, …
 
 ## How it is tested
 
-* `imgstrip --self-test` builds 17 worst-case fixtures, one per format. Each is stuffed with metadata, thumbnails, trailers, private chunks, palette tricks, hidden alpha data and steganography, and every item carries a unique canary string. Each fixture is stripped in every mode and to every output format (206 runs). No canary may survive anywhere in the output bytes, and both the built-in inspector and, if installed, `exiftool` must find nothing. With the optional C2PA support installed it also signs every fixture that can carry a credential, checks that the signed file holds exactly one credential and still no canary, that it reads back as valid, and that a changed picture byte is detected (15 more runs).
-* The pytest suite (645 tests) covers every codec against independent decoders (ImageMagick for 16-bit data), the colour engine against LittleCMS, orientation 1–8, all CLI safety behaviours (no-clobber, atomic in-place writes, symlinks, hard links, FIFOs, collisions, permissions, stdin/stdout) the web app's security gates, round trips and signal handling, the sensor-fingerprint scrub (an *oracle* detector that knows the camera's exact fingerprint must fail to match after the scrub and succeed before it, on every colour mode, 16-bit data, animations and the failure cases), and **fuzzing**: 680 randomly corrupted files must each produce either a verified-clean output or a clean error, never a crash, a memory blow-up or an unverified write.
+* `imgstrip --self-test` builds 21 worst-case fixtures covering every format. Each is stuffed with metadata, thumbnails, trailers, private chunks, palette tricks, hidden alpha data and steganography, and four of them hide data where decoders never look (BMP row padding and palette bytes, unused GIF colour-table entries, TIFF tag padding and colour-map low bytes, the scan parameters and version fields of a JPEG); every item carries a unique canary string. Each fixture is stripped in every mode and to every output format (255 runs). No canary may survive anywhere in the output bytes, and both the built-in inspector and, if installed, `exiftool` must find nothing. With the optional C2PA support installed it also signs every fixture that can carry a credential, checks that the signed file holds exactly one credential and still no canary, that it reads back as valid, and that a changed picture byte is detected (17 more runs).
+* The same self-test then asks **readers that share no code with imgstrip or Pillow** what each output shows: a strict PNG reader written for the purpose (only `zlib` and `numpy`; it rejects bad checksums, chunk-order violations, data after `IEND` and unused deflate bytes, and decodes every colour type and bit depth exactly), plus ImageMagick and FFmpeg when installed. They must see the same pixels: identical for lossless data, and within 3 levels of mean difference for JPEG and other lossy formats, whose decoders legitimately differ. The summary says how many outputs each reader examined.
+* **Differential tests** (`tests/test_differential.py`). The strict reader is itself tested against ImageMagick's encoder on every PNG colour type and bit depth (1 to 16 bit, palettes, colour keys, every filter) and must reject sixteen kinds of damage, so a reader that cannot fail is not trusted. Files written by *other* encoders, whose pixels are known, are cleaned and must show the same picture to every reader: ImageMagick and FFmpeg PNG (including Adam7 interlacing), TIFF (LZW, Zip, PackBits, tiled, strips, big-endian), BMP (including RLE), lossless WebP, GIFs optimised into disposal-method sub-frames, JPEGs (4:2:0, 4:4:4, progressive, grey) and 16-bit data. So must everything imgstrip accepts from a corrupted file.
+* **Does the verifier cover every byte?** (`tests/test_coverage_audit.py`) Bits are flipped one at a time in clean outputs of every format. A flip that changes nothing the picture shows, and that nothing notices (no inspector finding, no decode failure, no decode-based check), marks a byte the verifier does not account for; PNG chunk checksums are repaired after each flip, because otherwise they would "account" for every byte. Such bytes must be on an explicit, reasoned allow-list (padding bits inside compressed streams, table entries no coefficient uses, ...). 38 planted hidden channels (data in BMP row padding, a palette's reserved byte, an unused GIF colour-table entry, the padding of a TIFF tag, a nested box that swallows its siblings, a JFIF version nobody wrote, ...) must each be refused, the engine must refuse to write if its own scrubbing regressed, and switching a check off must make the audit report the hole it covered. Its first run found real gaps, now closed: BMP row padding, palette and header fields; unused palette entries and colour under transparent pixels in lossless outputs; unused colour-table entries in every GIF frame; TIFF tag padding and the discarded low bytes of 16-bit colour maps; AVIF/HEIF boxes claiming to extend "to the end" inside another box; and a BMP V5 embedded profile that was read from the wrong header fields.
+* **Steganography verdicts** (`tests/test_stego_verdicts.py`, `tests/test_stego_ui.py`). The four states and their caveats; that "scrubbed" follows what the engine did, never what was asked for (a scrub that cannot apply, such as `--jpeg-lossless`, is not reported as one); that a payload hidden only in a later animation frame is found; that the command line, JSON, web API and credentials agree; and that a real browser shows each state in the right words.
+* The pytest suite (873 tests) covers every codec against independent decoders (ImageMagick for 16-bit data), the colour engine against LittleCMS, orientation 1–8, all CLI safety behaviours (no-clobber, atomic in-place writes, symlinks, hard links, FIFOs, collisions, permissions, stdin/stdout) the web app's security gates, round trips and signal handling, the sensor-fingerprint scrub (an *oracle* detector that knows the camera's exact fingerprint must fail to match after the scrub and succeed before it, on every colour mode, 16-bit data, animations and the failure cases), and **fuzzing**: 840 randomly corrupted files must each produce either a verified-clean output or a clean error, never a crash, a memory blow-up or an unverified write.
 * The Content Credentials code has 285 tests of its own (skipped when the optional support is not installed). Highlights: every key type (ES256/384/512, RSA-PSS, Ed25519) signs and is verified with a **second, independent implementation** of the signature and the hard-binding hash; a **hostile-SDK harness** crafts credentials with one deliberate flaw each (an extra assertion, a hidden field, a thumbnail, the source's name as the ingredient title, a signature by another chain, different pixels, an EXIF segment slipped in, a double signature) and every one is refused, with a control proving the harness itself is sound; the canary fixtures prove no byte of the original reaches a credential; a local web server proves a hostile file's remote-manifest link is *not* followed (and that the library's defaults would follow it); thousands of randomly corrupted credentials must each give a verdict or a clean error, never a crash; the web app's key, passphrase and signing switch are shown never to reach a response, the disk or the browser's storage, and a real browser drives the toggle, the identity form and a signing run end to end. Eleven deliberate breakages of the key safeguards were each caught by these tests.
 * Trial run on the public [exif-samples](https://github.com/ianare/exif-samples) corpus: 104 real files from dozens of cameras and phones, including iPhone HEICs and deliberately broken files. 104 cleaned, 0 failures. Afterwards `exiftool` reported zero non-structural tags across all outputs, and all 16 orientation test images came out identical.
 
