@@ -8,6 +8,7 @@ from conftest import assert_clean
 from PIL import Image
 
 from imgstrip import Options, StripError, fixtures, inspect_bytes, strip_image
+from imgstrip import jpeg
 from imgstrip.jpeg import orientation_exif
 
 
@@ -62,3 +63,13 @@ def test_mpo_lossless_drops_secondary(fx):
 def test_lossless_requires_jpeg_input(fx):
     with pytest.raises(StripError):
         strip_image(fx["png_everything.png"], Options(jpeg_lossless=True, format="jpeg"))
+
+
+def test_an_appended_image_with_its_own_thumbnail_counts_once():
+    # A secondary image (as in a camera's MPF file) whose EXIF block carries a thumbnail JPEG of its own.
+    secondary = fixtures.jpeg_everything()
+    assert secondary.count(b"\xff\xd8\xff") == 2
+    _data, dropped = jpeg.rebuild(fixtures.jpeg_everything() + secondary)
+    assert dropped == 1
+    _data, dropped = jpeg.rebuild(fixtures.jpeg_everything() + secondary + secondary)
+    assert dropped == 2

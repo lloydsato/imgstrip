@@ -17,7 +17,6 @@ from __future__ import annotations
 import functools
 import io
 import struct
-import sys
 import zlib
 
 import numpy as np
@@ -589,7 +588,3 @@ def encode_bmp_rgba(arr: np.ndarray) -> bytes:
     )
     file_header = b"BM" + struct.pack("<IHHI", header_size + len(pixels), 0, 0, header_size)
     return file_header + v4 + pixels
-
-
-def native_is_little() -> bool:
-    return sys.byteorder == "little"

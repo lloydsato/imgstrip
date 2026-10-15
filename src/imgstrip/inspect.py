@@ -819,6 +819,9 @@ def _inspect_gif(d: bytes, r: Report) -> None:
         pos += size
     frames = 0
     transparent = None
+    # Frames share the global colour table, so it is judged once, against every frame that draws with it.
+    global_used = global_shown = 0
+    global_known = True  # False once a frame drawing with it cannot be read
     while True:
         if pos >= len(d):
             raise _Malformed("missing trailer")
@@ -834,20 +837,25 @@ def _inspect_gif(d: bytes, r: Report) -> None:
             if ipacked & 0x18:  # two bits the format reserves
                 r.add(HIDDEN, "Non-zero reserved bits in a GIF frame header", f"{ipacked & 0x18:#04x}")
             pos += 10
-            table = global_table
+            local = None
             if ipacked & 0x80:
                 size = 3 << ((ipacked & 7) + 1)
-                table = d[pos : pos + size]
+                local = d[pos : pos + size]
                 pos += size
             min_code = d[pos]
             pos += 1  # LZW minimum code size
             data, pos = _gif_subblocks(d, pos)
-            if 1 <= min_code <= 8:
-                used = _gif_used_indices(min_code, data)
-                if used is None:
+            used = _gif_used_indices(min_code, data) if 1 <= min_code <= 8 else None
+            if used is None:
+                global_known = global_known and local is not None
+                if 1 <= min_code <= 8:
                     r.add(STRUCTURE, "Corrupt GIF image data")
+            else:
+                shown = used & ~(1 << transparent) if transparent is not None else used
+                if local is not None:
+                    _gif_palette(local, used, shown, r)
                 else:
-                    _gif_palette(table, used, transparent, r)
+                    global_used, global_shown = global_used | used, global_shown | shown
             transparent = None
         elif block == 0x21:
             label = d[pos + 1]
@@ -878,6 +886,8 @@ def _inspect_gif(d: bytes, r: Report) -> None:
     r.info["frames"] = frames
     if frames == 0:
         raise _Malformed("no image data")
+    if global_table and global_known:
+        _gif_palette(global_table, global_used, global_shown, r)
     if outside:
         r.add(HIDDEN, "Frame area outside the canvas", f"{outside} frame(s) extend past {w}x{h}; viewers clip them")
     _check_trailing(d, pos, r, "GIF trailer")
@@ -928,12 +938,15 @@ def _gif_used_indices(min_code: int, data: bytes) -> int | None:
     return used
 
 
-def _gif_palette(table: bytes, used: int, transparent: int | None, r: Report) -> None:
+def _gif_palette(table: bytes, used: int, shown: int, r: Report) -> None:
+    """Colour-table entries nobody sees: ``used`` and ``shown`` are bit masks of the indices the pixels use,
+    and of those drawn opaque."""
     entries = len(table) // 3
-    unused = sum(1 for i in range(entries) if not used >> i & 1 and any(table[3 * i : 3 * i + 3]))
+    coloured = [i for i in range(entries) if any(table[3 * i : 3 * i + 3])]
+    unused = sum(1 for i in coloured if not used >> i & 1)
     if unused:
         r.add(HIDDEN, "Unused palette entries with colour data", f"{unused} of {entries} entries")
-    if transparent is not None and transparent < entries and any(table[3 * transparent : 3 * transparent + 3]):
+    if any(used >> i & 1 and not shown >> i & 1 for i in coloured):
         r.add(HIDDEN, "Colour data under a transparent palette entry")
 
 

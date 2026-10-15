@@ -30,7 +30,11 @@ from imgstrip import codecs, fixtures, jumbf
 from imgstrip.core import Options, canonical_frames, heif_available, strip_image
 from imgstrip.inspect import inspect_bytes, is_c2pa_finding
 
-FIXED_NOW = dt.datetime(2026, 10, 15, 13, 37, 59, tzinfo=dt.timezone.utc)
+# A moment inside every test certificate's validity window (they are issued "now"), with seconds
+# that must never reach a manifest. Pinning a calendar date instead would fail once the clock passed it.
+FIXED_NOW = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).replace(
+    hour=13, minute=37, second=59, microsecond=0
+)
 
 
 def run(creds, source, options, identity, config=None):
@@ -330,17 +334,18 @@ def test_the_statement_is_generated_from_the_fields_and_scopes_itself(creds):
 
 def test_date_precision_never_goes_below_the_minute(creds, signer):
     source = photo_bytes("PNG")
-    for precision, expected in (("day", "2026-10-15"), ("minute", "2026-10-15T13:37Z")):
+    day = FIXED_NOW.strftime("%Y-%m-%d")
+    for precision, expected in (("day", day), ("minute", f"{day}T13:37Z")):
         _r, _e, signed = run(
             creds, source, Options(), signer.identity, creds.Config(date_precision=precision, now=FIXED_NOW)
         )
         assert signed.credential.sanitization["date"] == expected
         assert b"13:37:59" not in signed.data and b"59Z" not in signed.data
     local = dt.timezone(dt.timedelta(hours=-8))
-    _r, _e, signed = run(
-        creds, source, Options(), signer.identity, creds.Config(now=dt.datetime(2026, 10, 15, 22, 0, tzinfo=local))
-    )
-    assert signed.credential.sanitization["date"] == "2026-10-16", "dates are always UTC"
+    evening = FIXED_NOW.replace(hour=22, minute=0, second=0, tzinfo=local)  # 06:00 UTC the next day
+    _r, _e, signed = run(creds, source, Options(), signer.identity, creds.Config(now=evening))
+    next_day = (FIXED_NOW + dt.timedelta(days=1)).strftime("%Y-%m-%d")
+    assert signed.credential.sanitization["date"] == next_day, "dates are always UTC"
 
 
 def test_bad_configuration_is_refused(creds, signer):
@@ -735,6 +740,9 @@ def test_a_bad_signature_is_caught_without_the_sdk(creds, signer, signed_samples
         creds.check_cose_signature(jumbf.Manifest(m.label, m.assertions, m.claim, m.claim_bytes, extra_header, b""))
     with pytest.raises(creds.CredentialError, match="different certificate chain"):
         creds.check_cose_signature(m, Pki("zzz").issue().chain)
+    not_a_chain = jumbf.Tagged(18, [sign1[0], {33: 5}, None, sign1[3]])
+    with pytest.raises(creds.CredentialError, match="no certificate chain"):
+        creds.check_cose_signature(jumbf.Manifest(m.label, m.assertions, m.claim, m.claim_bytes, not_a_chain, b""))
 
 
 # --------------------------------------------------------------------------
@@ -977,6 +985,7 @@ def test_an_audit_needs_the_receipt_and_a_committed_credential(creds, signer):
     assert "no receipt matches" in creds.audit(signed.data, source, creds.receipts_document([])).problems[0]
     bad_salt = dict(signed.receipt, salt="not base64!!")
     assert "malformed" in creds.audit(signed.data, source, [bad_salt]).problems[0]
+    assert "malformed" in creds.audit(signed.data, source, [dict(signed.receipt, salt=42)]).problems[0]
     wrong_salt = dict(signed.receipt, salt=base64_of("11" * 32).decode())
     assert creds.audit(signed.data, source, [wrong_salt]).commitment_ok is False
     _r, _e, plain = run(creds, source, Options(), signer.identity)

@@ -157,6 +157,7 @@ def test_cbor_floats_and_undefined():
         (b"\xf8\x20", "unsupported simple value"),
         (b"\x81" * 40 + b"\x00", "nested too deeply"),
         (b"\xa1\x80\x01", "array as a map key"),
+        (b"\xa1\xc1\x81\x00\x00", "tagged array as a map key"),
         (b"", "empty"),
     ],
 )

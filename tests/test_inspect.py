@@ -4,10 +4,12 @@ import io
 import struct
 import zlib
 
+import numpy as np
 import pytest
 from PIL import Image
 
 from imgstrip import fixtures, inspect_bytes
+from imgstrip.codecs import _pillow_lzw
 from imgstrip.inspect import HIDDEN, METADATA, sniff_format
 
 
@@ -127,3 +129,25 @@ def test_sniffing():
 def test_categories(fx):
     cats = {f.category for f in inspect_bytes(fx["jpeg_everything.jpg"]).findings}
     assert METADATA in cats and HIDDEN in cats
+
+
+def _gif_with_global_table(frame_indices, transparent=None):
+    """An 8x8 GIF whose frames are each filled with one index of a shared four-colour global table."""
+    pal = bytes([0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255])
+    out = bytearray(b"GIF89a" + struct.pack("<HHBBB", 8, 8, 0x81, 0, 0) + pal)
+    for n, k in enumerate(frame_indices):
+        _p, min_code, data = _pillow_lzw(np.full((8, 8), k, np.uint8), pal)
+        t = transparent.get(n) if transparent else None
+        out += b"\x21\xf9\x04" + struct.pack("<BHB", 1 if t is not None else 0, 10, t or 0) + b"\x00"
+        out += b"\x2c" + struct.pack("<HHHHB", 0, 0, 8, 8, 0) + bytes([min_code]) + data
+    return bytes(out + b"\x3b")
+
+
+def test_gif_global_table_is_judged_across_all_frames():
+    # Each frame uses one colour, together all four: nothing is hidden.
+    assert not inspect_bytes(_gif_with_global_table([0, 1, 2, 3])).findings
+    # Transparent in one frame but drawn in another: the colour is visible.
+    assert not inspect_bytes(_gif_with_global_table([0, 1, 2, 3, 1], {1: 1})).findings
+    # An entry no frame draws still counts as hidden data.
+    assert labels(_gif_with_global_table([0, 1, 2])) == {"Unused palette entries with colour data"}
+    assert labels(_gif_with_global_table([0, 1, 2, 3], {3: 3})) == {"Colour data under a transparent palette entry"}

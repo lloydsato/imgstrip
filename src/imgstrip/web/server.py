@@ -602,8 +602,10 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
     size = report.info.get("size")
     decodable = report.format
     raw = camera_raw_kind(data)
+    header_size = None
     if report.format is None:
-        decodable, size = _probe(data)
+        decodable, header_size = _probe(data)
+        size = header_size
     pixels_scanned = False
     verdict = stego.not_scanned("the pixels were not scanned (turn on Deep scan, or choose Scan the pixels too)")
     if deep and (raw or not decodable):
@@ -611,7 +613,8 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
     if deep and decodable and not raw:
         # The container summary does not always know the size (simple WebP, oversized GIF
         # frames), so ask the decoder: the pixel scan costs about 100 bytes per pixel.
-        _, header_size = _probe(data)
+        if header_size is None:
+            _, header_size = _probe(data)
         dims = header_size or size
         if not dims or dims[0] * dims[1] > DEEP_SCAN_MAX_PIXELS:
             notes.append(

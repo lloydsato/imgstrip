@@ -426,10 +426,7 @@ def _mean_error(got: np.ndarray, want: np.ndarray, alpha: bool, exact: bool) -> 
             a, b = _premultiplied(a, full), _premultiplied(b, full)
         else:
             a, b = a.astype(np.float64), b.astype(np.float64)
-        diff = np.abs(a - b)
-        if exact and diff.any():
-            return float(diff.max())
-        total += float(diff.sum())
+        total += float(np.abs(a - b).sum())
     return total / max(1, got.size) * (255.0 / full)
 
 
