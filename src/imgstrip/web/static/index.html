@@ -24,6 +24,7 @@
   <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4.25M12 17.1v.01"/></symbol>
   <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></symbol>
   <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8v.01"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8.5" cy="14.5" r="3.5"/><path d="M11 12l8-8M16 7l2.5 2.5M13.5 9.5L15 11"/></symbol>
   <symbol id="i-image" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9.5" cy="10" r="1.5"/><path d="M5 17.5l4.5-4.5 3 3 2.5-2.5 4 4"/></symbol>
 </svg>
 
@@ -96,6 +97,11 @@
               <span class="switch-track" aria-hidden="true"></span>
               <span class="switch-text"><span>Disrupt camera fingerprint</span><span class="hint">Scrambles the sensor noise that can link a photo to one camera. Shifts parts of the picture by a few pixels.</span></span>
             </label>
+            <label class="switch" id="c2paSwitch">
+              <input type="checkbox" role="switch" name="c2pa" aria-controls="credentials">
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-text"><span>Sign with Content Credentials</span><span class="hint" id="c2paHint">Adds a signed note (C2PA) that you removed the metadata, and whether the picture is unchanged. Optional.</span></span>
+            </label>
             <label class="switch">
               <input type="checkbox" role="switch" name="auto_orient" checked>
               <span class="switch-track" aria-hidden="true"></span>
@@ -108,6 +114,64 @@
             </label>
           </div>
         </form>
+        <section class="reveal" id="credentials" data-open="false" aria-labelledby="credTitle">
+          <div class="reveal-inner">
+            <div class="cred">
+              <h3 class="cred-title" id="credTitle">Content Credentials <span class="hint">C2PA</span></h3>
+              <p class="cred-lede">Each cleaned image is signed with your certificate. The credential says you removed its metadata and whether the pixels are unchanged. It does not vouch for who took the picture or that it is genuine. Nothing here leaves this computer, and your key is kept in memory only.</p>
+              <div class="cred-identity" id="credIdentity"></div>
+              <form class="cred-load" id="identityForm" autocomplete="off" hidden>
+                <div class="field">
+                  <label for="cred-cert">Certificate <span class="hint">PEM chain or a .p12 bundle</span></label>
+                  <input type="file" id="cred-cert" accept=".pem,.crt,.cer,.p12,.pfx">
+                </div>
+                <div class="field">
+                  <label for="cred-key">Private key <span class="hint">if not in the certificate file</span></label>
+                  <input type="file" id="cred-key" accept=".pem,.key">
+                </div>
+                <div class="field">
+                  <label for="cred-pass">Passphrase <span class="hint">if the key is protected</span></label>
+                  <input type="password" id="cred-pass" autocomplete="off" spellcheck="false" autocapitalize="off">
+                </div>
+                <div class="field">
+                  <label for="cred-anchors">Trust anchors <span class="hint">optional CA certificates to treat as trusted</span></label>
+                  <input type="file" id="cred-anchors" accept=".pem,.crt,.cer">
+                </div>
+                <p class="note is-error cred-error" id="identityError" role="alert" hidden></p>
+                <div class="cred-actions">
+                  <button class="btn btn-plate btn-small" id="identityLoad" type="submit">Load identity</button>
+                  <button class="btn btn-quiet btn-small" id="identityCancel" type="button">Cancel</button>
+                </div>
+              </form>
+              <div class="cred-settings" id="credSettings">
+                <div class="field">
+                  <label for="cred-date">Date recorded</label>
+                  <span class="select"><select id="cred-date">
+                    <option value="day">Day only (safer)</option>
+                    <option value="minute">Day and minute</option>
+                  </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
+                </div>
+                <div class="field">
+                  <label for="cred-detail">Detail</label>
+                  <span class="select"><select id="cred-detail">
+                    <option value="minimal">Minimal</option>
+                    <option value="full">Also list what was done to the pixels</option>
+                  </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
+                </div>
+                <label class="switch cred-commit">
+                  <input type="checkbox" role="switch" id="cred-commit">
+                  <span class="switch-track" aria-hidden="true"></span>
+                  <span class="switch-text"><span>Make it auditable later</span><span class="hint">Seals a fingerprint of the original into the credential. Only the receipt you keep can open it, and it is lost when you stop imgstrip unless you download it.</span></span>
+                </label>
+              </div>
+              <div class="cred-hints" id="credHints"></div>
+              <div class="cred-receipts" id="credReceipts" hidden>
+                <p class="note"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg><span id="receiptText"></span></p>
+                <button class="btn btn-secondary btn-small" id="receiptDownload" type="button"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-download"/></svg><span>Download receipts</span></button>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
 
@@ -177,6 +241,7 @@
         <li><strong>Data hidden in the pixels can survive.</strong> Lossless cleaning keeps every pixel value, so a steganography payload stored in them stays unless <em>Scrub least-significant bits</em> is on. <em>Deep scan</em> looks for one first.</li>
         <li><strong>The camera's sensor fingerprint stays.</strong> Every sensor leaves a faint noise pattern in the pixels, and anyone holding other photos from the same camera can match it. Cleaning keeps it. <em>Disrupt camera fingerprint</em> scrambles it and defeats the standard matching test, but absence can't be proven.</li>
         <li><strong>Lossy formats are re-encoded.</strong> JPEG, WebP, AVIF and HEIF lose a little quality. <em>Keep JPEG data bit-exact</em> avoids that for JPEGs, but keeps any data hidden in the JPEG coefficients.</li>
+        <li><strong>Content Credentials vouch for processing only.</strong> If you sign, the credential says what you did to the file, not who took the picture or that it is real. It carries no trusted timestamp (imgstrip never goes online), so viewers treat it as invalid once your certificate expires, and shows "Unverified" unless the certificate's issuer is on the C2PA Trust List.</li>
         <li><strong>Originals stay as they are.</strong> imgstrip never modifies or deletes them; securely erasing old copies is up to you.</li>
       </ul>
     </div>

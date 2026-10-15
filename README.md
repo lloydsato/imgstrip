@@ -32,6 +32,7 @@ Requires Python 3.10+.
 ```console
 pip install .            # installs Pillow, numpy and pillow-heif (for iPhone HEIC photos)
 imgstrip --self-test     # proves the installation works end to end
+pip install '.[c2pa]'    # optional: Content Credentials (C2PA) signing, see below
 ```
 
 ## Web app
@@ -46,7 +47,7 @@ The web app is the same engine behind a small window in your browser. It runs on
 2. **Clean.** Every file is rebuilt from its pixels and passes both checks before it is offered back. Each verified file gets a small seal engraved from its SHA-256 (the same file always gets the same seal); open the row for the checks, the full hash, and the list of what was removed.
 3. **Take the clean files**: download one, download all as a ZIP (its entries carry no dates), or **save to a folder** on disk. Saving creates the folder if needed and never replaces an existing file; a name that is taken gets a number instead (`photo.clean (2).jpg`).
 
-**Options** holds the same switches as the command line: output format, quality, colour profile handling, keeping JPEG data bit-exact, LSB scrubbing, **disrupting the camera's sensor fingerprint**, orientation, extra PNG compression, and the **deep scan** that also searches the pixels for steganography.
+**Options** holds the same switches as the command line: output format, quality, colour profile handling, keeping JPEG data bit-exact, LSB scrubbing, **disrupting the camera's sensor fingerprint**, orientation, extra PNG compression, the **deep scan** that also searches the pixels for steganography, and the optional **Sign with Content Credentials** switch (see [below](#content-credentials-c2pa-optional)).
 
 | Option | Meaning |
 |---|---|
@@ -163,6 +164,92 @@ Median PCE (the range is two independent runs); 60 is the usual "same camera" th
 
 **What this does not show.** It is a simulation: real sensors have additional structure (demosaicing, per-camera processing) that the model leaves out, and no real-camera corpus was available. An attacker who knows imgstrip's algorithm may do better with a purpose-built local-registration attack. At crossings of strong lines and in dense grids (brick, tiles, window frames) the motion cannot vanish without leaving that area aligned, so lines there can still wobble by a few pixels, and fine grain softens slightly where resampling falls between pixels. **Nothing here is a proof**: no tool can show that a fingerprint is gone from one file (there is nothing to compare it with), so `--check` does not report it and the report cannot give the file a seal for it. Treat it as a strong reduction of the standard attack, not as an erasure.
 
+## Content Credentials (C2PA, optional)
+
+For journalists who need to *show* that a published image was sanitised without being altered, imgstrip can sign each cleaned image with a [C2PA](https://c2pa.org) Content Credential. Anyone can check it with standard tools. It is **off unless you ask for it**: a tick box in the web app (*Options → Sign with Content Credentials*), or `--c2pa` on the command line.
+
+```console
+pip install 'imgstrip[c2pa]'                       # adds the official C2PA library (c2pa-python)
+imgstrip --c2pa-test-identity ~/id-test            # a throw-away TEST certificate to try it with
+imgstrip --c2pa --c2pa-cert ~/id-test/test-signer-chain.pem --c2pa-key ~/id-test/test-signer-key.pem \
+         --jpeg-lossless photo.jpg                 # -> photo.clean.jpg, signed
+imgstrip --c2pa-verify photo.clean.jpg             # what a viewer will make of it
+```
+
+```console
+$ imgstrip --c2pa-verify photo.clean.jpg
+ok       photo.clean.jpg (JPEG)
+           credential: Unverified (signed, signer not trusted); signed by Test Newsroom (Test Signer)
+           sanitised 2026-10-15; pixels: identical to the file received
+           this credential vouches for the processing only, not for the image's origin or authenticity
+           the file holds nothing but the picture and this credential
+```
+
+### What the credential says
+
+> Metadata and hidden data were removed from this image to protect its source. *The pixel data is identical to the file received.* This credential vouches for that processing only, not for the origin or authenticity of the image.
+
+The second sentence is **measured, not assumed**. imgstrip decodes the file you gave it and the file it produced and compares them:
+
+| Says | When |
+|---|---|
+| **identical** | The decoded pixels are bit-for-bit those of the original: lossless formats (PNG, lossless WebP, GIF), and JPEGs cleaned with `--jpeg-lossless`. Hidden colour under transparent pixels and unused palette entries do not count as pixels. |
+| **equivalent** | Same picture, but re-encoded (JPEG/WebP/AVIF/HEIF at a quality below lossless), rotated by the orientation tag, colour-converted or converted to another format. The measured PSNR is shown to you, and recorded if you choose *full* detail. |
+| **altered** | You asked for `--scrub-prnu` or `--scrub-lsb`, which change pixels on purpose. The credential says so rather than claim otherwise. |
+
+To be able to say "identical" for a JPEG, use `--jpeg-lossless` (web: *Keep JPEG data bit-exact*). The default re-encodes JPEGs, which also destroys DCT-domain steganography and the camera's quantisation-table fingerprint, so imgstrip does not switch it on for you.
+
+The credential is a standard C2PA manifest (an `org.imgstrip.sanitization` assertion, plus `c2pa.actions` and an ingredient standing for "the image as received", bound to the file by a hash). It records the **date** (day only by default; `--c2pa-date minute` adds the minute, never seconds) and nothing else you did not choose.
+
+### Valid is not the same as trusted
+
+A signature can be cryptographically perfect and still show as **Unverified** to the public, because the viewer does not recognise the signer's certificate authority. imgstrip tells you what a viewer will see, before you publish:
+
+* **Test certificates.** `--c2pa-test-identity` makes a throw-away two-step chain (the C2PA library refuses a single self-signed certificate). Credentials from it are valid but untrusted; the web app shows an amber warning: *"You are using a test/development certificate. The image will be signed, but public viewers will see an 'Unverified' warning. For publication, use a certificate issued by a certificate authority on the C2PA Trust List."*
+* **Real certificates.** Use a signing certificate from a certificate authority on the [C2PA Trust List](https://c2pa.org). imgstrip works offline and does not bundle that list, so for such a certificate it says plainly that it cannot check the issuer. Give it a copy of the list (or your own root) with `--c2pa-trust-anchors FILE` and the same credential reads **Trusted**.
+* **Your own trust.** An organisation can sign with its own CA and give the public root to its readers; a reader who adds that root sees **Trusted**. Test it with `imgstrip --c2pa-verify --c2pa-trust-anchors root.pem file`.
+* **Refused outright:** self-signed, expired, not-yet-valid or CA certificates, keys the format cannot use (RSA under 2048 bits, other curves), and anything the C2PA library itself rejects. The identity is test-signed against a throw-away image first, so you learn this when you load it, not on your tenth file.
+* **No trusted timestamp.** A timestamp needs a server on the internet; imgstrip never goes online. Viewers therefore treat every credential as **invalid once the signing certificate expires**, and imgstrip warns you 30 days ahead.
+
+Supported keys: ECDSA P-256/384/521, RSA (PSS) and Ed25519. Certificates in PEM (chain and key together or in two files) or PKCS#12 (`.p12`/`.pfx`).
+
+### How your identity and the source are protected
+
+* **Your private key stays in memory.** It signs through a callback, appears in no report, JSON output, error message or temporary file, and cannot be pickled or copied. Passphrases are never accepted on the command line (they would sit in your shell history and process list): use the prompt, `IMGSTRIP_C2PA_PASSPHRASE`, or `--c2pa-passphrase-file`. In the web app the identity lives in the server's memory until you remove it or stop `imgstrip-web`, the passphrase field is wiped as soon as the request is sent, and the page never keeps the signing switch, the key, the passphrase or the certificate in its storage: after a reload, signing is off again.
+* **No byte of the original goes into the credential.** The C2PA library is never given the source file, so nothing from it (names, XMP ids, a camera's own credential, thumbnails) can be copied. The manifest holds a fixed vocabulary; a hidden field would make imgstrip refuse the file. If the *original* carried Content Credentials (say from a camera), they are removed like any other metadata and you are told who signed them. If they declared the image **AI-generated**, the new credential records that: a sanitised copy must not pass as a camera original.
+* **It never phones home.** Remote manifests, certificate-status lookups and timestamp servers are off, with a test that proves a hostile file's remote link is not followed (the library's defaults *do* follow it).
+* **Fail closed.** The signed file is re-verified before it is written: the inspector must find exactly one new item (the credential); the decoded pixels must equal those of the clean file; every byte of the manifest is parsed by imgstrip's own reader (padding must be zero); the manifest must match field for field what was requested; the signature is verified with a second, independent implementation; and the library must report a valid, hard-bound manifest. Any failure writes nothing.
+* **Auditable later, without linking now (optional).** `--c2pa-commit-source` (web: *Make it auditable later*) adds a *keyed* commitment to the original's pixels. Only the private **receipt** you keep (`--c2pa-receipt FILE`, mode 0600) can open it, so someone holding both the published image and the original cannot use the credential to prove they are linked, but you can, later, for an editor or a court:
+
+```console
+imgstrip --c2pa-verify --c2pa-original original.jpg --c2pa-receipt receipts.json published.jpg
+ok       published.jpg (JPEG)
+           ...
+           audit: the original matches; pixels identical to the file received
+```
+
+The receipt holds the secret salt and the hash of the original: keep it as private as the original, and never publish it. (The web app holds receipts in memory; download them before you stop it.)
+
+### Options
+
+| Option | Meaning |
+|---|---|
+| `--c2pa` | Sign each cleaned image. Needs `--c2pa-cert`. |
+| `--c2pa-cert FILE`, `--c2pa-key FILE` | Your certificate chain (PEM; may also hold the key) or a `.p12`/`.pfx` bundle, and the key if separate. |
+| `--c2pa-passphrase-file FILE` | Read the key's passphrase from a file (or set `IMGSTRIP_C2PA_PASSPHRASE`, or type it when asked). |
+| `--c2pa-date day\|minute` | How exactly the signing time is recorded (default day). |
+| `--c2pa-detail minimal\|full` | `full` also lists what was done to the pixels and the measured fidelity. |
+| `--c2pa-commit-source`, `--c2pa-receipt FILE` | Seal an auditable commitment; the private receipt is appended to `FILE`. |
+| `--c2pa-trust-anchors FILE` | CA certificates (PEM) to treat as trusted when judging the credential. |
+| `--c2pa-verify` | Verify credentials instead of cleaning (`--c2pa-original` + `--c2pa-receipt` also audits). Exit 0 only for a valid imgstrip credential on a file that holds nothing else. |
+| `--c2pa-test-identity DIR` | Create a TEST certificate, key and root in `DIR` and exit. |
+
+`--check` also shows a file's credential (a signed file still reports the credential as data beside the picture, and exits 3).
+
+**Formats:** JPEG, PNG, WebP, GIF, AVIF and HEIF. BMP has no place for a manifest and TIFF is refused (the library leaves the old directory orphaned in the file); imgstrip says so and suggests PNG.
+
+**What a credential cannot do.** It vouches for what *you* did to the file, not for who took the picture or whether it is real; it says so in its own text. It names your organisation in the certificate, so it is not for someone who must stay anonymous. It is only as trustworthy as whoever holds the key. The "pixels identical" statement rests on imgstrip's own measurement, which an auditor can repeat with the original and the receipt, and an `altered` credential says honestly that the pixels were changed on purpose.
+
 ## Supported formats
 
 | Format | Read | Write (default output) |
@@ -182,7 +269,7 @@ Not supported, with a clear error: camera RAW files (DNG, CR2/CR3, NEF, ARW, …
 ## Limits: what no metadata tool can do
 
 * **Visible content stays.** Faces, reflections, street signs and landmarks reveal more than any tag. imgstrip does not alter what the picture shows.
-* **Robust watermarks** designed to survive re-encoding (Digimarc, SynthID, C2PA "soft binding" watermarks and similar) live in the image content itself and can survive. imgstrip removes C2PA *manifests*, not content-level watermarks.
+* **Robust watermarks** designed to survive re-encoding (Digimarc, SynthID, C2PA "soft binding" watermarks and similar) live in the image content itself and can survive. imgstrip removes C2PA *manifests* (the original's Content Credentials), not content-level watermarks. If you opt in to signing, the only credential in the output is the new one it writes.
 * **The camera's sensor fingerprint (PRNU) stays** unless you turn on `--scrub-prnu`, and even then its absence cannot be proven. See [Camera sensor fingerprint](#camera-sensor-fingerprint-prnu) for what the scrub does, what it costs and how it was measured.
 * **File names** often contain timestamps (`IMG_20240517_133700.jpg`). Use `--random-name`.
 * **In-place mode does not securely erase** the old data. The original bytes may remain on disk, in SSD wear-levelling areas, snapshots, backups or cloud sync history. Other hard links to the file keep pointing at the original data (imgstrip warns about this).
@@ -190,8 +277,9 @@ Not supported, with a clear error: camera RAW files (DNG, CR2/CR3, NEF, ARW, …
 
 ## How it is tested
 
-* `imgstrip --self-test` builds 17 worst-case fixtures, one per format. Each is stuffed with metadata, thumbnails, trailers, private chunks, palette tricks, hidden alpha data and steganography, and every item carries a unique canary string. Each fixture is stripped in every mode and to every output format (206 runs). No canary may survive anywhere in the output bytes, and both the built-in inspector and, if installed, `exiftool` must find nothing.
-* The pytest suite (359 tests) covers every codec against independent decoders (ImageMagick for 16-bit data), the colour engine against LittleCMS, orientation 1–8, all CLI safety behaviours (no-clobber, atomic in-place writes, symlinks, hard links, FIFOs, collisions, permissions, stdin/stdout) the web app's security gates, round trips and signal handling, the sensor-fingerprint scrub (an *oracle* detector that knows the camera's exact fingerprint must fail to match after the scrub and succeed before it, on every colour mode, 16-bit data, animations and the failure cases), and **fuzzing**: 680 randomly corrupted files must each produce either a verified-clean output or a clean error, never a crash, a memory blow-up or an unverified write.
+* `imgstrip --self-test` builds 17 worst-case fixtures, one per format. Each is stuffed with metadata, thumbnails, trailers, private chunks, palette tricks, hidden alpha data and steganography, and every item carries a unique canary string. Each fixture is stripped in every mode and to every output format (206 runs). No canary may survive anywhere in the output bytes, and both the built-in inspector and, if installed, `exiftool` must find nothing. With the optional C2PA support installed it also signs every fixture that can carry a credential, checks that the signed file holds exactly one credential and still no canary, that it reads back as valid, and that a changed picture byte is detected (15 more runs).
+* The pytest suite (645 tests) covers every codec against independent decoders (ImageMagick for 16-bit data), the colour engine against LittleCMS, orientation 1–8, all CLI safety behaviours (no-clobber, atomic in-place writes, symlinks, hard links, FIFOs, collisions, permissions, stdin/stdout) the web app's security gates, round trips and signal handling, the sensor-fingerprint scrub (an *oracle* detector that knows the camera's exact fingerprint must fail to match after the scrub and succeed before it, on every colour mode, 16-bit data, animations and the failure cases), and **fuzzing**: 680 randomly corrupted files must each produce either a verified-clean output or a clean error, never a crash, a memory blow-up or an unverified write.
+* The Content Credentials code has 285 tests of its own (skipped when the optional support is not installed). Highlights: every key type (ES256/384/512, RSA-PSS, Ed25519) signs and is verified with a **second, independent implementation** of the signature and the hard-binding hash; a **hostile-SDK harness** crafts credentials with one deliberate flaw each (an extra assertion, a hidden field, a thumbnail, the source's name as the ingredient title, a signature by another chain, different pixels, an EXIF segment slipped in, a double signature) and every one is refused, with a control proving the harness itself is sound; the canary fixtures prove no byte of the original reaches a credential; a local web server proves a hostile file's remote-manifest link is *not* followed (and that the library's defaults would follow it); thousands of randomly corrupted credentials must each give a verdict or a clean error, never a crash; the web app's key, passphrase and signing switch are shown never to reach a response, the disk or the browser's storage, and a real browser drives the toggle, the identity form and a signing run end to end. Eleven deliberate breakages of the key safeguards were each caught by these tests.
 * Trial run on the public [exif-samples](https://github.com/ianare/exif-samples) corpus: 104 real files from dozens of cameras and phones, including iPhone HEICs and deliberately broken files. 104 cleaned, 0 failures. Afterwards `exiftool` reported zero non-structural tags across all outputs, and all 16 orientation test images came out identical.
 
 ```console
