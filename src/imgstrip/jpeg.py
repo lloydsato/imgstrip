@@ -12,8 +12,12 @@ from __future__ import annotations
 
 import struct
 
-# Segments required to decode the image.
-_KEEP = {m for m in range(0xC0, 0xD0) if m != 0xC8} | {0xDB, 0xDC, 0xDD, 0xDE, 0xDF}
+# Segments required to decode the image.  DNL (0xDC) is skipped by decoders and DHP/EXP (0xDE/0xDF) are
+# unsupported, so they can only carry hidden data.  DAC (0xCC) is used only by arithmetic-coded frames and is
+# rewritten from its parsed entries instead of being copied.
+_DAC = 0xCC
+_ARITHMETIC_SOF = {0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+_KEEP = {m for m in range(0xC0, 0xD0) if m not in (0xC8, _DAC)} | {0xDB, 0xDD}
 _JFIF = b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
 
 
@@ -43,6 +47,8 @@ def rebuild(data: bytes, orientation: int = 1, icc: bytes | None = None) -> tupl
     had_jfif = False
     adobe_transform = None
     sequential = False
+    arithmetic = False
+    dac: dict[int, int] = {}  # conditioning table (class/id byte) -> value, last definition wins
     while True:
         if pos >= n:
             raise JpegError("missing end-of-image marker")
@@ -82,10 +88,20 @@ def rebuild(data: bytes, orientation: int = 1, icc: bytes | None = None) -> tupl
             end = _scan_end(data, pos)
             body += data[pos:end]
             pos = end
+        elif marker == _DAC:
+            if len(payload) % 2:
+                raise JpegError("malformed arithmetic conditioning table")
+            for i in range(0, len(payload), 2):
+                dac[payload[i]] = payload[i + 1]
         elif marker in _KEEP:
             if marker in (0xC0, 0xC1):
                 sequential = True
+            if marker in _ARITHMETIC_SOF:
+                arithmetic = True
             body += _segment(marker, payload)
+    if arithmetic and dac:
+        # Conditioning tables only matter to arithmetic decoders; write one canonical segment before the frame.
+        body[0:0] = _segment(_DAC, b"".join(bytes((k, v)) for k, v in sorted(dac.items())))
     dropped = _count_images(data, pos)
     out = bytearray(b"\xff\xd8")
     if had_jfif or adobe_transform is None:

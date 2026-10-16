@@ -172,6 +172,8 @@ class _Curve:
                 (g,) = struct.unpack_from(">H", raw, 12)
                 self.kind, self.params = "gamma", (g / 256.0,)
             else:
+                if n > 16384:
+                    raise ProfileError("implausible tone curve length")
                 table = np.frombuffer(raw, ">u2", count=n, offset=12).astype(np.float64) / 65535.0
                 self.kind, self.params = "table", (table,)
         elif kind == b"para":
@@ -210,6 +212,37 @@ class _Curve:
             return np.where(x >= d, np.power(base, g) + e, c * x + f)
 
 
+_TABLE_LEVELS = 4095  # 12-bit quantisation of 'curv' table entries
+
+
+def _canonical_xyz(body: bytes) -> bytes:
+    """A fresh 'XYZ ' tag holding only the three s15Fixed16 numbers (reserved bytes zeroed, nothing trailing)."""
+    if len(body) < 20:
+        raise ProfileError("short XYZ tag")
+    return b"XYZ \x00\x00\x00\x00" + body[8:20]
+
+
+def _canonical_curve(curve: "_Curve") -> bytes:
+    """A fresh tone-curve tag written from the parsed curve, so nothing else in the source tag survives.
+
+    Table entries are rounded to 12 bits.  The low bits of a 16-bit entry are invisible to the 1/255
+    colour-equivalence check but could carry data; 12 bits is the coarsest step that still reproduces ordinary
+    sRGB and gamma tables.  Colour precision inside that tolerance is the one thing a profile legitimately holds.
+    """
+    raw = curve.raw
+    if curve.kind == "identity":
+        return b"curv\x00\x00\x00\x00" + struct.pack(">I", 0)
+    if curve.kind == "gamma":
+        return b"curv\x00\x00\x00\x00" + struct.pack(">IH", 1, struct.unpack_from(">H", raw, 12)[0])
+    if curve.kind == "table":
+        entries = np.frombuffer(raw, ">u2", count=len(curve.params[0]), offset=12).astype(np.float64)
+        levels = np.rint(entries * _TABLE_LEVELS / 65535.0)
+        quantised = np.rint(levels * 65535.0 / _TABLE_LEVELS).astype(">u2")
+        return b"curv\x00\x00\x00\x00" + struct.pack(">I", len(quantised)) + quantised.tobytes()
+    nparams = len(curve.params)
+    return b"para\x00\x00\x00\x00" + raw[8:10] + b"\x00\x00" + raw[12 : 12 + 4 * nparams]
+
+
 class MatrixShaper:
     """Colorimetric model of an RGB matrix/TRC or gray TRC ICC profile."""
 
@@ -236,7 +269,8 @@ class MatrixShaper:
             except KeyError as exc:
                 raise ProfileError(f"missing tag {exc}") from None
             self.matrix = np.array(cols, dtype=np.float64).T  # columns are the primaries
-            self.raw_tags = {sig: tags[sig] for sig in (b"rXYZ", b"gXYZ", b"bXYZ", b"rTRC", b"gTRC", b"bTRC")}
+            self.raw_tags = {sig: _canonical_xyz(tags[sig]) for sig in (b"rXYZ", b"gXYZ", b"bXYZ")}
+            self.raw_tags |= {sig: _canonical_curve(c) for sig, c in zip((b"rTRC", b"gTRC", b"bTRC"), self.curves)}
             if abs(np.linalg.det(self.matrix)) < 1e-9:
                 raise ProfileError("singular colour matrix")
         elif space == "GRAY":
@@ -244,11 +278,11 @@ class MatrixShaper:
                 raise ProfileError("missing gray tone curve")
             self.curves = [_Curve(tags[b"kTRC"])]
             self.matrix = None
-            self.raw_tags = {b"kTRC": tags[b"kTRC"]}
+            self.raw_tags = {b"kTRC": _canonical_curve(self.curves[0])}
         else:
             raise ProfileError(f"{space} profiles are not matrix/TRC profiles")
-        for sig, body in self.raw_tags.items():
-            if body[:4] not in (b"XYZ ", b"curv", b"para"):
+        for sig in (b"rXYZ", b"gXYZ", b"bXYZ") if space == "RGB" else ():
+            if tags[sig][:4] != b"XYZ ":
                 raise ProfileError(f"unexpected type for tag {sig!r}")
 
     # -- conversion ---------------------------------------------------------
@@ -314,9 +348,10 @@ def build_sanitized(icc: bytes) -> bytes:
     """Rebuild a profile from its colorimetric tags only.
 
     The result has a fixed header (no creator, device, date or profile ID), a
-    generic description and only the matrix/curve tags, copied verbatim after
-    validation.  Raises ProfileError if the profile cannot be represented this
-    way or if the rebuilt profile is not colorimetrically identical.
+    generic description and only the matrix/curve tags, re-serialised from their
+    parsed values (no source bytes are copied).  Raises ProfileError if the
+    profile cannot be represented this way or if the rebuilt profile is not
+    colorimetrically identical.
     """
     model = MatrixShaper(icc)
     tags: list[tuple[bytes, bytes]] = [
