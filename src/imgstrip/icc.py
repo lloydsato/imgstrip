@@ -18,7 +18,6 @@ matrix/TRC colour engine implemented with numpy.
 from __future__ import annotations
 
 import functools
-import hashlib
 import io
 import struct
 
@@ -91,7 +90,8 @@ def _probe_rgb() -> Image.Image:
 
 
 @functools.lru_cache(maxsize=64)
-def _srgb_equivalent_cached(digest: str, icc: bytes) -> bool:
+def is_srgb_equivalent(icc: bytes) -> bool:
+    """True when converting through this profile to sRGB changes no pixel by more than 1/255."""
     space = colorspace(icc)
     src = load(icc)
     probe = _probe_rgb()
@@ -104,11 +104,6 @@ def _srgb_equivalent_cached(digest: str, icc: bytes) -> bool:
         out = np.asarray(_transform(ramp, src, "RGB"), np.int16)
         return int(np.abs(out - np.arange(256)[None, :, None]).max()) <= 1
     return False
-
-
-def is_srgb_equivalent(icc: bytes) -> bool:
-    """True when converting through this profile to sRGB changes no pixel by more than 1/255."""
-    return _srgb_equivalent_cached(hashlib.sha256(icc).hexdigest(), icc)
 
 
 def convert_image_8bit(img: Image.Image, icc: bytes) -> Image.Image:
@@ -219,6 +214,12 @@ class MatrixShaper:
     """Colorimetric model of an RGB matrix/TRC or gray TRC ICC profile."""
 
     def __init__(self, icc: bytes):
+        try:
+            self._parse(icc)
+        except (struct.error, ValueError, IndexError) as exc:  # a tag shorter than its own header says
+            raise ProfileError(f"malformed profile ({exc})") from None
+
+    def _parse(self, icc: bytes) -> None:
         space = colorspace(icc)
         if icc[20:24] != b"XYZ ":
             raise ProfileError("profile connection space is not XYZ")

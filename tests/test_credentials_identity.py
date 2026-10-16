@@ -89,6 +89,10 @@ def test_pkcs12_bundles(creds, plain_signer, pki):
     keyless = pkcs12.serialize_key_and_certificates(b"id", None, plain_signer.leaf, [], serialization.NoEncryption())
     with pytest.raises(creds.CredentialError, match="private key"):
         creds.load_identity(keyless)
+    # A file that is not a bundle at all must not send the user looking for a passphrase.
+    with pytest.raises(creds.CredentialError, match="could not be read") as err:
+        creds.load_identity(b"this is not a certificate")
+    assert not isinstance(err.value, creds.PassphraseRequired)
 
 
 def test_chain_is_ordered_and_the_root_is_left_out(creds, pki):

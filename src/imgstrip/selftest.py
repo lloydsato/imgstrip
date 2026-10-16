@@ -153,6 +153,7 @@ def _credential_self_test(fx: dict, verbose: bool) -> tuple[int, list[str]]:
             continue
         runs += 1
         label = f"{name}: credentials"
+        before = len(problems)
         try:
             evidence = credentials.gather_evidence(data, result, options)
             signed = credentials.sign(result.data, evidence, test.identity).data
@@ -171,7 +172,7 @@ def _credential_self_test(fx: dict, verbose: bool) -> tuple[int, list[str]]:
         if credentials.read_credential(bytes(broken)).state != "Invalid":
             problems.append(f"{label}: a changed picture byte was not detected")
         if verbose:
-            print(f"  {'ok ' if not problems else 'BAD'} {name:28} signed, verified, tamper detected")
+            print(f"  {'ok ' if len(problems) == before else 'BAD'} {name:28} signed, verified, tamper detected")
     return runs, problems
 
 

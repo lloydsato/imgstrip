@@ -86,8 +86,7 @@ def rebuild(data: bytes, orientation: int = 1, icc: bytes | None = None) -> tupl
             if marker in (0xC0, 0xC1):
                 sequential = True
             body += _segment(marker, payload)
-    trailing = data[pos:]
-    dropped = trailing.count(b"\xff\xd8\xff")
+    dropped = _count_images(data, pos)
     out = bytearray(b"\xff\xd8")
     if had_jfif or adobe_transform is None:
         out += _JFIF
@@ -105,6 +104,45 @@ def rebuild(data: bytes, orientation: int = 1, icc: bytes | None = None) -> tupl
     out += body
     out += b"\xff\xd9"
     return bytes(out), dropped
+
+
+def _count_images(data: bytes, pos: int) -> int:
+    """How many JPEG images follow ``pos`` (MPF secondary images, appended previews).
+
+    Each image is walked to its end-of-image marker, so a thumbnail inside its EXIF block is not counted again.
+    """
+    count = 0
+    start = data.find(b"\xff\xd8\xff", pos)
+    while start >= 0:
+        count += 1
+        end = _image_end(data, start)
+        start = data.find(b"\xff\xd8\xff", end if end is not None else start + 3)
+    return count
+
+
+def _image_end(data: bytes, start: int) -> int | None:
+    """Offset just past the end-of-image marker of the JPEG at ``start``, or None if it is not well formed."""
+    n = len(data)
+    pos = start + 2
+    try:
+        while pos + 1 < n and data[pos] == 0xFF:
+            while pos < n and data[pos] == 0xFF:
+                pos += 1
+            marker = data[pos]
+            pos += 1
+            if marker == 0xD9:
+                return pos
+            if 0xD0 <= marker <= 0xD7 or marker == 0x01:
+                continue
+            (length,) = struct.unpack_from(">H", data, pos)
+            if length < 2:
+                return None
+            pos += length
+            if marker == 0xDA:
+                pos = _scan_end(data, pos)
+    except (struct.error, IndexError, JpegError):
+        pass
+    return None
 
 
 def _scan_end(data: bytes, pos: int) -> int:

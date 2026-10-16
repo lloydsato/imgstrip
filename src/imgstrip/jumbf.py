@@ -115,8 +115,10 @@ def _cbor(b: bytes, i: int, depth: int, max_depth: int, budget: list[int]):
         out: dict = {}
         for _ in range(arg):
             k, i = _cbor(b, i, depth + 1, max_depth, budget)
-            if isinstance(k, (list, dict)):
-                raise JumbfError("unsupported CBOR map key")
+            try:
+                hash(k)  # a tagged array is not a usable key either
+            except TypeError:
+                raise JumbfError("unsupported CBOR map key") from None
             if k in out:
                 raise JumbfError("duplicate CBOR map key")
             v, i = _cbor(b, i, depth + 1, max_depth, budget)

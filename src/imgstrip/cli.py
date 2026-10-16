@@ -352,6 +352,19 @@ def output_extension(source: str, fmt: str) -> str:
     return EXTENSIONS[fmt][0]
 
 
+def names_output_file(args, single: bool) -> bool:
+    """True when ``-o`` names the one output file (rather than a directory to write into)."""
+    if not args.output or args.output == STDIO or not single or args.random_name:
+        return False
+    return not Path(args.output).is_dir() and not args.output.endswith(os.sep)
+
+
+def format_from_name(path: str) -> str | None:
+    """The output format a file name's extension asks for, if it names one."""
+    ext = Path(path).suffix.lower()
+    return next((fmt for fmt, exts in EXTENSIONS.items() if ext in exts), None)
+
+
 def plan_destination(task: Task, fmt: str, args, single: bool, input_format: str | None = None) -> str:
     if args.output == STDIO or (task.source == STDIO and not args.output):
         return STDIO
@@ -365,7 +378,7 @@ def plan_destination(task: Task, fmt: str, args, single: bool, input_format: str
     stem = Path(task.source).stem if task.source != STDIO else "stdin"
     if args.output:
         out = Path(args.output)
-        if single and not out.is_dir() and not args.output.endswith(os.sep) and not args.random_name:
+        if names_output_file(args, single):
             return str(out)
         if args.random_name:
             return str(out / (secrets.token_hex(8) + ext))
@@ -1107,6 +1120,15 @@ def main(argv: list[str] | None = None) -> int:
         and not Path(args.output).is_dir()
     ):
         parser.error("--output must be a directory when processing several files")
+
+    if names_output_file(args, single) and not args.check and not args.c2pa_verify:
+        # "-o clean.png" must produce a PNG, not JPEG bytes under a .png name.
+        named = format_from_name(args.output)
+        wanted = {"jpg": "JPEG", "tif": "TIFF", "heic": "HEIF"}.get(args.format, (args.format or "").upper())
+        if named and wanted and named != wanted:
+            parser.error(f"--output {args.output} names a {named} file, but --format asks for {wanted}")
+        if named and not wanted:
+            args.format = named.lower()
 
     options = options_from_args(args)
     reporter = Reporter(args)

@@ -49,6 +49,21 @@ def test_output_file_and_directory(tmp_path, jpg, fx):
     assert sorted(p.name for p in outdir.iterdir()) == ["b.png", "photo.jpg"]
 
 
+def test_output_file_name_picks_the_format(tmp_path, jpg):
+    out = tmp_path / "x.png"
+    assert main([str(jpg), "-o", str(out)]) == 0
+    assert inspect_bytes(out.read_bytes()).format == "PNG"
+    assert main([str(jpg), "-o", str(tmp_path / "y.JPG")]) == 0
+    assert inspect_bytes((tmp_path / "y.JPG").read_bytes()).format == "JPEG"
+    assert main([str(jpg), "-o", str(tmp_path / "z.tif"), "--format", "tif"]) == 0
+    assert inspect_bytes((tmp_path / "z.tif").read_bytes()).format == "TIFF"
+    with pytest.raises(SystemExit):
+        main([str(jpg), "-o", str(tmp_path / "w.png"), "--format", "webp"])
+    assert not (tmp_path / "w.png").exists()
+    assert main([str(jpg), "-o", str(tmp_path / "noext")]) == 0  # no extension: the input's format
+    assert inspect_bytes((tmp_path / "noext").read_bytes()).format == "JPEG"
+
+
 def test_output_must_be_directory_for_many(tmp_path, jpg, fx):
     png = tmp_path / "b.png"
     png.write_bytes(fx["png_everything.png"])

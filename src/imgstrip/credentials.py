@@ -440,20 +440,22 @@ def load_pem_identity(cert_pem: bytes, key_pem: bytes | None = None, passphrase:
 
 def load_pkcs12_identity(data: bytes, passphrase: bytes | None = None) -> Identity:
     """An identity from a PKCS#12 (.p12 / .pfx) bundle."""
-    c = _crypto()
+    _crypto()
     from cryptography.hazmat.primitives.serialization import pkcs12
 
     try:
         key, cert, extra = pkcs12.load_key_and_certificates(data, passphrase or None)
     except ValueError as exc:
-        if passphrase is None and ("password" in str(exc).lower() or "mac" in str(exc).lower()):
+        text = str(exc).lower()
+        if passphrase is None and ("password" in text or "mac" in text):
             raise PassphraseRequired("This certificate bundle is protected. A passphrase is needed.") from None
-        raise PassphraseRequired("The passphrase is wrong, or the bundle is damaged.") from None
+        if passphrase is not None:
+            raise PassphraseRequired("The passphrase is wrong, or the bundle is damaged.") from None
+        raise CredentialError("The certificate bundle could not be read (is it a .p12 / .pfx file?).") from None
     except Exception:  # noqa: BLE001
         raise CredentialError("The certificate bundle could not be read (is it a .p12 / .pfx file?).") from None
     if key is None or cert is None:
         raise CredentialError("The bundle must contain a private key and its certificate.")
-    del c
     return Identity([cert, *(extra or [])], key, source="pkcs12")
 
 
@@ -1215,7 +1217,7 @@ def check_cose_signature(manifest: jumbf.Manifest, expect_chain: list | None = N
         raise CredentialError("The signature's unprotected header holds unexpected fields.")
     chain = unprotected.get(33, header.get(33))
     chain = [chain] if isinstance(chain, bytes) else chain
-    if not chain or not all(isinstance(x, bytes) for x in chain):
+    if not isinstance(chain, list) or not chain or not all(isinstance(x, bytes) for x in chain):
         raise CredentialError("The signature carries no certificate chain.")
     try:
         certs = [c.x509.load_der_x509_certificate(x) for x in chain]
@@ -1682,7 +1684,7 @@ def audit(
     try:
         salt = base64.b64decode(receipt["salt"], validate=True)
         result.commitment_ok = hmac.compare_digest(_commitment(salt, pixels), commit["value"])
-    except (KeyError, ValueError):
+    except (KeyError, TypeError, ValueError):
         result.problems.append("the receipt is malformed")
         return result
     if not result.commitment_ok:
