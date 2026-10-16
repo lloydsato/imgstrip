@@ -103,6 +103,10 @@ imgstrip-web
 
 Drop photos onto the window and each one shows what it gives away. Click **Clean**, then download the results one by one, as a ZIP, or save them straight to a folder.
 
+<div align="center">
+  <img src="docs/screenshots/web-app.png" alt="The imgstrip web app after four photos were dropped on it. One row is open and lists what that photo reveals: GPS location, camera model, time taken, body serial number, lens and editing software. A button at the bottom reads Clean 4 images." width="560">
+</div>
+
 - Runs **only on your computer** (`127.0.0.1`) and works offline.
 - Your originals are **never written to disk**, and nothing is uploaded anywhere.
 - On a shared computer, start it with `imgstrip-web --no-browser` and open the printed link yourself.
