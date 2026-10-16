@@ -7,6 +7,10 @@
 Photos quietly carry your location, your camera, the time you took them, and sometimes more.
 `imgstrip` removes all of it, then checks its own work before it saves anything.
 
+[![PyPI](https://img.shields.io/pypi/v/imgstrip)](https://pypi.org/project/imgstrip/)
+[![Python](https://img.shields.io/pypi/pyversions/imgstrip)](https://pypi.org/project/imgstrip/)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](https://github.com/lloydsato/imgstrip/blob/main/LICENSE)
+
 [Quick start](#-quick-start) · [How it works](#-how-it-works) · [Everyday use](#-everyday-use) · [Web app](#-web-app) · [Good to know](#-good-to-know)
 
 </div>
@@ -42,10 +46,10 @@ Your original file is never touched. The clean copy is saved next to it.
 You need **Python 3.10 or newer**.
 
 ```console
-git clone https://github.com/lloydsato/imgstrip.git
-cd imgstrip
-pip install .
+pip install imgstrip
 ```
+
+Prefer to keep it out of your main Python setup? `pipx install imgstrip` works too.
 
 Then try it:
 
@@ -55,6 +59,17 @@ imgstrip-web                # or use the point-and-click web app
 ```
 
 Want to be sure the install works? Run `imgstrip --self-test`. It builds 21 booby-trapped test images, cleans them in every mode, and has independent image readers confirm the results.
+
+<details>
+<summary>Install from source instead</summary>
+
+```console
+git clone https://github.com/lloydsato/imgstrip.git
+cd imgstrip
+pip install .
+```
+
+</details>
 
 ## 🔍 How it works
 
@@ -70,6 +85,8 @@ flowchart LR
 ```
 
 If either check fails, **nothing is written**. Failing safe is the whole point.
+
+(If you're reading this on PyPI and the diagram shows as plain text, the [GitHub page](https://github.com/lloydsato/imgstrip#-how-it-works) renders it.)
 
 ## 🛠 Everyday use
 
@@ -94,6 +111,7 @@ Run `imgstrip --help` to see every option.
 | `--scrub-lsb` | Randomizes the least-significant bit of every pixel value, which destroys hidden LSB messages. The change is invisible (at most 1/255). |
 | `--scrub-prnu` | Disrupts your camera's sensor fingerprint, a pattern in the pixels themselves that can link a photo to a specific camera. Moves parts of the picture by a few pixels. |
 | `--icc sanitize` | Keeps the exact colors using a rebuilt, anonymous color profile. |
+| `--c2pa` | Signs each clean image with a Content Credential, so you can show it was sanitized without being altered. Needs the optional extra: `pip install 'imgstrip[c2pa]'`. |
 
 ## 🖥 Web app
 
@@ -104,8 +122,10 @@ imgstrip-web
 Drop photos onto the window and each one shows what it gives away. Click **Clean**, then download the results one by one, as a ZIP, or save them straight to a folder.
 
 <div align="center">
-  <img src="docs/screenshots/web-app.png" alt="The imgstrip web app after four photos were dropped on it. One row is open and lists what that photo reveals: GPS location, camera model, time taken, body serial number, lens and editing software. A button at the bottom reads Clean 4 images." width="560">
+  <img src="https://raw.githubusercontent.com/lloydsato/imgstrip/main/docs/screenshots/web-app.png" alt="The imgstrip web app after four photos were dropped on it. One row is open and lists what that photo reveals: GPS location, camera model, time taken, body serial number, lens and editing software. A button at the bottom reads Clean 4 images." width="560">
 </div>
+
+Open **Options** for the same switches as the command line: *Deep scan*, *Keep JPEG data bit-exact*, *Scrub least-significant bits*, *Disrupt camera fingerprint*, *Sign with Content Credentials*, plus the output format, quality and colour profile.
 
 - Runs **only on your computer** (`127.0.0.1`) and works offline.
 - Your originals are **never written to disk**, and nothing is uploaded anywhere.
@@ -138,7 +158,7 @@ No tool can do everything, and it's better to know the limits up front.
 
 The full technical reference covers every option, the exact list of what gets removed, how the sensor-fingerprint scrub was measured, optional **Content Credentials (C2PA)** signing for journalists, and how the project is tested:
 
-➡️ **[docs/REFERENCE.md](docs/REFERENCE.md)**
+➡️ **[Technical reference](https://github.com/lloydsato/imgstrip/blob/main/docs/REFERENCE.md)**
 
 ## 🧪 Development
 
@@ -146,3 +166,9 @@ The full technical reference covers every option, the exact list of what gets re
 pip install -e '.[test]'
 pytest
 ```
+
+## 📄 License
+
+imgstrip is free software, released under the [GNU Affero General Public License v3.0 or later](https://github.com/lloydsato/imgstrip/blob/main/LICENSE). If you modify it and offer it to others over a network, the AGPL requires you to share your changes under the same license.
+
+Questions, bug reports and odd files that break it are welcome in the [issue tracker](https://github.com/lloydsato/imgstrip/issues).
