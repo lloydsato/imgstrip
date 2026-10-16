@@ -7,8 +7,6 @@
 Photos quietly carry your location, your camera, the time you took them, and sometimes more.
 `imgstrip` removes all of it, then checks its own work before it saves anything.
 
-[![PyPI](https://img.shields.io/pypi/v/imgstrip)](https://pypi.org/project/imgstrip/)
-[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](https://github.com/lloydsato/imgstrip/blob/main/LICENSE)
 
 [Quick start](#-quick-start) · [How it works](#-how-it-works) · [Everyday use](#-everyday-use) · [Web app](#-web-app) · [Good to know](#-good-to-know)
 
