@@ -335,7 +335,8 @@ def _icc_finding(profile: bytes, report: Report) -> None:
 # JPEG
 # --------------------------------------------------------------------------
 
-_JPEG_STRUCTURAL = {m for m in range(0xC0, 0xD0) if m != 0xC8} | {0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF}
+# DNL/DHP/EXP (0xDC/0xDE/0xDF) are ignored or rejected by decoders and are reported as unknown markers.
+_JPEG_STRUCTURAL = {m for m in range(0xC0, 0xD0) if m != 0xC8} | {0xDA, 0xDB, 0xDD}
 
 
 def _inspect_jpeg(d: bytes, r: Report) -> None:

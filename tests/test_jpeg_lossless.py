@@ -73,3 +73,49 @@ def test_an_appended_image_with_its_own_thumbnail_counts_once():
     assert dropped == 1
     _data, dropped = jpeg.rebuild(fixtures.jpeg_everything() + secondary + secondary)
     assert dropped == 2
+
+
+def _jpeg_with_segment(marker: int, payload: bytes) -> bytes:
+    buf = io.BytesIO()
+    Image.fromarray(fixtures.photo(64, 48)).save(buf, "JPEG", quality=85)
+    data = buf.getvalue()
+    sos = data.index(b"\xff\xda")
+    segment = bytes((0xFF, marker)) + (len(payload) + 2).to_bytes(2, "big") + payload
+    return data[:sos] + segment + data[sos:]
+
+
+@pytest.mark.parametrize("marker", [0xDC, 0xDE, 0xDF])
+def test_lossless_drops_segments_no_decoder_uses(marker):
+    # DNL/DHP/EXP are ignored or rejected by decoders, so they can only carry hidden data.
+    dirty = _jpeg_with_segment(marker, b"CANARY-HIDDEN-" + b"A" * 200)
+    assert b"CANARY-HIDDEN" in dirty
+    rebuilt, _ = jpeg.rebuild(dirty)
+    assert b"CANARY-HIDDEN" not in rebuilt
+    assert marker not in {m for m in _markers(rebuilt)}
+
+
+def test_lossless_drops_dac_from_huffman_frame():
+    dirty = _jpeg_with_segment(0xCC, b"\x00\x11\x11\x02CANARY!!")
+    rebuilt, _ = jpeg.rebuild(dirty)
+    assert 0xCC not in _markers(rebuilt) and b"CANARY" not in rebuilt
+
+
+def test_lossless_dac_malformed_payload_is_refused():
+    with pytest.raises(jpeg.JpegError):
+        jpeg.rebuild(_jpeg_with_segment(0xCC, b"\x00\x11\x22"))
+
+
+def test_inspector_reports_dnl_segment():
+    report = inspect_bytes(_jpeg_with_segment(0xDC, b"CANARY-HIDDEN"))
+    assert any("0xFFDC" in f.label for f in report.findings)
+
+
+def _markers(data: bytes) -> list[int]:
+    out, pos = [], 2
+    while pos + 4 <= len(data) and data[pos] == 0xFF:
+        marker = data[pos + 1]
+        out.append(marker)
+        if marker == 0xDA:
+            break
+        pos += 2 + int.from_bytes(data[pos + 2 : pos + 4], "big")
+    return out
