@@ -14,6 +14,7 @@ import contextlib
 import io
 import os
 import struct
+import threading
 import warnings
 import zlib
 from dataclasses import dataclass, field
@@ -213,28 +214,68 @@ def _input_formats() -> list[str]:
     return [f for f in INPUT_FORMATS if f in Image.OPEN]
 
 
+# Pillow's decompression-bomb limit and the warning filters are process-wide, while the web app runs several jobs
+# at once.  The first guard in saves the real values, the last one out restores them, and while any guard is
+# active the strictest requested limit applies.  Each thread collects its own warnings.
+_guard_lock = threading.Lock()
+_guard_limits: list[int] = []
+_guard_saved: dict = {}
+_guard_local = threading.local()
+
+
+def _record_warning(message, category, filename, lineno, file=None, line=None):  # noqa: ARG001 - warnings hook
+    sinks = getattr(_guard_local, "sinks", None)
+    if sinks:
+        sinks[-1].append(warnings.WarningMessage(message, category, filename, lineno))
+
+
+def _guard_enter(limit: int) -> None:
+    with _guard_lock:
+        if not _guard_limits:
+            _guard_saved["pixels"] = Image.MAX_IMAGE_PIXELS
+            cm = warnings.catch_warnings()
+            cm.__enter__()
+            _guard_saved["warnings"] = cm
+            warnings.simplefilter("always")
+            warnings.showwarning = _record_warning
+        _guard_limits.append(limit)
+        Image.MAX_IMAGE_PIXELS = min(_guard_limits)
+
+
+def _guard_exit(limit: int) -> None:
+    with _guard_lock:
+        _guard_limits.remove(limit)
+        if _guard_limits:
+            Image.MAX_IMAGE_PIXELS = min(_guard_limits)
+        else:
+            Image.MAX_IMAGE_PIXELS = _guard_saved.pop("pixels")
+            _guard_saved.pop("warnings").__exit__(None, None, None)
+
+
 @contextlib.contextmanager
 def _pillow_guard(collected: list[str], max_pixels: int = 300_000_000):
     """Tie Pillow's decompression-bomb limit to ``max_pixels`` and capture warnings.
 
     Pillow raises DecompressionBombError above 2 x MAX_IMAGE_PIXELS, and it
     checks again whenever a frame enlarges the canvas (a corrupt GIF frame
-    descriptor can otherwise demand gigabytes).
+    can otherwise demand gigabytes).  Safe to use from several threads at once.
     """
-    old = Image.MAX_IMAGE_PIXELS
-    Image.MAX_IMAGE_PIXELS = max(1, max_pixels // 2)
+    limit = max(1, max_pixels // 2)
+    caught: list = []
+    sinks = _guard_local.__dict__.setdefault("sinks", [])
+    _guard_enter(limit)
+    sinks.append(caught)
     try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            yield
-        for w in caught:
-            if issubclass(w.category, Image.DecompressionBombWarning):
-                continue
-            msg = str(w.message)
-            if msg not in collected:
-                collected.append(msg)
+        yield
     finally:
-        Image.MAX_IMAGE_PIXELS = old
+        sinks.pop()
+        _guard_exit(limit)
+    for w in caught:
+        if issubclass(w.category, Image.DecompressionBombWarning):
+            continue
+        msg = str(w.message)
+        if msg not in collected:
+            collected.append(msg)
 
 
 def open_image(data: bytes) -> Image.Image:
