@@ -67,6 +67,7 @@ class Frame:
     mcus_y: int
     progressive: bool = False
     scans: int = 0
+    tq: list[int] = field(default_factory=list, repr=False)  # quantisation table id each component names
 
 
 # --------------------------------------------------------------------------
@@ -169,9 +170,7 @@ def _parse_sof(marker: int, payload: bytes, max_pixels: int) -> Frame:
         comps.append(
             Component(ident, h, v, np.zeros(64, np.uint16), -(-cw // 8), -(-ch // 8), coef)
         )
-    frame = Frame(width, height, comps, mcus_x, mcus_y, progressive=marker == 0xC2)
-    frame._tq = [r[3] for r in raw]  # type: ignore[attr-defined]
-    return frame
+    return Frame(width, height, comps, mcus_x, mcus_y, progressive=marker == 0xC2, tq=[r[3] for r in raw])
 
 
 def _scan_items(frame: Frame, slots: list[int]) -> tuple[list[int], list[int], int]:
@@ -436,7 +435,7 @@ def _decode_scan(frame: Frame, payload: bytes, entropy: bytes, ri: int, dct: dic
     for idx in slots:  # latch the quantisation table the way decoders do: when the component is first coded
         comp = frame.comps[idx]
         if not comp.qt.any():
-            tq = frame._tq[idx]  # type: ignore[attr-defined]
+            tq = frame.tq[idx]
             if tq not in qts:
                 raise JpegError("missing quantisation table")
             comp.qt = qts[tq].copy()
