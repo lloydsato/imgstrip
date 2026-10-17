@@ -158,3 +158,46 @@ def test_tiff_writer_multipage_mixed_modes():
 
 def _seeked(data, frame):
     return Image.open(io.BytesIO(data))
+
+
+def _multipage_tiff(arrays, mode):
+    import io
+    import warnings
+
+    from PIL import Image
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        frames = [Image.fromarray(a, mode) if mode else Image.fromarray(a) for a in arrays]
+    buf = io.BytesIO()
+    frames[0].save(buf, "TIFF", save_all=True, append_images=frames[1:])
+    return buf.getvalue()
+
+
+def test_multipage_16bit_tiff_is_refused_not_clipped():
+    import numpy as np
+    import pytest
+
+    from imgstrip import Options, StripError, strip_image
+
+    gradient = np.tile(np.linspace(0, 65535, 64).astype(np.uint16), (32, 1))
+    data = _multipage_tiff([gradient, gradient[::-1].copy()], "I;16")
+    with pytest.raises(StripError, match="more than 8 bits"):
+        strip_image(data, Options())
+
+
+def test_multipage_8bit_and_single_16bit_tiff_unchanged():
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    from imgstrip import Options, strip_image
+
+    ramp = np.tile(np.arange(64, dtype=np.uint8), (32, 1))
+    result = strip_image(_multipage_tiff([ramp, ramp[::-1].copy()], None), Options())
+    assert result.frames == 2 and result.pixels_exact
+    gradient = np.tile(np.linspace(0, 65535, 64).astype(np.uint16), (32, 1))
+    single = strip_image(_multipage_tiff([gradient], "I;16"), Options())
+    assert single.pixels_exact
+    assert np.array_equal(np.asarray(Image.open(io.BytesIO(single.data))), gradient)

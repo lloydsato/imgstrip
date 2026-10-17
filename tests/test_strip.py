@@ -251,6 +251,18 @@ def test_avif_clean_aperture_crop_removes_hidden_pixels():
     assert not ((out[..., 0] > 200) & (out[..., 1] < 60)).any()
 
 
+def test_damaged_avif_with_a_crop_is_refused_not_published_uncropped():
+    from isobmff_tools import add_clap
+
+    buf = io.BytesIO()
+    Image.fromarray(fixtures.photo(64, 64)).save(buf, "AVIF")
+    clapped = add_clap(buf.getvalue(), 48, 48, (16, 2), (0, 1))
+    assert strip_image(clapped).size == (48, 48)  # intact: cropped
+    with pytest.raises(StripError, match="clean-aperture crop"):
+        strip_image(clapped + b"\x00")
+    assert strip_image(buf.getvalue() + b"\x00").size == (64, 64)  # damaged but no crop: unchanged
+
+
 def test_scrub_lsb_changes_at_most_one_level_and_destroys_payload(fx):
     from imgstrip.analysis import lsb_payload_estimate
 

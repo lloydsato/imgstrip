@@ -734,6 +734,13 @@ class _Job:
                 if im.size[0] * im.size[1] > self.opts.max_pixels or budget < 0:
                     raise StripError("image or animation exceeds the --max-pixels limit")
                 if animated:
+                    if im.mode in ("I", "F") or im.mode.startswith("I;16") or codecs.high_bit_depth_kind(im):
+                        # Converting to 8-bit RGBA would clip every page, and the verifier would compare against
+                        # the clipped copy, so refuse rather than write a quietly damaged picture.
+                        raise StripError(
+                            f"this file has several frames with more than 8 bits per sample ({im.mode}), which "
+                            "cannot be kept exactly; split the frames into separate files first"
+                        )
                     rgba = im.convert("RGBA")
                     frames.append(Frame(image=fresh(rgba), duration=im.info.get("duration")))
                 else:
@@ -802,6 +809,13 @@ class _Job:
         publishing them would expose hidden image content.
         """
         clap = self.before.info.get("clap")
+        if self.before.format == "AVIF" and not clap and self.before.error and b"\x00\x00\x00\x28clap" in self.data:
+            # The inspector stops at the first structural error, before it reads the item properties, so it never
+            # saw the crop; the decoder ignores it, and the cropped-out pixels would be published.
+            raise StripError(
+                "this AVIF has a clean-aperture crop but its structure is damaged "
+                f"({self.before.error}), so the crop cannot be applied safely"
+            )
         if not clap or self.before.format != "AVIF":
             return  # libheif (HEIC) applies the crop itself; Pillow's AVIF decoder does not
         order = self.before.info.get("transforms", [])
