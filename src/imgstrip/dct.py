@@ -43,6 +43,12 @@ _ZIG = np.array(ZIGZAG, dtype=np.intp)
 _SOF = {0xC0, 0xC1, 0xC2}  # Huffman baseline, extended sequential, progressive
 _UNSUPPORTED_SOF = {0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
 _RST_SPLIT = re.compile(rb"\xff+[\xd0-\xd7]")
+# The canonical writer holds whole-image token arrays.  Measured peaks (tracemalloc, numpy) fit about 32 bytes per
+# pixel plus 120 per non-zero coefficient: ~56 MB/MP for a smooth photo, ~340 MB/MP for pure noise.  Anything
+# above this budget is refused rather than left to exhaust the machine.
+DCT_MEMORY_BUDGET = 3 << 30
+_WRITE_BYTES_PER_PIXEL = 32
+_WRITE_BYTES_PER_COEFFICIENT = 120
 _MAX_DC_DIFF = 2048  # an 8-bit image cannot produce a DC difference or an AC coefficient beyond these
 _MAX_AC = 1024
 
@@ -730,6 +736,13 @@ def write(frame: Frame) -> bytes:
     if sum(c.h * c.v for c in comps) > 10:
         raise JpegError("too many blocks in an MCU for an interleaved scan")
     canonicalise_padding(frame)
+    nonzero = sum(int(np.count_nonzero(c.coef)) for c in comps)
+    need = _WRITE_BYTES_PER_PIXEL * frame.width * frame.height + _WRITE_BYTES_PER_COEFFICIENT * nonzero
+    if need > DCT_MEMORY_BUDGET:
+        raise JpegError(
+            f"too large for the canonical writer ({frame.width}x{frame.height} pixels, {nonzero / 1e6:.1f} million "
+            f"non-zero coefficients would need about {need / (1 << 30):.1f} GiB of memory)"
+        )
     per_mcu = sum(c.h * c.v for c in comps)
     sets = [0 if i == 0 else 1 for i in range(len(comps))]
     dc_hist = [np.zeros(256, dtype=np.int64) for _ in range(2)]

@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from imgstrip import fixtures
-from imgstrip.core import heif_available
+from imgstrip.core import Options, heif_available
 from imgstrip.inspect import Finding, inspect_bytes
 from imgstrip.web import server as web
 
@@ -717,3 +717,72 @@ def test_nohup_is_respected(tmp_path):
         if proc.poll() is None:
             proc.kill()
     assert list(tmp_path.glob("imgstrip-web-*")) == []
+
+
+# --------------------------------------------------------------------------
+# Resource limits
+# --------------------------------------------------------------------------
+
+
+def test_web_pixel_limit_is_lower_than_the_cli_default_and_reported_in_page_terms(app, monkeypatch):
+    assert web.WEB_MAX_PIXELS < Options().max_pixels
+    assert web.parse_options({}).max_pixels == web.WEB_MAX_PIXELS
+    monkeypatch.setattr(web, "WEB_MAX_PIXELS", 1000)
+    res, body = app.upload("/api/clean", fixtures.png_everything(), "big.png", {})
+    assert res.status == 422
+    message = json.loads(body)["error"]
+    assert "limit" in message and "--max-pixels" not in message
+
+
+def _connect(app):
+    import socket
+
+    return socket.create_connection(("127.0.0.1", app.port), timeout=10)
+
+
+def _closed(sock) -> bool:
+    """True when the server hangs up (after saying whatever it wants to) rather than waiting for more."""
+    try:
+        while sock.recv(4096):
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def test_idle_connection_is_dropped(app, monkeypatch):
+    monkeypatch.setattr(web.Handler, "timeout", 1)
+    sock = _connect(app)
+    sock.sendall(b"POST /api/clean HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\npartial")
+    assert _closed(sock), "a connection that stops sending is closed after the timeout"
+    sock.close()
+
+
+def test_connections_beyond_the_cap_are_closed_at_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(web.Server, "max_connections", 2)
+    session = web.Session(str(tmp_path / "work"))
+    httpd, session = web.make_server(0, session)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    held = []
+    try:
+        client = Client(httpd.server_address[1], session)
+        for _ in range(2):
+            sock = _connect(client)
+            sock.sendall(b"GET /api/session HTTP/1.1\r\nHost: x\r\nX-Do-Not: finish")  # never finishes the request
+            held.append(sock)
+        import time
+
+        time.sleep(0.3)
+        extra = _connect(client)
+        assert _closed(extra)
+        extra.close()
+        held.pop().close()  # freeing a slot lets a real request through again
+        time.sleep(0.5)
+        res, _ = client.request("GET", "/api/session")
+        assert res.status in (200, 401, 403, 404)
+    finally:
+        for sock in held:
+            sock.close()
+        httpd.shutdown()
+        httpd.server_close()
+        session.close()

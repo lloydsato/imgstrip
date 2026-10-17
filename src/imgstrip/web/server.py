@@ -59,6 +59,9 @@ MAX_JSON = 1 << 20
 MAX_NAME = 180
 DEEP_SCAN_MAX_PIXELS = 40_000_000  # the pixel scan needs about 100 bytes per pixel
 PREVIEW_MAX_PIXELS = 100_000_000
+WEB_MAX_PIXELS = 100_000_000  # the CLI default is 300 MP; a browser upload is buffered whole, so the web app is stricter
+MAX_CONNECTIONS = 32  # simultaneous connections; extra ones are closed at once
+SOCKET_TIMEOUT = 30  # seconds a connection may sit idle in the middle of a read
 DEFAULT_SUFFIX = ".clean"
 STATIC_FILES = {
     "app.css": "text/css; charset=utf-8",
@@ -483,6 +486,7 @@ def parse_options(raw: dict) -> Options:
         scrub_dct="full" if flag("scrub_dct", False) else "canonical" if flag("jpeg_canonical", False) else "off",
         scrub_prnu=flag("scrub_prnu", False),
         optimize=flag("optimize", False),
+        max_pixels=WEB_MAX_PIXELS,
     )
 
 
@@ -735,7 +739,7 @@ def clean_payload(
     except MemoryError:
         raise ApiError(422, "Out of memory while cleaning this image.")
     except StripError as exc:
-        message = str(exc)
+        message = str(exc).replace(" (raise it with --max-pixels)", "").replace("--max-pixels", "size")
         raise ApiError(422, message[:1].upper() + message[1:])
     final, cred_payload, extra_warnings = result.data, None, []
     if config is not None:
@@ -874,6 +878,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "imgstrip"
     sys_version = ""
     protocol_version = "HTTP/1.1"
+    timeout = SOCKET_TIMEOUT
     session: Session  # set on the subclass made by make_server
     port: int
 
@@ -1133,6 +1138,24 @@ class Handler(BaseHTTPRequestHandler):
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    max_connections = MAX_CONNECTIONS
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(self.max_connections)
+
+    def process_request(self, request, client_address):
+        # One idle socket per thread would otherwise let a local process starve the server of threads.
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 def make_server(port: int = DEFAULT_PORT, session: Session | None = None) -> tuple[Server, Session]:
