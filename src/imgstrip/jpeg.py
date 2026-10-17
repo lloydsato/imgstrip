@@ -37,8 +37,14 @@ def _segment(marker: int, payload: bytes) -> bytes:
     return bytes((0xFF, marker)) + struct.pack(">H", len(payload) + 2) + payload
 
 
-def rebuild(data: bytes, orientation: int = 1, icc: bytes | None = None) -> tuple[bytes, int]:
-    """Return (clean JPEG, number of embedded images dropped after the main image)."""
+def rebuild(
+    data: bytes, orientation: int = 1, icc: bytes | None = None, canonical: bytes | None = None
+) -> tuple[bytes, int]:
+    """Return (clean JPEG, number of embedded images dropped after the main image).
+
+    ``canonical`` replaces the copied tables, frame header and scans with segments built elsewhere (the
+    canonical form from ``dct.write``); everything around them is still written here.
+    """
     if not data.startswith(b"\xff\xd8"):
         raise JpegError("not a JPEG file")
     n = len(data)
@@ -99,7 +105,9 @@ def rebuild(data: bytes, orientation: int = 1, icc: bytes | None = None) -> tupl
             if marker in _ARITHMETIC_SOF:
                 arithmetic = True
             body += _segment(marker, payload)
-    if arithmetic and dac:
+    if canonical is not None:
+        body = bytearray(canonical)
+    elif arithmetic and dac:
         # Conditioning tables only matter to arithmetic decoders; write one canonical segment before the frame.
         body[0:0] = _segment(_DAC, b"".join(bytes((k, v)) for k, v in sorted(dac.items())))
     dropped = _count_images(data, pos)

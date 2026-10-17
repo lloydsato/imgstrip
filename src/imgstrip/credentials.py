@@ -81,6 +81,7 @@ OPERATIONS = (
     "re-encoded",
     "sensor-fingerprint-disrupted",
     "lsb-scrubbed",
+    "dct-scrubbed",
 )
 DATE_PRECISIONS = ("day", "minute")
 DETAILS = ("minimal", "full")
@@ -867,7 +868,7 @@ def _operations(result: Result, options: Options, source_frames: int) -> list[st
     ops = set()
     if result.input_format != result.output_format:
         ops.add("format-converted")
-    if not result.verified_exact:
+    if not result.verified_exact and result.dct_scrub != stego.DCT_SCRUBBED:
         ops.add("re-encoded")
     if any(a.startswith("applied EXIF orientation") for a in result.actions):
         ops.add("orientation-applied")
@@ -877,6 +878,8 @@ def _operations(result: Result, options: Options, source_frames: int) -> list[st
         ops.add("sensor-fingerprint-disrupted")
     if result.lsb_scrub in (stego.SCRUB_APPLIED, stego.SCRUB_PARTIAL):  # what was done, not what was asked
         ops.add("lsb-scrubbed")
+    if result.dct_scrub == stego.DCT_SCRUBBED:
+        ops.add("dct-scrubbed")
     if result.frames != source_frames:
         ops.add("frames-dropped")
     return sorted(ops)
@@ -893,7 +896,7 @@ def gather_evidence(source: bytes, result: Result, options: Options) -> Evidence
         x.shape == y.shape and x.dtype == y.dtype and np.array_equal(x, y) for x, y in zip(want, got, strict=True)
     )
     ops = _operations(result, options, len(want))
-    deliberate = "sensor-fingerprint-disrupted" in ops or "lsb-scrubbed" in ops
+    deliberate = any(op in ops for op in ("sensor-fingerprint-disrupted", "lsb-scrubbed", "dct-scrubbed"))
     if identical:
         integrity, psnr = "identical", None
     else:

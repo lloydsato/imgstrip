@@ -23,7 +23,7 @@ import tempfile
 import time
 
 from . import fixtures, oracles
-from .core import OUTPUT_FORMATS, Options, StripError, heif_available, strip_image
+from .core import OUTPUT_FORMATS, Options, StripError, dct_mode, heif_available, strip_image
 from .inspect import inspect_bytes
 
 # exiftool groups that only describe file structure.
@@ -92,9 +92,10 @@ def _check(
     if fixtures.CANARY in out:
         problems.append(f"{label}: canary string survived")
     report = inspect_bytes(out)
-    allowed_icc = options.icc == "sanitize" or options.jpeg_lossless
+    rebuilt_jpeg = options.jpeg_lossless or dct_mode(options) != "off"
+    allowed_icc = options.icc == "sanitize" or rebuilt_jpeg
     leftovers = [f for f in report.findings if not (allowed_icc and f.label == "ICC color profile")]
-    if options.jpeg_lossless:
+    if rebuilt_jpeg:
         leftovers = [f for f in leftovers if f.label != "EXIF"]
     clap = report.info.get("clap")
     if result.output_format == "HEIF" and clap and (round(clap[0] / clap[1]), round(clap[2] / clap[3])) == result.size:
@@ -113,7 +114,7 @@ def _check(
     }[result.output_format]
     tool = exiftool_findings(out, ext, allow_icc=allowed_icc)
     if tool:
-        tool = [t for t in tool if not (options.jpeg_lossless and "Orientation" in t)]
+        tool = [t for t in tool if not (rebuilt_jpeg and "Orientation" in t)]
         if tool:
             problems.append(f"{label}: exiftool reports {tool}")
     second = oracles.differential(out, result.output_format, result.verified_exact, allow_icc=options.icc == "sanitize")
@@ -199,6 +200,8 @@ def run_self_test(verbose: bool = False) -> int:
         ]
         if name.endswith(".jpg") and "mpo" not in name:
             variants.append(("jpeg-lossless", Options(jpeg_lossless=True)))
+            variants.append(("jpeg-canonical", Options(scrub_dct="canonical")))
+            variants.append(("scrub-dct", Options(scrub_dct="full", dct_min_psnr=0)))
         for fmt in formats:
             variants.append((f"to {fmt.lower()}", Options(format=fmt)))
         for label, opts in variants:

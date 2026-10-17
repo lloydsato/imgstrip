@@ -89,6 +89,9 @@ Originals are never modified unless you pass `--in-place`. Existing outputs are 
 | `--format FMT` | Output format: `jpeg png webp gif tiff bmp avif heif`. Default: same as input. |
 | `-q N` | Quality for lossy output (JPEG/WebP default 95, AVIF/HEIF 90). |
 | `--jpeg-lossless` | Strip JPEGs without re-encoding (see below). |
+| `--jpeg-canonical` | JPEG only. Rebuild the compressed data from its DCT coefficients in one canonical form: no pixel changes, and data hidden in table layouts, padding, markers and the like is gone. The coefficients are kept, so DCT steganography survives. See [JPEG DCT steganography](#jpeg-dct-steganography---scrub-dct). |
+| `--scrub-dct` | JPEG only. Everything `--jpeg-canonical` does, plus destroy steganography hidden in the DCT coefficients (JSteg, F5, steghide, J-UNIWARD, ...). It changes pixels slightly and says by how much. Off unless given. |
+| `--dct-min-psnr DB` | With `--scrub-dct`: refuse a picture the scrub would change by more than this (default 25; `0` never refuses). |
 | `--icc convert\|sanitize\|drop` | Colour profiles: convert pixels to sRGB (default), embed a rebuilt anonymous profile, or discard. |
 | `--no-auto-orient` | Don't rotate pixels according to EXIF orientation. |
 | `--scrub-lsb` | Randomise the least-significant bit of every sample to destroy LSB steganography. The report says "scrubbed" only if that happened: not with `--jpeg-lossless`, and "partly" if some frames could not be. |
@@ -119,7 +122,7 @@ Exit status: `0` success (or `--check`: everything clean), `1` at least one file
 * **Colours**: images with a non-sRGB profile (Display P3, Adobe RGB, ProPhoto, CMYK, gray, or PNG gamma/chromaticity chunks) are converted to sRGB with LittleCMS. Profiles that are numerically equivalent to sRGB are dropped without touching pixels. `--icc sanitize` instead keeps the colour space by embedding a profile rebuilt from scratch (colorimetric data only, fixed header, no text, no dates). imgstrip verifies it is colorimetrically identical to the original.
 * **Lossless formats** (PNG, GIF, TIFF, BMP, lossless WebP) keep their pixels bit-for-bit (unless you ask for `--scrub-lsb` or `--scrub-prnu`, which change pixels on purpose). PNGs may get a smaller, equivalent colour type (for example RGB with ≤ 256 colours becomes a palette image).
 * **16-bit images** (PNG, TIFF, PPM/PGM) keep full 16-bit precision, even though Pillow itself truncates 16-bit colour to 8 bits. imgstrip recovers the low bytes with a second decoding pass, and has its own 16-bit PNG/TIFF encoders and colour engine. Output was verified bit-identical against ImageMagick.
-* **JPEG** is re-encoded at quality 95 with the original chroma subsampling. Re-encoding also destroys JPEG-domain steganography and the quantisation-table "fingerprint" of the camera. To avoid any generation loss, use `--jpeg-lossless`: the compressed image data is copied bit-for-bit and everything around it is rebuilt from scratch. That mode cannot rotate pixels, so a non-default orientation is kept as a minimal one-tag EXIF block, and DCT-domain content is preserved as-is.
+* **JPEG** is re-encoded at quality 95 with the original chroma subsampling. Re-encoding also destroys JPEG-domain steganography and the quantisation-table "fingerprint" of the camera. To avoid any generation loss, use `--jpeg-lossless`: the compressed image data is copied bit-for-bit and everything around it is rebuilt from scratch. That mode cannot rotate pixels, so a non-default orientation is kept as a minimal one-tag EXIF block, and DCT-domain content is preserved as-is (`--jpeg-canonical` and `--scrub-dct` are the opt-in ways to normalise it). The claim that re-encoding destroys JPEG-domain steganography is only partly true: it destroys payloads read from coefficient parity, but a payload that changes zeros (J-UNIWARD and similar) mostly survives a re-encode at quality 95 (see the measurements below).
 * **Animations** (GIF, APNG, WebP, AVIF) keep all frames, frame timing and loop count. GIFs are written by a custom encoder that keeps every frame's colours exact.
 * **Multi-page TIFFs** keep their pages (thumbnail/mask pages are dropped).
 * Output files are new files, so the original file's timestamps, extended attributes (for example macOS "where from" download URLs) and ownership don't carry over. In-place mode keeps only the permission bits.
@@ -144,6 +147,55 @@ A scan can find a payload but can never show there is none, and a scrub covers o
 | **not scanned** | Nothing was tested: `--deep` was not given, or the format has no sample values the tests can read (lossy formats, palette images, 16-bit, too few pixels). The reason is stated. | Anything about the pixels. |
 
 An animation is tested frame by frame (up to 100 megapixels in all; the report says how many frames were covered). A payload hidden only in a later frame is found. With `--deep` while cleaning, a flagged payload that nothing scrubbed is reported as kept, with a warning; the web app marks the file "Payload kept" and withholds the seal.
+
+## JPEG DCT steganography (`--scrub-dct`)
+
+JPEG steganography tools (JSteg, JPHide, OutGuess, steghide, F3/F4/F5, nsF5, MME, J-UNIWARD, UERD, ...) do not touch pixels. They change the quantised DCT coefficients inside the file. `--scrub-lsb` cannot see that, `--jpeg-lossless` copies it untouched, and a re-encode only destroys part of it. Two opt-in levels deal with it; both are **off by default** and neither changes anything for people who do not ask. [`docs/DCT_WORKFLOW.md`](DCT_WORKFLOW.md) has the full workflow as diagrams.
+
+Both are built on imgstrip's own JPEG coefficient codec (`imgstrip.dct`, pure Python and numpy, no new dependency): it reads baseline, extended and progressive Huffman JPEGs of any sampling, and writes one canonical baseline form. A JPEG it cannot represent exactly (arithmetic coding, 12-bit, lossless, hierarchical) is **refused**, never copied with its coefficients intact.
+
+| Level | What it does | Pixels | Closes |
+|---|---|---|---|
+| `--jpeg-canonical` | Re-serialises the coefficients canonically: optimal Huffman tables, one baseline scan, no restart markers, padding of ones, blocks outside the picture given plain content, tables used by a component written once, canonical component ids. | **Identical** (verified against the original with the decoder, and the coefficients are compared exactly) | Every place a payload can hide that is not a coefficient: Huffman table layout and symbol order, unused tables, redundant tokens (an alias of the end-of-block symbol, zero runs spelled out), padding bits, restart markers, progressive scan scripts, data in blocks nobody sees, 16-bit tables that fit in 8, component ids. The output is a pure function of the coefficients, the quantisation tables and the geometry. |
+| `--scrub-dct` | The above, after changing the coefficients so that no payload read from their low bit survives. Every coefficient (DC and AC, every component) is grouped into the pairs `{2k, 2k+1}` that a two's-complement LSB flip moves between; the pairs `{-2,-1}` and `{0,1}` become 0 (this also closes the *support* channel of embedders that change zeros), and every other pair is re-drawn with a fresh random low bit, so the output's parity (read either way, two's complement or sign-magnitude) is uniformly random and independent of the input's. | Changed, and reported (below) | Everything above, plus payloads read from coefficient parity or support: sequential LSB replacement (JSteg), keyed random order (steghide-style), keyed stride (OutGuess-style), matrix/syndrome coding with decrement-only changes (F5-style), and Hamming/syndrome-coded ±1 changes over every coefficient, zeros included (J-UNIWARD-style). |
+
+### What it costs
+
+A payload in the coefficients *is* image content, and the embedder's own change is one quantisation step on the coefficients it uses, so destroying it without knowing where it sits means moving the coefficients by about one step too. That is the unavoidable price of the guarantee: it cannot be made free, only made as small as the guarantee allows. Measured against the input, on a photograph at 768 x 576:
+
+| Source quality | `--scrub-dct` PSNR | `--scrub-dct` file size | `--jpeg-canonical` file size |
+|---|---|---|---|
+| 50 | 33 dB | about 30 % | 84 % |
+| 75 | 35 dB | about 30 % | 90 % |
+| 90 | 37 to 38 dB | about 46 % | 96 % |
+| 95 | 36 to 39 dB | about 50 % | 97 % |
+
+So the scrub is about the picture quality of re-saving the file at a much lower quality, and visibly softens fine texture on close inspection; the report prints the estimated PSNR, and `--dct-min-psnr` makes the run refuse (and write nothing) instead of wrecking a picture. `--jpeg-canonical` costs nothing in pixels and usually makes the file *smaller*.
+
+### What was measured (reference embedders in `tests/dct_embedders.py`)
+
+Bit error rate of each tool's own extractor on 1000 to 3000 embedded bits (0.0 = payload intact, 0.5 = noise), over qualities 50 to 95 and two subsamplings:
+
+| Tool (re-implemented) | `--jpeg-lossless` | default re-encode (q95) | `--jpeg-canonical` | `--scrub-dct` |
+|---|---|---|---|---|
+| JSteg | 0.00 | about 0.49 | 0.00 | 0.50 |
+| steghide-style | 0.00 | about 0.50 | 0.00 | 0.50 |
+| OutGuess-style | 0.00 | about 0.49 | 0.00 | 0.50 |
+| F5 (matrix embedding, shrinkage) | 0.00 | about 0.48 | 0.00 | 0.50 |
+| J-UNIWARD-like (syndrome, changes zeros) | 0.00 | **0.05 at q95**, 0.25 at q75 | 0.00 | 0.50 |
+
+Two things follow. `--jpeg-canonical` alone does not touch a payload in the coefficients, by design. And the default re-encode, which was assumed to protect against DCT steganography, leaves most of a zero-changing payload readable at high quality (an error-correcting code would recover it).
+
+### What is and is not covered
+
+* **Covered, exactly:** LSB replacement of any coefficient subset in any order. A supervised attacker who is given the tool, the key and the position of every bit, and who learns `P(bit | value)` on other images, scores 0.50 on the scrubbed file (and 1.00 on the unscrubbed one, so the test is not blind).
+* **Covered in practice:** ±1 changes (LSB matching, F5's decrement, J-UNIWARD-style syndrome coding). The extractor that the tools actually ship reads noise. Such embedders leave a small statistical trace in the pair of the scrubbed value, which only helps an attacker who already knows which coefficients carried bits; the scrub changes the set of non-zero coefficients those tools index into, so that knowledge is gone. A test pins the worst case.
+* **Not covered:** watermarks built to survive re-saving (SynthID and similar), payloads carried by the picture itself, ternary or mod-3 embedders, and an attacker designing a payload around this specific scrub with strong error correction (any cleaning that keeps the picture recognisable leaves that channel open).
+* The verdict never says "nothing is hidden": the report says what was done and carries the caveat above.
+
+### Verification
+
+Before anything is written the output is re-read with the codec and the coefficients are compared with what was intended; for `--jpeg-canonical` the decoded pixels must equal the original's bit for bit; for `--scrub-dct` the written coefficients must satisfy the scrub's contract (values -2..1 are 0, every other value stays in its pair), the picture must decode, and the measured quality loss must not be wildly worse than predicted. Any failure aborts with nothing written. The codec is also checked against libjpeg: for optimised baseline files with no hidden blocks its output is byte-identical to libjpeg's, and its pixels agree with Pillow/libjpeg on every file tried; ImageMagick and FFmpeg read the rebuilt files in the self-test.
 
 ## Camera sensor fingerprint (PRNU)
 
@@ -206,9 +258,9 @@ The second sentence is **measured, not assumed**. imgstrip decodes the file you 
 
 | Says | When |
 |---|---|
-| **identical** | The decoded pixels are bit-for-bit those of the original: lossless formats (PNG, lossless WebP, GIF), and JPEGs cleaned with `--jpeg-lossless`. Hidden colour under transparent pixels and unused palette entries do not count as pixels. |
+| **identical** | The decoded pixels are bit-for-bit those of the original: lossless formats (PNG, lossless WebP, GIF), and JPEGs cleaned with `--jpeg-lossless` or `--jpeg-canonical`. Hidden colour under transparent pixels and unused palette entries do not count as pixels. |
 | **equivalent** | Same picture, but re-encoded (JPEG/WebP/AVIF/HEIF at a quality below lossless), rotated by the orientation tag, colour-converted or converted to another format. The measured PSNR is shown to you, and recorded if you choose *full* detail. |
-| **altered** | You asked for `--scrub-prnu` or `--scrub-lsb`, which change pixels on purpose. The credential says so rather than claim otherwise. |
+| **altered** | You asked for `--scrub-prnu`, `--scrub-lsb` or `--scrub-dct`, which change pixels on purpose. The credential says so rather than claim otherwise (the last one is recorded as the operation `dct-scrubbed`). |
 
 To be able to say "identical" for a JPEG, use `--jpeg-lossless` (web: *Keep JPEG data bit-exact*). The default re-encodes JPEGs, which also destroys DCT-domain steganography and the camera's quantisation-table fingerprint, so imgstrip does not switch it on for you.
 
@@ -282,13 +334,13 @@ Not supported, with a clear error: camera RAW files (DNG, CR2/CR3, NEF, ARW, …
 ## Limits: what no metadata tool can do
 
 * **A clean scan is not proof.** "Not detected" means the LSB tests found nothing, and "scrubbed" means LSB-replacement payloads were destroyed. Neither says that no hidden message exists. See [the four verdicts](#hidden-data-in-the-pixels-detected-scrubbed-not-detected).
-* **What "accounted for" means.** <a id="what-accounted-for-means"></a>The check on every output walks the whole structure of the file, requires every region that should be empty to be empty (row padding, reserved fields, palette entries no pixel uses, colour under transparent pixels, bytes after the end), and decodes it again. It cannot vouch individually for the bytes inside compressed data (deflate, LZW, JPEG entropy data, WebP and AV1/HEVC bitstreams), for JPEG quantisation and Huffman table entries no coefficient uses, for AVIF/HEIF header fields (flags, brands, handler names, codec configuration), or for how a TIFF value is represented. imgstrip's encoders write those from pixels, so nothing from the original reaches them, except in `--jpeg-lossless` mode, which keeps the original's compressed data and tables as they are. The test suite measures the rest: see [How it is tested](#how-it-is-tested).
+* **What "accounted for" means.** <a id="what-accounted-for-means"></a>The check on every output walks the whole structure of the file, requires every region that should be empty to be empty (row padding, reserved fields, palette entries no pixel uses, colour under transparent pixels, bytes after the end), and decodes it again. It cannot vouch individually for the bytes inside compressed data (deflate, LZW, JPEG entropy data, WebP and AV1/HEVC bitstreams), for JPEG quantisation and Huffman table entries no coefficient uses, for AVIF/HEIF header fields (flags, brands, handler names, codec configuration), or for how a TIFF value is represented. imgstrip's encoders write those from pixels, so nothing from the original reaches them, except in `--jpeg-lossless` mode, which keeps the original's compressed data and tables as they are (`--jpeg-canonical` and `--scrub-dct` rewrite them from the coefficients). The test suite measures the rest: see [How it is tested](#how-it-is-tested).
 * **Visible content stays.** Faces, reflections, street signs and landmarks reveal more than any tag. imgstrip does not alter what the picture shows.
 * **Robust watermarks** designed to survive re-encoding (Digimarc, SynthID, C2PA "soft binding" watermarks and similar) live in the image content itself and can survive. imgstrip removes C2PA *manifests* (the original's Content Credentials), not content-level watermarks. If you opt in to signing, the only credential in the output is the new one it writes.
 * **The camera's sensor fingerprint (PRNU) stays** unless you turn on `--scrub-prnu`, and even then its absence cannot be proven. See [Camera sensor fingerprint](#camera-sensor-fingerprint-prnu) for what the scrub does, what it costs and how it was measured.
 * **File names** often contain timestamps (`IMG_20240517_133700.jpg`). Use `--random-name`.
 * **In-place mode does not securely erase** the old data. The original bytes may remain on disk, in SSD wear-levelling areas, snapshots, backups or cloud sync history. Other hard links to the file keep pointing at the original data (imgstrip warns about this).
-* Lossy formats (JPEG, lossy WebP, AVIF, HEIF) are re-encoded, which costs a little quality. Use `--jpeg-lossless` for JPEGs if that matters more than the quantisation-table fingerprint and DCT-steganography protection.
+* Lossy formats (JPEG, lossy WebP, AVIF, HEIF) are re-encoded, which costs a little quality. Use `--jpeg-lossless` for JPEGs if that matters more than the quantisation-table fingerprint and DCT-steganography protection, or `--jpeg-canonical` if you also want the file rebuilt in one canonical form. `--scrub-dct` is the opposite trade: it protects against DCT steganography at a measurable cost in quality.
 
 ## How it is tested
 

@@ -19,7 +19,7 @@
   };
   const OPTION_DEFAULTS = {
     format: '', quality: '', icc: 'convert',
-    deep: false, jpeg_lossless: false, scrub_lsb: false, scrub_prnu: false, auto_orient: true, optimize: false,
+    deep: false, jpeg_lossless: false, scrub_lsb: false, scrub_dct: false, jpeg_canonical: false, scrub_prnu: false, auto_orient: true, optimize: false,
     c2pa: false, c2pa_date: 'day', c2pa_detail: 'minimal', c2pa_commit: false,
   };
   // Never carried from one launch to the next: signing needs an identity loaded in this very run,
@@ -167,6 +167,8 @@
       icc: o.icc,
       jpeg_lossless: !!o.jpeg_lossless,
       scrub_lsb: !!o.scrub_lsb,
+      scrub_dct: !!o.scrub_dct,
+      jpeg_canonical: !!o.jpeg_canonical,
       scrub_prnu: !!o.scrub_prnu,
       auto_orient: !!o.auto_orient,
       optimize: !!o.optimize,
@@ -646,6 +648,7 @@
             h('strong', { text: 'Verified clean' }),
             h('span', { text: 'Structure verified · ' + (res.lossy ? 'pixels within tolerance' : 'pixels exact') }),
             h('span', { text: `Hidden data in pixels: ${(stegoOf(item) || { headline: 'not scanned' }).headline}` }),
+            res.dct ? h('span', { text: `JPEG coefficients: ${res.dct.headline}${res.dct.psnr_db ? ` · about ${res.dct.psnr_db} dB from the original` : ''}` }) : null,
             h('code', { text: `SHA-256 ${res.sha256.slice(0, 16)}…` })),
         ];
       }
@@ -733,6 +736,16 @@
       v.state === 'not_scanned' ? null : note(v.caveat))];
   }
 
+  // What cleaning did about data hidden in a JPEG's DCT coefficients (only present when asked for), in the server's
+  // words and always with its caveat: it says what was done, never that nothing is hidden.
+  function dctBlock(d) {
+    if (!d) return [];
+    const cost = d.psnr_db ? ` About ${d.psnr_db} dB from the original picture.` : '';
+    return [h('section', { class: 'group' },
+      note(`Hidden data in the JPEG coefficients: ${d.headline}. ${capital(d.summary)}.${cost}`),
+      note(d.caveat))];
+  }
+
   function note(text, kind = '') {
     const glyph = kind === 'warn' || kind === 'error' ? 'alert' : kind === 'ok' ? 'check' : 'info';
     return h('p', { class: `note${kind ? ` is-${kind}` : ''}` }, icon(glyph), h('span', { text }));
@@ -813,6 +826,7 @@
       const frames = res.frames > 1 ? ` · ${res.frames} frames` : '';
       out.push(h('p', { class: 'meta-line', text: `${formatName(res.input_format)} ${bytes(res.bytes_in)} → ${formatName(res.output_format)} ${bytes(res.bytes_out)} · ${res.size[0]}×${res.size[1]}${frames} · saved as ${res.filename}` }));
       out.push(...stegoBlock(stegoOf(item)));
+      out.push(...dctBlock(res.dct));
       if (res.key !== optionsKey()) out.push(note('Cleaned with earlier options. Clean again to apply the current ones.', 'warn'));
       if (refused(item)) out.push(note(`Cleaning again with the current options failed: ${item.error} This is the earlier clean file.`, 'error'));
       if (res.prnu) {
@@ -1250,8 +1264,8 @@
   function renderCredHints() {
     const o = state.options;
     const hints = [];
-    if (!o.jpeg_lossless) hints.push('JPEG files are re-encoded, so their credential will say the picture is "equivalent", not "identical". Turn on Keep JPEG data bit-exact to be able to say "identical".');
-    if (o.scrub_lsb || o.scrub_prnu) hints.push('Pixel scrubbing is on, so the credential will say the pixels were deliberately altered to protect the source.');
+    if (!o.jpeg_lossless && !o.jpeg_canonical && !o.scrub_dct) hints.push('JPEG files are re-encoded, so their credential will say the picture is "equivalent", not "identical". Turn on Keep JPEG data bit-exact to be able to say "identical".');
+    if (o.scrub_lsb || o.scrub_prnu || o.scrub_dct) hints.push('Scrubbing is on, so the credential will say the pixels were deliberately altered to protect the source.');
     if (o.c2pa_commit) hints.push('The receipt holds the secret that proves which original a signed image came from. Anyone who gets it and the original can prove that link: keep it offline and as private as the original.');
     els.credHints.replaceChildren(...hints.map((t) => note(t)));
   }
