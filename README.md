@@ -106,6 +106,8 @@ Run `imgstrip --help` to see every option.
 |---|---|
 | `--deep` | Also scans the pixels for signs of hidden data (LSB steganography). |
 | `--scrub-lsb` | Randomizes the least-significant bit of every pixel value, which destroys hidden LSB messages. The change is invisible (at most 1/255). |
+| `--jpeg-canonical` | JPEG only. Rebuilds the compressed data in one canonical form so nothing can hide in table layouts, padding or markers. The picture stays pixel-identical. |
+| `--scrub-dct` | JPEG only. Also destroys steganography hidden in the JPEG's DCT data (JSteg, F5, steghide, J-UNIWARD...). This costs picture quality, so the report says how much. Off unless you ask. |
 | `--scrub-prnu` | Disrupts your camera's sensor fingerprint, a pattern in the pixels themselves that can link a photo to a specific camera. Moves parts of the picture by a few pixels. |
 | `--icc sanitize` | Keeps the exact colors using a rebuilt, anonymous color profile. |
 | `--c2pa` | Signs each clean image with a Content Credential, so you can show it was sanitized without being altered. Needs the optional extra: `pip install 'imgstrip[c2pa]'`. |
@@ -147,7 +149,7 @@ No tool can do everything, and it's better to know the limits up front.
 - **File names can leak dates** (`IMG_20240517_133700.jpg`). Use `--random-name`.
 - **A clean scan isn't proof.** "Not detected" means the tests found nothing, not that nothing is hidden.
 - **Invisible watermarks** built to survive re-saving (such as SynthID) live in the picture itself and may survive.
-- **JPEGs are re-encoded** (quality 95) by default. Use `--jpeg-lossless` to avoid any quality loss. That mode keeps the image data exactly as it was, so it doesn't clear steganography hidden in the image data itself.
+- **JPEGs are re-encoded** (quality 95) by default. Use `--jpeg-lossless` to avoid any quality loss. That mode keeps the image data exactly as it was, so it doesn't clear steganography hidden in the image data itself. Re-encoding doesn't reliably clear it either: hiding tools that change zero coefficients mostly survive. `--scrub-dct` is built for that and destroys payloads read from the DCT coefficients, at a cost of roughly 33 to 39 dB of picture quality against the original. It never claims that nothing is hidden. See [how it works](https://github.com/lloydsato/imgstrip/blob/main/docs/DCT_WORKFLOW.md).
 - **`-i` is not a secure erase.** Old copies can linger in backups, cloud sync history and SSD wear-leveling.
 - **Very grainy JPEGs may be refused** by the default mode because the re-encoded copy would drift too far from the original, and imgstrip would rather refuse than save something it couldn't verify. Use `--jpeg-lossless` for those.
 

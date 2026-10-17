@@ -93,6 +93,16 @@
               <span class="switch-text"><span>Scrub least-significant bits</span><span class="hint">Destroys LSB steganography. Changes pixels by at most 1. Other ways of hiding data are not covered.</span></span>
             </label>
             <label class="switch">
+              <input type="checkbox" role="switch" name="scrub_dct">
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-text"><span>Scrub JPEG coefficients</span><span class="hint">JPEG only. Destroys steganography hidden in the DCT data (JSteg, F5, steghide, J-UNIWARD). Costs picture quality, so the result shows how much. Off by default.</span></span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" role="switch" name="jpeg_canonical">
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-text"><span>Rebuild JPEG data canonically</span><span class="hint">JPEG only. Removes data hidden in table layouts, padding and markers. The picture stays pixel-identical, but hidden coefficient data is kept.</span></span>
+            </label>
+            <label class="switch">
               <input type="checkbox" role="switch" name="scrub_prnu">
               <span class="switch-track" aria-hidden="true"></span>
               <span class="switch-text"><span>Disrupt camera fingerprint</span><span class="hint">Scrambles the sensor noise that can link a photo to one camera. Shifts parts of the picture by a few pixels.</span></span>

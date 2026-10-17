@@ -143,6 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  imgstrip -i *.png                  replace files in place (atomically)\n"
             "  imgstrip --check --deep img.png    report metadata and run steganalysis\n"
             "  imgstrip --scrub-lsb img.png       also destroy LSB steganography\n"
+            "  imgstrip --scrub-dct photo.jpg     also destroy JPEG DCT steganography (JSteg, F5, ...)\n"
             "  cat a.heic | imgstrip - --format jpeg > a.jpg\n"
             "\nexit status: 0 success/clean, 1 errors, 2 usage, 3 --check found data"
         ),
@@ -193,6 +194,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--scrub-lsb",
         action="store_true",
         help="randomise least-significant bits to destroy LSB steganography (changes pixels by at most 1)",
+    )
+    proc.add_argument(
+        "--scrub-dct",
+        action="store_true",
+        help="JPEG only: destroy steganography hidden in the DCT coefficients (JSteg, F5, steghide, J-UNIWARD, ...) "
+        "by randomising coefficient parities and removing the smallest coefficients, with no pixel re-encode. Costs picture "
+        "quality (the report gives the PSNR); off unless given",
+    )
+    proc.add_argument(
+        "--jpeg-canonical",
+        action="store_true",
+        help="JPEG only: rebuild the compressed data from its DCT coefficients in one canonical form (removes "
+        "data hidden in table layouts, padding, markers). Pixels are unchanged; coefficients are kept, so DCT "
+        "steganography survives (use --scrub-dct for that)",
+    )
+    proc.add_argument(
+        "--dct-min-psnr",
+        type=float,
+        default=25.0,
+        metavar="DB",
+        help="with --scrub-dct, refuse a picture the scrub would change by more than this (default: 25; 0 = never)",
     )
     proc.add_argument(
         "--scrub-prnu",
@@ -295,6 +317,8 @@ def options_from_args(args) -> Options:
         icc=args.icc,
         auto_orient=not args.no_auto_orient,
         scrub_lsb=args.scrub_lsb,
+        scrub_dct="full" if args.scrub_dct else "canonical" if args.jpeg_canonical else "off",
+        dct_min_psnr=args.dct_min_psnr,
         scrub_prnu=args.scrub_prnu,
         optimize=args.optimize,
         max_pixels=args.max_pixels,
@@ -545,6 +569,9 @@ def strip_one(task: Task, options: Options, args, single: bool) -> Outcome:
         "warnings": list(result.warnings),
         "steganography": verdict.as_dict(),
     }
+    dct_state = stego.dct_report(result.dct_scrub, result.dct_psnr)
+    if dct_state:
+        payload["dct"] = dct_state
     if verdict.payload_kept:
         payload["warnings"].append(
             "a pixel payload was detected and is still in the cleaned file: run again with --scrub-lsb to destroy it"
@@ -1007,6 +1034,9 @@ class Reporter:
         verdict = pl["steganography"]
         if a.deep or a.verbose or verdict["state"] in (stego.SCRUBBED, stego.DETECTED):
             print(f"           {_stego_line(verdict)}", file=p)
+        if pl.get("dct"):
+            d = pl["dct"]
+            print(f"           jpeg coefficients: {d['headline']}: {d['summary']}. {d['caveat']}", file=p)
         for w in pl["warnings"]:
             print(f"           warning: {w}", file=p)
         cred = pl.get("credentials")

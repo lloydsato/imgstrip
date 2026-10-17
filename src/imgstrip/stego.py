@@ -32,6 +32,12 @@ SCRUB_APPLIED = "applied"  # every frame was scrubbed
 SCRUB_PARTIAL = "partial"  # some frames or image modes could not be scrubbed
 SCRUB_NOT_APPLIED = "not_applied"  # requested, but nothing could be scrubbed
 
+# What the engine did about --scrub-dct (Result.dct_scrub): data hidden in a JPEG's quantised DCT coefficients,
+# a different place from the pixel values the four states above talk about.
+DCT_OFF = "off"  # not requested
+DCT_CANONICAL = "canonical"  # coefficients kept, everything around them rebuilt in one canonical form
+DCT_SCRUBBED = "scrubbed"  # coefficient parities randomised, +-1 coefficients removed
+
 LIKELY = "likely"
 POSSIBLE = "possible"
 
@@ -145,3 +151,32 @@ def for_output(scan: Verdict | None, lsb_scrub: str, copied: bool) -> Verdict:
     else:
         reason += "; the picture was re-encoded, which is not a guarantee that data hidden in its pixels is gone"
     return not_scanned(reason)
+
+
+_DCT_HEADLINES = {DCT_CANONICAL: "canonicalised", DCT_SCRUBBED: "scrubbed"}
+
+_DCT_CAVEATS = {
+    DCT_CANONICAL: (
+        "This removes data hidden in how the file is encoded (table layouts, unused tables, padding, restart "
+        "markers, blocks outside the picture). The coefficients themselves are kept, so steganography stored in "
+        "them (JSteg, F5, steghide, J-UNIWARD and similar) survives. Use --scrub-dct to destroy it."
+    ),
+    DCT_SCRUBBED: (
+        "This destroys payloads hidden in the parity of the DCT coefficients (JSteg, JPHide, OutGuess, steghide, "
+        "F5, nsF5, J-UNIWARD and similar). It does not cover watermarks built to survive re-saving or data carried "
+        "by the picture itself, so it is not proof that nothing is hidden."
+    ),
+}
+
+
+def dct_report(state: str, psnr: float | None = None) -> dict | None:
+    """What cleaning did about data hidden in a JPEG's DCT coefficients; None when --scrub-dct was off."""
+    if state not in _DCT_HEADLINES:
+        return None
+    if state == DCT_SCRUBBED:
+        summary = "the parity of every quantised DCT coefficient was randomised and the smallest coefficients (-2 to 1) removed"
+        if psnr is not None:
+            summary += f" (estimated {psnr} dB against the input)"
+    else:
+        summary = "the compressed data was rebuilt from its DCT coefficients in a canonical form; the pixels are unchanged"
+    return {"state": state, "headline": _DCT_HEADLINES[state], "summary": summary, "caveat": _DCT_CAVEATS[state], "psnr_db": psnr}

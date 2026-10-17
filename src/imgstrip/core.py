@@ -100,6 +100,18 @@ _ORIENT_TEXT = {
 }
 
 
+def dct_mode(options: "Options") -> str:
+    """The normalised --scrub-dct setting: "off", "canonical" or "full"."""
+    value = options.scrub_dct
+    if value is True:
+        return "full"
+    if value in (False, None, "off"):
+        return "off"
+    if value in ("canonical", "full"):
+        return value
+    raise StripError(f"unknown DCT scrub mode {value!r} (use off, canonical or full)")
+
+
 class StripError(Exception):
     """The file could not be cleaned (the reason is user-facing)."""
 
@@ -116,6 +128,10 @@ class Options:
     icc: str = "convert"  # convert | sanitize | drop
     auto_orient: bool = True  # bake EXIF orientation into the pixels
     scrub_lsb: bool = False  # randomise least-significant bits (anti-steganography)
+    # JPEG only, off by default: "canonical" rebuilds the compressed data from its DCT coefficients in one canonical
+    # form (pixels unchanged); "full" also destroys payloads stored in coefficient parities (True means "full").
+    scrub_dct: str | bool = "off"
+    dct_min_psnr: float = 25.0  # "full" refuses a picture it would change by more than this (dB); 0 disables
     scrub_prnu: bool = False  # desynchronise the camera sensor fingerprint (see prnu.py)
     optimize: bool = False  # extra compression trials for PNG
     max_pixels: int = 300_000_000
@@ -159,6 +175,10 @@ class Result:
     # "not_applied" when it was requested but could not be done (bit-exact JPEG, 1-bit or float
     # images).  Reports and credentials must use this, never the option.
     lsb_scrub: str = stego.SCRUB_OFF
+    # What the engine did about --scrub-dct (stego.DCT_*), and the measured PSNR (dB) of the result against the input
+    # when coefficients were scrubbed.
+    dct_scrub: str = stego.DCT_OFF
+    dct_psnr: float | None = None
 
 
 # --------------------------------------------------------------------------
@@ -514,6 +534,16 @@ class _Job:
                 f"image is {w}x{h} ({w * h / 1e6:.0f} MP), above the {self.opts.max_pixels / 1e6:.0f} MP limit "
                 "(raise it with --max-pixels)"
             )
+        mode = dct_mode(self.opts)
+        if mode != "off":
+            if src != "JPEG" or out != "JPEG":
+                raise StripError("--scrub-dct works on JPEG files and keeps the output a JPEG")
+            if self.opts.scrub_prnu:
+                raise StripError(
+                    "the sensor-fingerprint scrub changes pixels, so it cannot be combined with the DCT scrub "
+                    "(--scrub-dct)"
+                )
+            return self._jpeg_lossless(im)
         if self.opts.jpeg_lossless and out == "JPEG":
             if src != "JPEG":
                 raise StripError("--jpeg-lossless requires a JPEG input")
@@ -1383,9 +1413,37 @@ class _Job:
 
     # -- lossless JPEG ----------------------------------------------------------
 
-    def _jpeg_lossless(self, im: Image.Image) -> Result:
-        from . import jpeg
+    def _dct_body(self, mode: str):
+        """Canonical tables, frame header and scan for this JPEG (scrubbed first in "full" mode).
 
+        Returns (body, frame as written, ScrubStats or None).  Fails closed: a JPEG that cannot be represented
+        exactly (arithmetic coding, 12 bits, ...) is refused rather than copied with its coefficients intact.
+        """
+        from . import dct, jpeg
+
+        try:
+            frame = dct.read(self.data, self.opts.max_pixels)
+            stats = None
+            if mode == "full":
+                stats = dct.scrub(frame, np.random.default_rng(int.from_bytes(os.urandom(16), "big")))
+                floor = self.opts.dct_min_psnr
+                if floor and stats.psnr is not None and stats.psnr < floor:
+                    raise StripError(
+                        f"scrubbing the DCT coefficients would cost about {stats.psnr} dB of picture quality "
+                        f"(limit {floor:g} dB, see --dct-min-psnr); re-encoding without --scrub-dct is gentler "
+                        "but does not guarantee that DCT steganography is gone"
+                    )
+            return dct.write(frame), frame, stats
+        except jpeg.JpegError as exc:
+            raise StripError(
+                f"cannot rebuild this JPEG from its DCT coefficients ({exc}); nothing was written because "
+                "--scrub-dct would otherwise have kept the hidden-data channel it was asked to remove"
+            ) from None
+
+    def _jpeg_lossless(self, im: Image.Image) -> Result:
+        from . import dct, jpeg
+
+        mode = dct_mode(self.opts)
         orientation = _orientation(im, self.warnings)
         icc = im.info.get("icc_profile") or None
         icc_out = None
@@ -1412,7 +1470,10 @@ class _Job:
         if orientation != 1 and not self.opts.auto_orient:
             self.warnings.append("orientation tag discarded without rotating (--no-auto-orient)")
             orientation = 1
-        data, dropped = jpeg.rebuild(self.data, orientation, icc_out)
+        canonical = frame = stats = None
+        if mode != "off":
+            canonical, frame, stats = self._dct_body(mode)
+        data, dropped = jpeg.rebuild(self.data, orientation, icc_out, canonical)
         if dropped:
             self.actions.append(f"removed {dropped} embedded image(s) after the main image")
         if orientation != 1:
@@ -1420,9 +1481,23 @@ class _Job:
                 f"kept orientation as a minimal 1-tag EXIF block ({_ORIENT_TEXT[orientation]}); "
                 "lossless mode cannot rotate pixels"
             )
-        self.actions.append("kept the compressed image data bit-for-bit (no re-encoding)")
+        if mode == "off":
+            self.actions.append("kept the compressed image data bit-for-bit (no re-encoding)")
+        elif mode == "canonical":
+            self.actions.append(
+                "rebuilt the compressed data from its DCT coefficients in one canonical form (pixels unchanged)"
+            )
+        else:
+            self.actions.append(
+                "randomised the parity of every quantised DCT coefficient and removed the smallest ones (-2 to 1) "
+                "(anti-steganography; "
+                + (f"estimated {stats.psnr} dB against the input" if stats.psnr is not None else "no change")
+                + ")"
+            )
         if self.opts.scrub_lsb:
-            self.warnings.append("--scrub-lsb has no effect with --jpeg-lossless")
+            self.warnings.append(
+                f"--scrub-lsb has no effect with {'--scrub-dct' if mode != 'off' else '--jpeg-lossless'}"
+            )
         # Verify: structure must be clean apart from what we deliberately wrote.
         report = inspect_bytes(data)
         if report.format != "JPEG" or report.error:
@@ -1443,8 +1518,14 @@ class _Job:
         rebuilt.load()
         if original.size != rebuilt.size or original.mode != rebuilt.mode:
             raise VerificationError("lossless JPEG rebuild changed the image geometry")
-        if not np.array_equal(np.asarray(original), np.asarray(rebuilt)):
-            raise VerificationError("lossless JPEG rebuild changed the decoded pixels")
+        measured = None
+        if mode == "full":
+            measured = self._verify_dct_scrub(data, original, rebuilt, frame, stats)
+        else:
+            if not np.array_equal(np.asarray(original), np.asarray(rebuilt)):
+                raise VerificationError("lossless JPEG rebuild changed the decoded pixels")
+            if mode == "canonical" and not dct.visible_equal(dct.read(data), frame):
+                raise VerificationError("canonical JPEG rebuild changed the DCT coefficients")
         return Result(
             data=data,
             input_format="JPEG",
@@ -1454,10 +1535,40 @@ class _Job:
             warnings=self.warnings,
             size=rebuilt.size,
             frames=1,
-            pixels_exact=True,
+            pixels_exact=mode != "full",
             input_report=self.before,
+            verified_exact=mode != "full",
             lsb_scrub=self.lsb_scrub,
+            dct_scrub={"off": stego.DCT_OFF, "canonical": stego.DCT_CANONICAL, "full": stego.DCT_SCRUBBED}[mode],
+            dct_psnr=measured,
         )
+
+    def _verify_dct_scrub(self, data, original, rebuilt, frame, stats) -> float | None:
+        """Check a scrubbed file against what the scrub promises, and against how it actually decodes."""
+        from . import dct
+
+        written = dct.read(data)
+        if not dct.visible_equal(written, frame):
+            raise VerificationError("the written file does not hold the coefficients that were scrubbed")
+        problem = dct.check_scrub(written, stats.before)
+        if problem:
+            raise VerificationError(f"DCT scrub check failed: {problem}")
+        measured = dct.psnr(np.asarray(original), np.asarray(rebuilt))
+        floor = self.opts.dct_min_psnr
+        if measured is not None:
+            # The estimate averages the error over whole blocks, so it is loose for pictures smaller than a block and
+            # for edge blocks; the coefficients were already compared exactly above.  This only catches an output
+            # that decodes to something else entirely (a bug that would be symmetric in our reader and writer).
+            if stats.psnr is not None and measured < stats.psnr - 10.0:
+                raise VerificationError(
+                    f"the scrubbed picture differs from the input by {measured} dB, not the {stats.psnr} dB expected"
+                )
+            if floor and measured < floor:
+                raise StripError(
+                    f"scrubbing the DCT coefficients would cost {measured} dB of picture quality "
+                    f"(limit {floor:g} dB, see --dct-min-psnr)"
+                )
+        return measured
 
 
 def strip_image(data: bytes, options: Options | None = None) -> Result:

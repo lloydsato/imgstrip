@@ -478,6 +478,7 @@ def parse_options(raw: dict) -> Options:
         icc=icc,
         auto_orient=flag("auto_orient", True),
         scrub_lsb=flag("scrub_lsb", False),
+        scrub_dct="full" if flag("scrub_dct", False) else "canonical" if flag("jpeg_canonical", False) else "off",
         scrub_prnu=flag("scrub_prnu", False),
         optimize=flag("optimize", False),
     )
@@ -766,6 +767,7 @@ def clean_payload(
         "lossy": not result.verified_exact,
         "scrubbed": scrubbed,  # what the engine did, not what was asked for
         "steganography": verdict.as_dict(),
+        "dct": stego.dct_report(result.dct_scrub, result.dct_psnr),  # JPEG coefficients: null unless asked for
         "prnu": result.prnu_applied,
         "bytes_in": len(data),
         "bytes_out": len(final),
