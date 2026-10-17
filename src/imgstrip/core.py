@@ -1495,6 +1495,24 @@ class _Job:
                 "--scrub-dct would otherwise have kept the hidden-data channel it was asked to remove"
             ) from None
 
+    def _check_scan_slack(self) -> None:
+        """Bit-for-bit mode copies the scan data, so refuse a file whose scans hold bytes no decoder reads."""
+        from . import dct, jpeg
+
+        try:
+            frame = dct.read(self.data, self.opts.max_pixels)
+        except jpeg.JpegError:
+            self.warnings.append(
+                "this JPEG's compressed data could not be checked for unused bytes (arithmetic coding, 12 bits or "
+                "another form imgstrip's own decoder does not read)"
+            )
+            return
+        if frame.slack:
+            raise StripError(
+                f"the compressed data holds {frame.slack} byte(s) that no decoder uses, which --jpeg-lossless would "
+                "copy; use --jpeg-canonical (same picture, rebuilt) or the default mode instead"
+            )
+
     def _jpeg_lossless(self, im: Image.Image) -> Result:
         from . import dct, jpeg
 
@@ -1538,6 +1556,12 @@ class _Job:
             )
         if mode == "off":
             self.actions.append("kept the compressed image data bit-for-bit (no re-encoding)")
+            self._check_scan_slack()
+            self.warnings.append(
+                "the compressed picture data was kept as it is, so data hidden in it survives (JPEG steganography "
+                "stored in the coefficients, or in how the file is encoded); --jpeg-canonical removes the "
+                "encoding-level hiding places and --scrub-dct destroys coefficient payloads"
+            )
         elif mode == "canonical":
             self.actions.append(
                 "rebuilt the compressed data from its DCT coefficients in one canonical form (pixels unchanged)"

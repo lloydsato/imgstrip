@@ -67,6 +67,9 @@ class Frame:
     mcus_y: int
     progressive: bool = False
     scans: int = 0
+    # Bytes inside the entropy-coded data that the decoder never used (beyond the final byte's padding bits); a
+    # well-formed file has none, so anything here is data a decoder ignores.
+    slack: int = 0
     tq: list[int] = field(default_factory=list, repr=False)  # quantisation table id each component names
 
 
@@ -195,9 +198,12 @@ def _scan_items(frame: Frame, slots: list[int]) -> tuple[list[int], list[int], i
     return slot.tolist(), base.tolist(), per_mcu
 
 
-def _refill_check(pos: int, cnt: int, real: int) -> None:
-    if pos * 8 - cnt > real * 8:
+def _refill_check(pos: int, cnt: int, real: int) -> int:
+    """Raise if the data ran out early; otherwise return how many whole bytes the decoder did not need."""
+    used = pos * 8 - cnt
+    if used > real * 8:
         raise JpegError("entropy-coded data ends early")
+    return real - (used + 7) // 8
 
 
 def _decode_sequential(data, real, slots, bases, dcl, acl, planes):
@@ -252,7 +258,7 @@ def _decode_sequential(data, real, slots, bases, dcl, acl, planes):
                     break
     except OverflowError:
         raise JpegError("coefficient out of range") from None
-    _refill_check(pos, cnt, real)
+    return _refill_check(pos, cnt, real)
 
 
 def _decode_dc_first(data, real, slots, bases, dcl, planes, al):
@@ -278,7 +284,7 @@ def _decode_dc_first(data, real, slots, bases, dcl, planes, al):
             planes[slot][base] = preds[slot] << al
     except OverflowError:
         raise JpegError("coefficient out of range") from None
-    _refill_check(pos, cnt, real)
+    return _refill_check(pos, cnt, real)
 
 
 def _decode_dc_refine(data, real, slots, bases, planes, al):
@@ -292,7 +298,7 @@ def _decode_dc_refine(data, real, slots, bases, planes, al):
         cnt -= 1
         if (buf >> cnt) & 1:
             planes[slot][base] |= p1
-    _refill_check(pos, cnt, real)
+    return _refill_check(pos, cnt, real)
 
 
 def _decode_ac_first(data, real, bases, ac, plane, ss, se, al):
@@ -337,7 +343,7 @@ def _decode_ac_first(data, real, bases, ac, plane, ss, se, al):
                     break
     except OverflowError:
         raise JpegError("coefficient out of range") from None
-    _refill_check(pos, cnt, real)
+    return _refill_check(pos, cnt, real)
 
 
 def _decode_ac_refine(data, real, bases, ac, plane, ss, se, al):
@@ -409,7 +415,7 @@ def _decode_ac_refine(data, real, bases, ac, plane, ss, se, al):
                 eobrun -= 1
     except OverflowError:
         raise JpegError("coefficient out of range") from None
-    _refill_check(pos, cnt, real)
+    return _refill_check(pos, cnt, real)
 
 
 def _decode_scan(frame: Frame, payload: bytes, entropy: bytes, ri: int, dct: dict, act: dict, qts: dict, planes):
@@ -471,25 +477,25 @@ def _decode_scan(frame: Frame, payload: bytes, entropy: bytes, ri: int, dct: dic
                 acl = [act[t] for t in ta]
             except KeyError:
                 raise JpegError("scan uses an undefined Huffman table") from None
-            _decode_sequential(data, real, sl, bs, dcl, acl, scan_planes)
+            frame.slack += _decode_sequential(data, real, sl, bs, dcl, acl, scan_planes)
         elif ss == 0:
             if ah:
-                _decode_dc_refine(data, real, sl, bs, scan_planes, al)
+                frame.slack += _decode_dc_refine(data, real, sl, bs, scan_planes, al)
             else:
                 try:
                     dcl = [dct[t] for t in td]
                 except KeyError:
                     raise JpegError("scan uses an undefined Huffman table") from None
-                _decode_dc_first(data, real, sl, bs, dcl, scan_planes, al)
+                frame.slack += _decode_dc_first(data, real, sl, bs, dcl, scan_planes, al)
         else:
             try:
                 ac = act[ta[0]]
             except KeyError:
                 raise JpegError("scan uses an undefined Huffman table") from None
             if ah:
-                _decode_ac_refine(data, real, bs, ac, scan_planes[0], ss, se, al)
+                frame.slack += _decode_ac_refine(data, real, bs, ac, scan_planes[0], ss, se, al)
             else:
-                _decode_ac_first(data, real, bs, ac, scan_planes[0], ss, se, al)
+                frame.slack += _decode_ac_first(data, real, bs, ac, scan_planes[0], ss, se, al)
     return set(slots)
 
 

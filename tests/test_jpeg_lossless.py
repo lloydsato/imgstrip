@@ -119,3 +119,67 @@ def _markers(data: bytes) -> list[int]:
             break
         pos += 2 + int.from_bytes(data[pos + 2 : pos + 4], "big")
     return out
+
+
+MARK = b"CANARY-HIDDEN-PAYLOAD"
+
+
+def _jpeg(**kwargs) -> bytes:
+    buf = io.BytesIO()
+    Image.fromarray(fixtures.photo(90, 70)).save(buf, "JPEG", quality=88, **kwargs)
+    return buf.getvalue()
+
+
+def _seg(marker: int, payload: bytes) -> bytes:
+    return bytes((0xFF, marker)) + (len(payload) + 2).to_bytes(2, "big") + payload
+
+
+def _first_scan(data: bytes) -> int:
+    return data.index(b"\xff\xda")
+
+
+def _crafted(j: bytes) -> dict[str, bytes]:
+    sos = _first_scan(j)
+    eoi = j.rindex(b"\xff\xd9")
+    # A one-symbol Huffman table whose symbol list is the payload: valid syntax, never referenced by a scan.
+    counts = bytes([0] * 7 + [len(MARK)] + [0] * 8)
+    return {
+        "unused_dht": j[:sos] + _seg(0xC4, b"\x13" + counts + MARK) + j[sos:],
+        "unused_dqt": j[:sos] + _seg(0xDB, bytes([3]) + MARK.ljust(64, b"A")) + j[sos:],
+        # The decoy comes first and the real table overrides it, so the picture is the same.
+        "redefined_dqt": j[:2] + _seg(0xDB, bytes([0]) + MARK.ljust(64, b"A")) + j[2:],
+        "scan_tail": j[:eoi] + MARK + j[eoi:],
+    }
+
+
+@pytest.mark.parametrize("name", ["unused_dht", "unused_dqt", "redefined_dqt"])
+def test_lossless_drops_tables_that_hold_data(name):
+    j = _jpeg()
+    dirty = _crafted(j)[name]
+    assert MARK in dirty
+    result = strip_image(dirty, Options(jpeg_lossless=True))
+    assert MARK not in result.data
+    assert np.array_equal(
+        np.asarray(Image.open(io.BytesIO(result.data))), np.asarray(Image.open(io.BytesIO(j)))
+    )
+    assert _scan_bytes(result.data) == _scan_bytes(j)
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"progressive": True}, {"restart_marker_blocks": 2}])
+def test_lossless_refuses_bytes_no_decoder_uses_inside_the_scan(kwargs):
+    j = _jpeg(**kwargs)
+    eoi = j.rindex(b"\xff\xd9")
+    extra = MARK + bytes(b for b in range(1, 255)) * 3  # no 0xFF, so it reads as part of the scan
+    with pytest.raises(StripError, match="no decoder uses"):
+        strip_image(j[:eoi] + extra + j[eoi:], Options(jpeg_lossless=True))
+    # The default mode and canonical mode rebuild the picture from pixels / coefficients, so they stay clean.
+    assert MARK not in strip_image(j[:eoi] + extra + j[eoi:], Options()).data
+    assert MARK not in strip_image(j[:eoi] + extra + j[eoi:], Options(scrub_dct="canonical")).data
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"progressive": True}, {"restart_marker_blocks": 2}, {"subsampling": 0}])
+def test_lossless_clean_files_are_unaffected_and_say_what_they_keep(kwargs):
+    j = _jpeg(**kwargs)
+    result = strip_image(j, Options(jpeg_lossless=True))
+    assert _scan_bytes(result.data) == _scan_bytes(j)
+    assert any("data hidden in it survives" in w for w in result.warnings)

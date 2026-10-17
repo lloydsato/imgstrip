@@ -17,7 +17,10 @@ import struct
 # rewritten from its parsed entries instead of being copied.
 _DAC = 0xCC
 _ARITHMETIC_SOF = {0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
-_KEEP = {m for m in range(0xC0, 0xD0) if m not in (0xC8, _DAC)} | {0xDB, 0xDD}
+_DHT, _DQT = 0xC4, 0xDB
+# Copied as they are (their payload is trimmed to its defined length).  DQT and DHT are rewritten from the tables a
+# scan actually uses, so a table that is defined but never used, or redefined before use, cannot carry data.
+_KEEP = {m for m in range(0xC0, 0xD0) if m not in (0xC8, _DAC, _DHT)} | {0xDD}
 _JFIF = b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
 
 
@@ -35,6 +38,55 @@ def _segment(marker: int, payload: bytes) -> bytes:
     if len(payload) + 2 > 0xFFFF:
         raise JpegError("segment too large")
     return bytes((0xFF, marker)) + struct.pack(">H", len(payload) + 2) + payload
+
+
+def _quant_tables(payload: bytes) -> dict[int, bytes]:
+    """Slot -> defining entry (precision/slot byte plus table) for each table in a DQT segment."""
+    out: dict[int, bytes] = {}
+    i = 0
+    while i < len(payload):
+        pq, tq = payload[i] >> 4, payload[i] & 15
+        size = 1 + 64 * (pq + 1)
+        if pq > 1 or tq > 3 or i + size > len(payload):
+            raise JpegError("malformed quantisation table")
+        out[tq] = payload[i : i + size]
+        i += size
+    return out
+
+
+def _huffman_tables(payload: bytes) -> dict[int, bytes]:
+    """(class << 4 | slot) -> defining entry (class/slot byte, 16 counts, symbols) for each table in a DHT segment."""
+    out: dict[int, bytes] = {}
+    i = 0
+    while i < len(payload):
+        if i + 17 > len(payload) or payload[i] >> 4 > 1 or payload[i] & 15 > 3:
+            raise JpegError("malformed Huffman table")
+        size = 17 + sum(payload[i + 1 : i + 17])
+        if size > 17 + 256 or i + size > len(payload):
+            raise JpegError("malformed Huffman table")
+        out[payload[i]] = payload[i : i + size]
+        i += size
+    return out
+
+
+def _scan_tables(marker_sof: int, scan: bytes) -> tuple[list[int], list[int]]:
+    """(component ids, Huffman table keys the scan decodes with) from a scan header."""
+    if len(scan) < 1 or len(scan) < 4 + 2 * scan[0]:
+        raise JpegError("malformed scan header")
+    ns = scan[0]
+    ids = [scan[1 + 2 * i] for i in range(ns)]
+    selectors = [scan[2 + 2 * i] for i in range(ns)]
+    ss, ah = scan[1 + 2 * ns], scan[3 + 2 * ns] >> 4
+    keys: list[int] = []
+    if marker_sof in (0xC2, 0xC6, 0xCA, 0xCE):  # progressive: a scan uses the DC or the AC tables, never both
+        if ss == 0:
+            if ah == 0:
+                keys = [t >> 4 for t in selectors]
+        else:
+            keys = [0x10 | (t & 15) for t in selectors]
+    else:
+        keys = [t >> 4 for t in selectors] + [0x10 | (t & 15) for t in selectors]
+    return ids, sorted(set(keys))
 
 
 def rebuild(
@@ -55,6 +107,13 @@ def rebuild(
     sequential = False
     arithmetic = False
     dac: dict[int, int] = {}  # conditioning table (class/id byte) -> value, last definition wins
+    qt_defs: dict[int, bytes] = {}  # table definitions in force at this point of the file
+    ht_defs: dict[int, bytes] = {}
+    qt_written: dict[int, bytes] = {}  # what the output holds so far
+    ht_written: dict[int, bytes] = {}
+    frame_sof = 0
+    frame_comps: list[tuple[int, int]] = []  # (component id, quantisation slot)
+    latched: set[int] = set()  # components whose quantisation table has been written
     while True:
         if pos >= n:
             raise JpegError("missing end-of-image marker")
@@ -85,7 +144,34 @@ def rebuild(
             had_jfif = True
         elif marker == 0xEE and payload.startswith(b"Adobe") and len(payload) >= 12:
             adobe_transform = payload[11]
+        elif marker == _DQT:
+            qt_defs.update(_quant_tables(payload))
+        elif marker == _DHT:
+            ht_defs.update(_huffman_tables(payload))
         elif marker == 0xDA:
+            ids, keys = _scan_tables(frame_sof, payload)
+            payload = payload[: 4 + 2 * payload[0]]  # nothing after the defined scan header
+            quant = b""
+            for ident in ids:
+                comp = [c for c in frame_comps if c[0] == ident]
+                if not comp:
+                    raise JpegError("scan names an unknown component")
+                tq = comp[0][1]
+                if ident not in latched:
+                    latched.add(ident)
+                    if tq in qt_defs and qt_written.get(tq) != qt_defs[tq]:
+                        qt_written[tq] = qt_defs[tq]
+                        quant += qt_defs[tq]
+            if quant:
+                body += _segment(_DQT, quant)
+            huff = b""
+            if frame_sof not in (0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                for key in keys:
+                    if key in ht_defs and ht_written.get(key) != ht_defs[key]:
+                        ht_written[key] = ht_defs[key]
+                        huff += ht_defs[key]
+            if huff:
+                body += _segment(_DHT, huff)
             if sequential and len(payload) >= 4:
                 # A sequential scan always covers coefficients 0..63 in one pass, so decoders ignore these three
                 # bytes; write their standard values rather than copy whatever the original put there.
@@ -100,6 +186,14 @@ def rebuild(
             for i in range(0, len(payload), 2):
                 dac[payload[i]] = payload[i + 1]
         elif marker in _KEEP:
+            if marker == 0xDD:
+                payload = payload[:2]
+            else:
+                if len(payload) < 6 or len(payload) < 6 + 3 * payload[5]:
+                    raise JpegError("short frame header")
+                payload = payload[: 6 + 3 * payload[5]]
+                frame_sof = marker
+                frame_comps = [(payload[6 + 3 * i], payload[8 + 3 * i]) for i in range(payload[5])]
             if marker in (0xC0, 0xC1):
                 sequential = True
             if marker in _ARITHMETIC_SOF:
