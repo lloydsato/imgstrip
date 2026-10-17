@@ -103,6 +103,11 @@
               <span class="switch-text"><span>Rebuild JPEG data canonically</span><span class="hint">JPEG only. Removes data hidden in table layouts, padding and markers. The picture stays pixel-identical, but hidden coefficient data is kept.</span></span>
             </label>
             <label class="switch">
+              <input type="checkbox" role="switch" name="random_name">
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-text"><span>Random file names</span><span class="hint">Names like IMG_20240517_133700 can reveal when and where a photo was taken. Off by default.</span></span>
+            </label>
+            <label class="switch">
               <input type="checkbox" role="switch" name="scrub_prnu">
               <span class="switch-track" aria-hidden="true"></span>
               <span class="switch-text"><span>Disrupt camera fingerprint</span><span class="hint">Scrambles the sensor noise that can link a photo to one camera. Shifts parts of the picture by a few pixels.</span></span>

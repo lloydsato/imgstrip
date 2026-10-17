@@ -309,6 +309,7 @@ def test_clean_with_options(app):
         {"scrub_lsb": "yes"},
         {"scrub_prnu": "yes"},
         {"scrub_prnu": 1},
+        {"random_name": "yes"},
         [],
     ],
 )
@@ -609,6 +610,36 @@ def test_verification_wording_follows_what_was_proved(app):
     assert scrubbed["scrubbed"] and not scrubbed["lossy"] and not scrubbed["pixels_exact"]
     jpeg = app.clean(fixtures.jpeg_everything(), "photo.jpg")
     assert jpeg["lossy"] and not jpeg["scrubbed"]
+
+
+def _one_bit_png() -> bytes:
+    import numpy as np
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.fromarray(np.tile(np.array([[0, 255]], np.uint8), (8, 4)), "L").convert("1").save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_a_scrub_that_could_not_be_applied_is_reported_as_such(app):
+    # A 1-bit PNG has no least-significant bits to randomise: the page must be able to tell it was not scrubbed.
+    result = app.clean(_one_bit_png(), "mask.png", {"scrub_lsb": True})
+    assert result["scrub_requested"] is True and result["lsb_scrub"] == "not_applied" and not result["scrubbed"]
+    applied = app.clean(fixtures.png_everything(), "photo.png", {"scrub_lsb": True})
+    assert applied["lsb_scrub"] == "applied"
+    default = app.clean(fixtures.png_everything(), "photo.png")
+    assert default["scrub_requested"] is False and default["lsb_scrub"] == "off"
+
+
+def test_random_file_names(app):
+    plain = app.clean(fixtures.png_everything(), "IMG_20240517_133700.png")
+    assert plain["filename"] == "IMG_20240517_133700.clean.png"
+    random_a = app.clean(fixtures.png_everything(), "IMG_20240517_133700.png", {"random_name": True})
+    random_b = app.clean(fixtures.png_everything(), "IMG_20240517_133700.png", {"random_name": True})
+    assert re.fullmatch(r"[0-9a-f]{16}\.png", random_a["filename"])
+    assert random_a["filename"] != random_b["filename"]
+    jpeg = app.clean(fixtures.jpeg_everything(), "IMG_20240517.JPEG", {"random_name": True, "format": "png"})
+    assert re.fullmatch(r"[0-9a-f]{16}\.png", jpeg["filename"])
 
 
 def test_sensor_fingerprint_option(app):

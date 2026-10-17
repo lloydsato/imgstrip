@@ -235,7 +235,9 @@ def safe_filename(raw: str | None, fallback: str = "image") -> str:
     return name
 
 
-def clean_name(source: str, fmt: str) -> str:
+def clean_name(source: str, fmt: str, random_name: bool = False) -> str:
+    if random_name:  # the original name can carry dates and places, so none of it is kept
+        return secrets.token_hex(8) + output_extension(source, fmt)
     stem = Path(source).stem or "image"
     if stem.endswith(DEFAULT_SUFFIX):
         stem = stem[: -len(DEFAULT_SUFFIX)]
@@ -717,6 +719,7 @@ def clean_payload(
     options: Options,
     config: credentials.Config | None = None,
     scan_state: str | None = None,
+    random_name: bool = False,
 ) -> dict:
     """Clean one file.  ``scan_state`` is what the page's pixel scan found in the original, if it ran."""
     if Path(filename).suffix.lower() in RAW_EXTENSIONS:
@@ -751,7 +754,7 @@ def clean_payload(
         extra_warnings = credentials.source_warnings(evidence)
         if signed.receipt:
             session.add_receipt(signed.receipt)
-    name = clean_name(filename, result.output_format)
+    name = clean_name(filename, result.output_format, random_name)
     scrubbed = result.lsb_scrub in (stego.SCRUB_APPLIED, stego.SCRUB_PARTIAL)
     source = stego.Verdict(scan_state) if scrubbed and scan_state in (stego.DETECTED, stego.NOT_DETECTED) else None
     verdict = stego.for_output(source, result.lsb_scrub, copied=result.verified_exact)
@@ -766,6 +769,8 @@ def clean_payload(
         "pixels_exact": result.pixels_exact,
         "lossy": not result.verified_exact,
         "scrubbed": scrubbed,  # what the engine did, not what was asked for
+        "scrub_requested": options.scrub_lsb,
+        "lsb_scrub": result.lsb_scrub,  # "not_applied": asked for, but this image could not be scrubbed
         "steganography": verdict.as_dict(),
         "dct": stego.dct_report(result.dct_scrub, result.dct_psnr),  # JPEG coefficients: null unless asked for
         "prnu": result.prnu_applied,
@@ -1042,12 +1047,15 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     raise ApiError(400, "Options are not valid JSON.")
                 options = parse_options(raw)
+                random_name = raw.get("random_name", False)
+                if not isinstance(random_name, bool):
+                    raise ApiError(400, "random_name must be true or false")
                 config = parse_credentials(raw.get("credentials") if isinstance(raw, dict) else None, None)
                 scan_state = self.headers.get("X-Scan")
                 if scan_state not in (None, stego.DETECTED, stego.NOT_DETECTED):
                     raise ApiError(400, "X-Scan must be detected or not_detected.")
                 with self.session.jobs:
-                    return self._json(200, clean_payload(self.session, data, filename, options, config, scan_state))
+                    return self._json(200, clean_payload(self.session, data, filename, options, config, scan_state, random_name))
             if route == ("POST", "/api/identity"):
                 return self._json(200, load_identity_payload(self.session, self._json_body()))
             if route == ("POST", "/api/identity/test"):
