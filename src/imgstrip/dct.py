@@ -43,6 +43,12 @@ _ZIG = np.array(ZIGZAG, dtype=np.intp)
 _SOF = {0xC0, 0xC1, 0xC2}  # Huffman baseline, extended sequential, progressive
 _UNSUPPORTED_SOF = {0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
 _RST_SPLIT = re.compile(rb"\xff+[\xd0-\xd7]")
+# The canonical writer holds whole-image token arrays.  Measured peaks (tracemalloc, numpy) fit about 32 bytes per
+# pixel plus 120 per non-zero coefficient: ~56 MB/MP for a smooth photo, ~340 MB/MP for pure noise.  Anything
+# above this budget is refused rather than left to exhaust the machine.
+DCT_MEMORY_BUDGET = 3 << 30
+_WRITE_BYTES_PER_PIXEL = 32
+_WRITE_BYTES_PER_COEFFICIENT = 120
 _MAX_DC_DIFF = 2048  # an 8-bit image cannot produce a DC difference or an AC coefficient beyond these
 _MAX_AC = 1024
 
@@ -67,6 +73,9 @@ class Frame:
     mcus_y: int
     progressive: bool = False
     scans: int = 0
+    # Bytes inside the entropy-coded data that the decoder never used (beyond the final byte's padding bits); a
+    # well-formed file has none, so anything here is data a decoder ignores.
+    slack: int = 0
     tq: list[int] = field(default_factory=list, repr=False)  # quantisation table id each component names
 
 
@@ -195,9 +204,12 @@ def _scan_items(frame: Frame, slots: list[int]) -> tuple[list[int], list[int], i
     return slot.tolist(), base.tolist(), per_mcu
 
 
-def _refill_check(pos: int, cnt: int, real: int) -> None:
-    if pos * 8 - cnt > real * 8:
+def _refill_check(pos: int, cnt: int, real: int) -> int:
+    """Raise if the data ran out early; otherwise return how many whole bytes the decoder did not need."""
+    used = pos * 8 - cnt
+    if used > real * 8:
         raise JpegError("entropy-coded data ends early")
+    return real - (used + 7) // 8
 
 
 def _decode_sequential(data, real, slots, bases, dcl, acl, planes):
@@ -252,7 +264,7 @@ def _decode_sequential(data, real, slots, bases, dcl, acl, planes):
                     break
     except OverflowError:
         raise JpegError("coefficient out of range") from None
-    _refill_check(pos, cnt, real)
+    return _refill_check(pos, cnt, real)
 
 
 def _decode_dc_first(data, real, slots, bases, dcl, planes, al):
@@ -278,7 +290,7 @@ def _decode_dc_first(data, real, slots, bases, dcl, planes, al):
             planes[slot][base] = preds[slot] << al
     except OverflowError:
         raise JpegError("coefficient out of range") from None
-    _refill_check(pos, cnt, real)
+    return _refill_check(pos, cnt, real)
 
 
 def _decode_dc_refine(data, real, slots, bases, planes, al):
@@ -292,7 +304,7 @@ def _decode_dc_refine(data, real, slots, bases, planes, al):
         cnt -= 1
         if (buf >> cnt) & 1:
             planes[slot][base] |= p1
-    _refill_check(pos, cnt, real)
+    return _refill_check(pos, cnt, real)
 
 
 def _decode_ac_first(data, real, bases, ac, plane, ss, se, al):
@@ -337,7 +349,7 @@ def _decode_ac_first(data, real, bases, ac, plane, ss, se, al):
                     break
     except OverflowError:
         raise JpegError("coefficient out of range") from None
-    _refill_check(pos, cnt, real)
+    return _refill_check(pos, cnt, real)
 
 
 def _decode_ac_refine(data, real, bases, ac, plane, ss, se, al):
@@ -409,7 +421,7 @@ def _decode_ac_refine(data, real, bases, ac, plane, ss, se, al):
                 eobrun -= 1
     except OverflowError:
         raise JpegError("coefficient out of range") from None
-    _refill_check(pos, cnt, real)
+    return _refill_check(pos, cnt, real)
 
 
 def _decode_scan(frame: Frame, payload: bytes, entropy: bytes, ri: int, dct: dict, act: dict, qts: dict, planes):
@@ -471,25 +483,25 @@ def _decode_scan(frame: Frame, payload: bytes, entropy: bytes, ri: int, dct: dic
                 acl = [act[t] for t in ta]
             except KeyError:
                 raise JpegError("scan uses an undefined Huffman table") from None
-            _decode_sequential(data, real, sl, bs, dcl, acl, scan_planes)
+            frame.slack += _decode_sequential(data, real, sl, bs, dcl, acl, scan_planes)
         elif ss == 0:
             if ah:
-                _decode_dc_refine(data, real, sl, bs, scan_planes, al)
+                frame.slack += _decode_dc_refine(data, real, sl, bs, scan_planes, al)
             else:
                 try:
                     dcl = [dct[t] for t in td]
                 except KeyError:
                     raise JpegError("scan uses an undefined Huffman table") from None
-                _decode_dc_first(data, real, sl, bs, dcl, scan_planes, al)
+                frame.slack += _decode_dc_first(data, real, sl, bs, dcl, scan_planes, al)
         else:
             try:
                 ac = act[ta[0]]
             except KeyError:
                 raise JpegError("scan uses an undefined Huffman table") from None
             if ah:
-                _decode_ac_refine(data, real, bs, ac, scan_planes[0], ss, se, al)
+                frame.slack += _decode_ac_refine(data, real, bs, ac, scan_planes[0], ss, se, al)
             else:
-                _decode_ac_first(data, real, bs, ac, scan_planes[0], ss, se, al)
+                frame.slack += _decode_ac_first(data, real, bs, ac, scan_planes[0], ss, se, al)
     return set(slots)
 
 
@@ -724,6 +736,13 @@ def write(frame: Frame) -> bytes:
     if sum(c.h * c.v for c in comps) > 10:
         raise JpegError("too many blocks in an MCU for an interleaved scan")
     canonicalise_padding(frame)
+    nonzero = sum(int(np.count_nonzero(c.coef)) for c in comps)
+    need = _WRITE_BYTES_PER_PIXEL * frame.width * frame.height + _WRITE_BYTES_PER_COEFFICIENT * nonzero
+    if need > DCT_MEMORY_BUDGET:
+        raise JpegError(
+            f"too large for the canonical writer ({frame.width}x{frame.height} pixels, {nonzero / 1e6:.1f} million "
+            f"non-zero coefficients would need about {need / (1 << 30):.1f} GiB of memory)"
+        )
     per_mcu = sum(c.h * c.v for c in comps)
     sets = [0 if i == 0 else 1 for i in range(len(comps))]
     dc_hist = [np.zeros(256, dtype=np.int64) for _ in range(2)]

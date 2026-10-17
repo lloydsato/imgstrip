@@ -19,7 +19,7 @@
   };
   const OPTION_DEFAULTS = {
     format: '', quality: '', icc: 'convert',
-    deep: false, jpeg_lossless: false, scrub_lsb: false, scrub_dct: false, jpeg_canonical: false, scrub_prnu: false, auto_orient: true, optimize: false,
+    deep: false, jpeg_lossless: false, scrub_lsb: false, scrub_dct: false, jpeg_canonical: false, scrub_prnu: false, auto_orient: true, optimize: false, random_name: false,
     c2pa: false, c2pa_date: 'day', c2pa_detail: 'minimal', c2pa_commit: false,
   };
   // Never carried from one launch to the next: signing needs an identity loaded in this very run,
@@ -172,6 +172,7 @@
       scrub_prnu: !!o.scrub_prnu,
       auto_orient: !!o.auto_orient,
       optimize: !!o.optimize,
+      random_name: !!o.random_name,
     };
     if (o.c2pa) out.credentials = { sign: true, date: o.c2pa_date, detail: o.c2pa_detail, commit: !!o.c2pa_commit };
     return out;
@@ -364,6 +365,8 @@
   };
   // A clean file whose pixels still carry a detected payload (nothing scrubbed it) earns no seal.
   const keptPayload = (item) => !!(item.result && (stegoOf(item) || {}).state === 'detected');
+  // A scrub was asked for but this image could not take it, so its pixels were neither scanned nor scrubbed.
+  const unappliedScrub = (item) => !!(item.result && item.result.scrub_requested && item.result.lsb_scrub === 'not_applied');
   const refused = (item) => !!(item.error && item.state === 'clean' && item.failedKey === optionsKey());
 
   function newItem(file) {
@@ -502,9 +505,14 @@
     const kept = todo.filter((i) => state.items.includes(i));
     const failed = kept.filter((i) => i.error).length;
     const cleaned = kept.length - failed;
+    const partial = kept.filter((i) => !i.error && (keptPayload(i) || unappliedScrub(i))).length;
+    const verified = cleaned - partial;
+    const caveat = partial
+      ? ` ${plural(partial, 'image')} cleaned of metadata only: a payload was kept or the scrub you asked for could not be applied.`
+      : '';
     announce(failed
-      ? `${plural(cleaned, 'image')} cleaned and verified. ${failed} could not be cleaned.`
-      : `${plural(cleaned, 'image')} cleaned and verified.`);
+      ? `${plural(verified, 'image')} cleaned and verified.${caveat} ${failed} could not be cleaned.`
+      : `${plural(verified, 'image')} cleaned and verified.${caveat}`);
   }
 
   function removeItem(item) {
@@ -639,6 +647,15 @@
             h('span', { class: 'seal-tip', id: `tip-${item.id}`, role: 'tooltip' },
               h('strong', { text: 'Metadata removed, payload kept' }),
               h('span', { text: 'Structure verified, but a likely LSB payload is still in the pixels. Turn on Scrub least-significant bits and clean again.' })),
+          ];
+        }
+        if (unappliedScrub(item)) {
+          return [
+            icon('alert'),
+            h('span', { class: 'status-fail', text: 'Clean · scrub not applied' }),
+            h('span', { class: 'seal-tip', id: `tip-${item.id}`, role: 'tooltip' },
+              h('strong', { text: 'Metadata removed, pixels not scrubbed' }),
+              h('span', { text: 'Scrub least-significant bits could not be applied to this kind of image, so hidden data in its pixels was neither scanned nor destroyed.' })),
           ];
         }
         return [
@@ -816,6 +833,9 @@
       const kept = keptPayload(item);
       if (kept) {
         out.push(note('A steganography payload was detected in this file\'s pixels and is still there, because nothing scrubbed it. Turn on Scrub least-significant bits in Options and clean again to destroy it.', 'warn'));
+        out.push(h('div', { class: 'verified is-partial' }, checks));
+      } else if (unappliedScrub(item)) {
+        out.push(note('Scrub least-significant bits was turned on, but it could not be applied to this kind of image, so hidden data in its pixels was neither scanned nor destroyed.', 'warn'));
         out.push(h('div', { class: 'verified is-partial' }, checks));
       } else {
         const animate = !item.sealDrawn;

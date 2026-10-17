@@ -270,7 +270,7 @@ class MatrixShaper:
                 raise ProfileError(f"missing tag {exc}") from None
             self.matrix = np.array(cols, dtype=np.float64).T  # columns are the primaries
             self.raw_tags = {sig: _canonical_xyz(tags[sig]) for sig in (b"rXYZ", b"gXYZ", b"bXYZ")}
-            self.raw_tags |= {sig: _canonical_curve(c) for sig, c in zip((b"rTRC", b"gTRC", b"bTRC"), self.curves)}
+            self.raw_tags |= {sig: _canonical_curve(c) for sig, c in zip((b"rTRC", b"gTRC", b"bTRC"), self.curves, strict=True)}
             if abs(np.linalg.det(self.matrix)) < 1e-9:
                 raise ProfileError("singular colour matrix")
         elif space == "GRAY":

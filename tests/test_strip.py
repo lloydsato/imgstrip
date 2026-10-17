@@ -251,6 +251,18 @@ def test_avif_clean_aperture_crop_removes_hidden_pixels():
     assert not ((out[..., 0] > 200) & (out[..., 1] < 60)).any()
 
 
+def test_damaged_avif_with_a_crop_is_refused_not_published_uncropped():
+    from isobmff_tools import add_clap
+
+    buf = io.BytesIO()
+    Image.fromarray(fixtures.photo(64, 64)).save(buf, "AVIF")
+    clapped = add_clap(buf.getvalue(), 48, 48, (16, 2), (0, 1))
+    assert strip_image(clapped).size == (48, 48)  # intact: cropped
+    with pytest.raises(StripError, match="clean-aperture crop"):
+        strip_image(clapped + b"\x00")
+    assert strip_image(buf.getvalue() + b"\x00").size == (64, 64)  # damaged but no crop: unchanged
+
+
 def test_scrub_lsb_changes_at_most_one_level_and_destroys_payload(fx):
     from imgstrip.analysis import lsb_payload_estimate
 
@@ -579,3 +591,45 @@ def test_semi_transparent_pixels_kept_bit_exact():
     Image.fromarray(arr, "RGBA").save(buf, "PNG")
     result = strip_image(buf.getvalue())
     assert np.array_equal(rgba(result.data), arr)
+
+
+def test_pillow_guard_is_thread_safe():
+    """Concurrent guards keep their own warnings and leave Pillow's global limit as they found it."""
+    import threading
+    import warnings
+
+    from imgstrip.core import _pillow_guard
+
+    original = Image.MAX_IMAGE_PIXELS
+    start = threading.Barrier(8)
+    inside = threading.Barrier(8)  # every thread is inside its guard at the same moment
+    seen: dict[int, list[str]] = {}
+    errors: list[BaseException] = []
+
+    def worker(n: int) -> None:
+        try:
+            collected: list[str] = []
+            start.wait(10)
+            for round_ in range(20):
+                with _pillow_guard(collected, 10_000_000 * (n + 1)):
+                    inside.wait(10)
+                    assert Image.MAX_IMAGE_PIXELS <= 5_000_000 * (n + 1)
+                    warnings.warn(f"worker {n} round {round_ % 3}", stacklevel=2)
+                    inside.wait(10)
+            seen[n] = collected
+        except BaseException as exc:  # noqa: BLE001 - reported on the main thread
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+    assert Image.MAX_IMAGE_PIXELS == original
+    for n, msgs in seen.items():
+        assert msgs and all(m.startswith(f"worker {n} ") for m in msgs), (n, msgs)
+    with warnings.catch_warnings(record=True) as after:
+        warnings.simplefilter("default")
+        warnings.warn("filters restored", stacklevel=2)
+    assert [str(w.message) for w in after] == ["filters restored"]

@@ -14,6 +14,7 @@ import contextlib
 import io
 import os
 import struct
+import threading
 import warnings
 import zlib
 from dataclasses import dataclass, field
@@ -213,28 +214,68 @@ def _input_formats() -> list[str]:
     return [f for f in INPUT_FORMATS if f in Image.OPEN]
 
 
+# Pillow's decompression-bomb limit and the warning filters are process-wide, while the web app runs several jobs
+# at once.  The first guard in saves the real values, the last one out restores them, and while any guard is
+# active the strictest requested limit applies.  Each thread collects its own warnings.
+_guard_lock = threading.Lock()
+_guard_limits: list[int] = []
+_guard_saved: dict = {}
+_guard_local = threading.local()
+
+
+def _record_warning(message, category, filename, lineno, file=None, line=None):  # noqa: ARG001 - warnings hook
+    sinks = getattr(_guard_local, "sinks", None)
+    if sinks:
+        sinks[-1].append(warnings.WarningMessage(message, category, filename, lineno))
+
+
+def _guard_enter(limit: int) -> None:
+    with _guard_lock:
+        if not _guard_limits:
+            _guard_saved["pixels"] = Image.MAX_IMAGE_PIXELS
+            cm = warnings.catch_warnings()
+            cm.__enter__()
+            _guard_saved["warnings"] = cm
+            warnings.simplefilter("always")
+            warnings.showwarning = _record_warning
+        _guard_limits.append(limit)
+        Image.MAX_IMAGE_PIXELS = min(_guard_limits)
+
+
+def _guard_exit(limit: int) -> None:
+    with _guard_lock:
+        _guard_limits.remove(limit)
+        if _guard_limits:
+            Image.MAX_IMAGE_PIXELS = min(_guard_limits)
+        else:
+            Image.MAX_IMAGE_PIXELS = _guard_saved.pop("pixels")
+            _guard_saved.pop("warnings").__exit__(None, None, None)
+
+
 @contextlib.contextmanager
 def _pillow_guard(collected: list[str], max_pixels: int = 300_000_000):
     """Tie Pillow's decompression-bomb limit to ``max_pixels`` and capture warnings.
 
     Pillow raises DecompressionBombError above 2 x MAX_IMAGE_PIXELS, and it
     checks again whenever a frame enlarges the canvas (a corrupt GIF frame
-    descriptor can otherwise demand gigabytes).
+    can otherwise demand gigabytes).  Safe to use from several threads at once.
     """
-    old = Image.MAX_IMAGE_PIXELS
-    Image.MAX_IMAGE_PIXELS = max(1, max_pixels // 2)
+    limit = max(1, max_pixels // 2)
+    caught: list = []
+    sinks = _guard_local.__dict__.setdefault("sinks", [])
+    _guard_enter(limit)
+    sinks.append(caught)
     try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            yield
-        for w in caught:
-            if issubclass(w.category, Image.DecompressionBombWarning):
-                continue
-            msg = str(w.message)
-            if msg not in collected:
-                collected.append(msg)
+        yield
     finally:
-        Image.MAX_IMAGE_PIXELS = old
+        sinks.pop()
+        _guard_exit(limit)
+    for w in caught:
+        if issubclass(w.category, Image.DecompressionBombWarning):
+            continue
+        msg = str(w.message)
+        if msg not in collected:
+            collected.append(msg)
 
 
 def open_image(data: bytes) -> Image.Image:
@@ -693,6 +734,13 @@ class _Job:
                 if im.size[0] * im.size[1] > self.opts.max_pixels or budget < 0:
                     raise StripError("image or animation exceeds the --max-pixels limit")
                 if animated:
+                    if im.mode in ("I", "F") or im.mode.startswith("I;16") or codecs.high_bit_depth_kind(im):
+                        # Converting to 8-bit RGBA would clip every page, and the verifier would compare against
+                        # the clipped copy, so refuse rather than write a quietly damaged picture.
+                        raise StripError(
+                            f"this file has several frames with more than 8 bits per sample ({im.mode}), which "
+                            "cannot be kept exactly; split the frames into separate files first"
+                        )
                     rgba = im.convert("RGBA")
                     frames.append(Frame(image=fresh(rgba), duration=im.info.get("duration")))
                 else:
@@ -761,6 +809,13 @@ class _Job:
         publishing them would expose hidden image content.
         """
         clap = self.before.info.get("clap")
+        if self.before.format == "AVIF" and not clap and self.before.error and b"\x00\x00\x00\x28clap" in self.data:
+            # The inspector stops at the first structural error, before it reads the item properties, so it never
+            # saw the crop; the decoder ignores it, and the cropped-out pixels would be published.
+            raise StripError(
+                "this AVIF has a clean-aperture crop but its structure is damaged "
+                f"({self.before.error}), so the crop cannot be applied safely"
+            )
         if not clap or self.before.format != "AVIF":
             return  # libheif (HEIC) applies the crop itself; Pillow's AVIF decoder does not
         order = self.before.info.get("transforms", [])
@@ -1440,6 +1495,24 @@ class _Job:
                 "--scrub-dct would otherwise have kept the hidden-data channel it was asked to remove"
             ) from None
 
+    def _check_scan_slack(self) -> None:
+        """Bit-for-bit mode copies the scan data, so refuse a file whose scans hold bytes no decoder reads."""
+        from . import dct, jpeg
+
+        try:
+            frame = dct.read(self.data, self.opts.max_pixels)
+        except jpeg.JpegError:
+            self.warnings.append(
+                "this JPEG's compressed data could not be checked for unused bytes (arithmetic coding, 12 bits or "
+                "another form imgstrip's own decoder does not read)"
+            )
+            return
+        if frame.slack:
+            raise StripError(
+                f"the compressed data holds {frame.slack} byte(s) that no decoder uses, which --jpeg-lossless would "
+                "copy; use --jpeg-canonical (same picture, rebuilt) or the default mode instead"
+            )
+
     def _jpeg_lossless(self, im: Image.Image) -> Result:
         from . import dct, jpeg
 
@@ -1483,6 +1556,12 @@ class _Job:
             )
         if mode == "off":
             self.actions.append("kept the compressed image data bit-for-bit (no re-encoding)")
+            self._check_scan_slack()
+            self.warnings.append(
+                "the compressed picture data was kept as it is, so data hidden in it survives (JPEG steganography "
+                "stored in the coefficients, or in how the file is encoded); --jpeg-canonical removes the "
+                "encoding-level hiding places and --scrub-dct destroys coefficient payloads"
+            )
         elif mode == "canonical":
             self.actions.append(
                 "rebuilt the compressed data from its DCT coefficients in one canonical form (pixels unchanged)"

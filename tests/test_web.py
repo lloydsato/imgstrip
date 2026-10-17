@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from imgstrip import fixtures
-from imgstrip.core import heif_available
+from imgstrip.core import Options, heif_available
 from imgstrip.inspect import Finding, inspect_bytes
 from imgstrip.web import server as web
 
@@ -309,6 +309,7 @@ def test_clean_with_options(app):
         {"scrub_lsb": "yes"},
         {"scrub_prnu": "yes"},
         {"scrub_prnu": 1},
+        {"random_name": "yes"},
         [],
     ],
 )
@@ -611,6 +612,36 @@ def test_verification_wording_follows_what_was_proved(app):
     assert jpeg["lossy"] and not jpeg["scrubbed"]
 
 
+def _one_bit_png() -> bytes:
+    import numpy as np
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.fromarray(np.tile(np.array([[0, 255]], np.uint8), (8, 4)), "L").convert("1").save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_a_scrub_that_could_not_be_applied_is_reported_as_such(app):
+    # A 1-bit PNG has no least-significant bits to randomise: the page must be able to tell it was not scrubbed.
+    result = app.clean(_one_bit_png(), "mask.png", {"scrub_lsb": True})
+    assert result["scrub_requested"] is True and result["lsb_scrub"] == "not_applied" and not result["scrubbed"]
+    applied = app.clean(fixtures.png_everything(), "photo.png", {"scrub_lsb": True})
+    assert applied["lsb_scrub"] == "applied"
+    default = app.clean(fixtures.png_everything(), "photo.png")
+    assert default["scrub_requested"] is False and default["lsb_scrub"] == "off"
+
+
+def test_random_file_names(app):
+    plain = app.clean(fixtures.png_everything(), "IMG_20240517_133700.png")
+    assert plain["filename"] == "IMG_20240517_133700.clean.png"
+    random_a = app.clean(fixtures.png_everything(), "IMG_20240517_133700.png", {"random_name": True})
+    random_b = app.clean(fixtures.png_everything(), "IMG_20240517_133700.png", {"random_name": True})
+    assert re.fullmatch(r"[0-9a-f]{16}\.png", random_a["filename"])
+    assert random_a["filename"] != random_b["filename"]
+    jpeg = app.clean(fixtures.jpeg_everything(), "IMG_20240517.JPEG", {"random_name": True, "format": "png"})
+    assert re.fullmatch(r"[0-9a-f]{16}\.png", jpeg["filename"])
+
+
 def test_sensor_fingerprint_option(app):
     default = app.clean(fixtures.png_everything(), "photo.png")
     assert default["prnu"] is False
@@ -686,3 +717,72 @@ def test_nohup_is_respected(tmp_path):
         if proc.poll() is None:
             proc.kill()
     assert list(tmp_path.glob("imgstrip-web-*")) == []
+
+
+# --------------------------------------------------------------------------
+# Resource limits
+# --------------------------------------------------------------------------
+
+
+def test_web_pixel_limit_is_lower_than_the_cli_default_and_reported_in_page_terms(app, monkeypatch):
+    assert web.WEB_MAX_PIXELS < Options().max_pixels
+    assert web.parse_options({}).max_pixels == web.WEB_MAX_PIXELS
+    monkeypatch.setattr(web, "WEB_MAX_PIXELS", 1000)
+    res, body = app.upload("/api/clean", fixtures.png_everything(), "big.png", {})
+    assert res.status == 422
+    message = json.loads(body)["error"]
+    assert "limit" in message and "--max-pixels" not in message
+
+
+def _connect(app):
+    import socket
+
+    return socket.create_connection(("127.0.0.1", app.port), timeout=10)
+
+
+def _closed(sock) -> bool:
+    """True when the server hangs up (after saying whatever it wants to) rather than waiting for more."""
+    try:
+        while sock.recv(4096):
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def test_idle_connection_is_dropped(app, monkeypatch):
+    monkeypatch.setattr(web.Handler, "timeout", 1)
+    sock = _connect(app)
+    sock.sendall(b"POST /api/clean HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\npartial")
+    assert _closed(sock), "a connection that stops sending is closed after the timeout"
+    sock.close()
+
+
+def test_connections_beyond_the_cap_are_closed_at_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(web.Server, "max_connections", 2)
+    session = web.Session(str(tmp_path / "work"))
+    httpd, session = web.make_server(0, session)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    held = []
+    try:
+        client = Client(httpd.server_address[1], session)
+        for _ in range(2):
+            sock = _connect(client)
+            sock.sendall(b"GET /api/session HTTP/1.1\r\nHost: x\r\nX-Do-Not: finish")  # never finishes the request
+            held.append(sock)
+        import time
+
+        time.sleep(0.3)
+        extra = _connect(client)
+        assert _closed(extra)
+        extra.close()
+        held.pop().close()  # freeing a slot lets a real request through again
+        time.sleep(0.5)
+        res, _ = client.request("GET", "/api/session")
+        assert res.status in (200, 401, 403, 404)
+    finally:
+        for sock in held:
+            sock.close()
+        httpd.shutdown()
+        httpd.server_close()
+        session.close()

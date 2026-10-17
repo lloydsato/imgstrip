@@ -404,6 +404,11 @@ def _load_certs(pem: bytes) -> list:
         return []
 
 
+# A wrong passphrase decrypts to garbage, and about 1 time in 300 the garbage ends in valid padding; the library then
+# complains about the key data instead of the password.  A PEM that says it is encrypted settles it.
+_ENCRYPTED_PEM = re.compile(rb"-----BEGIN ENCRYPTED PRIVATE KEY-----|Proc-Type:\s*4,\s*ENCRYPTED")
+
+
 def _load_key(pem: bytes, passphrase: bytes | None):
     c = _crypto()
     try:
@@ -414,7 +419,9 @@ def _load_key(pem: bytes, passphrase: bytes | None):
         raise PassphraseRequired("The private key is encrypted. A passphrase is needed.") from None
     except ValueError as exc:
         text = str(exc).lower()
-        if passphrase and ("password" in text or "decrypt" in text or "bad" in text or "mac" in text):
+        if passphrase and (
+            _ENCRYPTED_PEM.search(pem) or "password" in text or "decrypt" in text or "bad" in text or "mac" in text
+        ):
             raise PassphraseRequired("The passphrase is wrong, or the key file is damaged.") from None
         raise CredentialError("The private key could not be read (is it a PEM-encoded key?).") from None
     except Exception:  # noqa: BLE001 - never echo library internals that might touch key bytes

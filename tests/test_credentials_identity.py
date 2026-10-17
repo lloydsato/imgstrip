@@ -352,3 +352,37 @@ def test_notices_are_ordered_errors_then_warnings_then_info(creds, pki):
     a = creds.assess(pki.issue(not_after=NOW + dt.timedelta(days=5), ou=creds.TEST_MARKER))
     order = [n.severity for n in a.notices]
     assert order == sorted(order, key={"error": 0, "warning": 1, "info": 2}.get)
+
+
+def test_a_wrong_passphrase_is_always_reported_as_one(creds):
+    """Decrypting with a wrong passphrase gives garbage, which about 1 time in 300 ends in valid padding; the library
+    then complains about the key data instead of the password, and that must still read as a wrong passphrase."""
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    pem = key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.BestAvailableEncryption(b"right")
+    )
+    misleading = None
+    for i in range(30_000):  # find a wrong passphrase whose failure does not mention the password
+        wrong = b"wrong-%d" % i
+        try:
+            serialization.load_pem_private_key(pem, wrong)
+        except ValueError as exc:
+            if not any(word in str(exc).lower() for word in ("password", "decrypt", "bad", "mac")):
+                misleading = wrong
+                break
+    if misleading is None:
+        pytest.skip("this cryptography version always names the password in its error")
+    with pytest.raises(creds.PassphraseRequired, match="wrong"):
+        creds._load_key(pem, misleading)
+    # A key that is not encrypted at all, or text that is not a key, is still not blamed on the passphrase.
+    plain = key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    )
+    with pytest.raises(creds.CredentialError, match="not encrypted") as exc:
+        creds._load_key(plain, b"unneeded")
+    assert not isinstance(exc.value, creds.PassphraseRequired)
+    with pytest.raises(creds.CredentialError, match="could not be read") as exc:
+        creds._load_key(b"-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n", b"pw")
+    assert not isinstance(exc.value, creds.PassphraseRequired)

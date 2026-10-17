@@ -55,8 +55,12 @@ def visible(arr: np.ndarray) -> np.ndarray:
     return out
 
 
-def assert_clean(data: bytes, suffix: str = ".bin", allow=()):
-    """The output must be clean for both our inspector and exiftool, and canary-free."""
+def assert_clean(data: bytes, suffix: str = ".bin", allow=(), allow_tags=()):
+    """The output must be clean for both our inspector and exiftool, and canary-free.
+
+    ``allow_tags`` names exiftool tags (as ``Group:Name``) that are expected, such as the one-tag orientation block
+    the bit-exact JPEG modes keep because they cannot rotate pixels.
+    """
     assert fixtures.CANARY not in data, "canary leaked into output bytes"
     report = inspect_bytes(data)
     assert report.error is None, report.error
@@ -64,6 +68,7 @@ def assert_clean(data: bytes, suffix: str = ".bin", allow=()):
     assert not leftovers, leftovers
     if HAS_EXIFTOOL:
         bad = exiftool_findings(data, suffix, allow_icc="ICC color profile" in allow)
+        bad = [b for b in bad or [] if not any(b.startswith(tag + "=") for tag in allow_tags)]
         assert not bad, bad
 
 

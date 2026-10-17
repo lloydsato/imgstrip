@@ -142,3 +142,60 @@ def _png(arr: np.ndarray) -> bytes:
     buf = io.BytesIO()
     Image.fromarray(arr).save(buf, "PNG")
     return buf.getvalue()
+
+
+UNAPPLIED_SCRIPT = textwrap.dedent(
+    r"""
+    const { chromium } = require(process.env.PLAYWRIGHT_MODULE);
+    (async () => {
+      const [url, mask] = process.argv.slice(2);
+      const browser = await chromium.launch({ executablePath: process.env.CHROMIUM, args: ['--no-sandbox'] });
+      const page = await browser.newPage({ viewport: { width: 760, height: 1100 } });
+      const errors = [];
+      page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+      const text = (sel) => page.$$eval(sel, (els) => els.map((e) => e.textContent.replace(/\s+/g, ' ').trim()));
+      await page.goto(url);
+      await page.waitForSelector('#optionsToggle');
+      await page.click('#optionsToggle');
+      await page.click('label.switch:has(input[name=scrub_lsb])');
+      await page.setInputFiles('#picker', [mask]);
+      await page.waitForSelector('.file[data-state="scanned"]');
+      await page.click('#primary');
+      await page.waitForSelector('.file[data-state="clean"]');
+      await page.waitForTimeout(600);
+      for (const head of await page.$$('.file-head')) await head.click();
+      await page.waitForTimeout(300);
+      const out = {
+        status: await text('.file .status'),
+        detail: await text('.detail-body'),
+        seals: await page.$$eval('.file .status .seal', (els) => els.length),
+        announce: (await text('#announce'))[0],
+        errors,
+      };
+      console.log(JSON.stringify(out));
+      await browser.close();
+    })().catch((e) => { console.error(String(e && e.stack || e)); process.exit(1); });
+    """
+)
+
+
+def test_a_scrub_that_could_not_be_applied_earns_no_seal(app, tmp_path):
+    import io
+
+    buf = io.BytesIO()
+    Image.fromarray(np.tile(np.array([[0, 255]], np.uint8), (8, 4)), "L").convert("1").save(buf, "PNG")
+    (tmp_path / "mask.png").write_bytes(buf.getvalue())
+    script = tmp_path / "ui2.js"
+    script.write_text(UNAPPLIED_SCRIPT)
+    url = web.launch_url(type("H", (), {"server_address": ("127.0.0.1", app.port)})(), app.session.launch_key)
+    env = {**os.environ, "PLAYWRIGHT_MODULE": PLAYWRIGHT, "CHROMIUM": CHROMIUM}
+    proc = subprocess.run(
+        ["node", str(script), url, str(tmp_path / "mask.png")], capture_output=True, text=True, env=env, timeout=240
+    )
+    assert proc.returncode == 0, proc.stderr
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert got["status"][0].startswith("Clean · scrub not applied")
+    assert got["seals"] == 0, "no seal when the scrub that was asked for did not happen"
+    assert "neither scanned nor destroyed" in got["detail"][0]
+    assert "cleaned and verified" in got["announce"] and "1 image cleaned of metadata only" in got["announce"]
+    assert got["errors"] == []

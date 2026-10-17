@@ -403,3 +403,19 @@ def test_struct_helpers_are_not_confused_by_odd_lengths():
     sos = data.index(b"\xff\xda")
     odd = data[:sos] + b"\xff\xe3" + struct.pack(">H", 2) + b"\xff\xfe" + struct.pack(">H", 2) + data[sos:]
     assert canonical(odd) == canonical(data)
+
+
+def test_canonical_writer_refuses_what_would_not_fit_in_its_memory_budget(monkeypatch):
+    j = io.BytesIO()
+    Image.fromarray(fixtures.photo(120, 90)).save(j, "JPEG", quality=90)
+    data = j.getvalue()
+    assert strip_image(data, CANON).data  # an ordinary picture is far inside the budget
+    monkeypatch.setattr(dct, "DCT_MEMORY_BUDGET", 1 << 10)
+    with pytest.raises(JpegError, match="too large for the canonical writer"):
+        dct.write(dct.read(data))
+    for opts in (CANON, FULL):
+        with pytest.raises(StripError, match="too large for the canonical writer"):
+            strip_image(data, opts)
+    # The default and bit-exact modes never use the writer, so they still work.
+    assert strip_image(data, Options()).data
+    assert strip_image(data, Options(jpeg_lossless=True)).data

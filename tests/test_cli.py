@@ -192,13 +192,14 @@ def test_random_name(tmp_path, jpg):
 
 
 def test_new_files_respect_umask(tmp_path, jpg):
+    import imgstrip.cli as cli
+
+    cli._UMASK = None  # drop the value an earlier test may have cached
     old = os.umask(0o027)
     try:
         assert main([str(jpg)]) == 0
     finally:
         os.umask(old)
-    import imgstrip.cli as cli
-
     cli._UMASK = None  # reset cache for other tests
     mode = stat.S_IMODE(jpg.with_name("photo.clean.jpg").stat().st_mode)
     assert mode in (0o640, 0o644)
