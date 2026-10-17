@@ -10,6 +10,7 @@ import dct_embedders as E
 import jpeg_craft
 from conftest import assert_clean
 from imgstrip import Options, StripError, dct, fixtures, inspect_bytes, stego, strip_image
+from imgstrip.jpeg import orientation_exif
 from test_dct_canonical import QT
 from test_dct_codec import make, pixels
 
@@ -254,7 +255,9 @@ def test_result_and_report_say_what_was_done():
 def test_output_is_clean_and_has_no_metadata(fx):
     result = strip_image(fx["jpeg_everything.jpg"], Options(scrub_dct="full", dct_min_psnr=0))
     assert fixtures.CANARY not in result.data
-    assert_clean(result.data, ".jpg", allow=("ICC color profile", "EXIF"))
+    assert_clean(result.data, ".jpg", allow=("ICC color profile", "EXIF"), allow_tags=("IFD0:Orientation",))
+    # The only EXIF kept is the one-tag orientation block (the coefficient modes cannot rotate pixels).
+    assert inspect_bytes(result.data).info["exif"] == orientation_exif(6)[6:]
     report = inspect_bytes(result.data)
     assert report.format == "JPEG" and not report.error
 
