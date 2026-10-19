@@ -16,6 +16,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # PyPI never accepts a version twice (not even one that was deleted), so the
+      # release tag must name the version being built.
+      - name: Check tag matches package version
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/imgstrip/__init__.py)
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::Release tag $GITHUB_REF_NAME does not match package version $version"
+            exit 1
+          fi
       - run: pip install build && python -m build
       - uses: actions/upload-artifact@v4
         with:
