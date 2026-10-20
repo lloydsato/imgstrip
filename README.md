@@ -5,7 +5,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-1.2.2-2fbf8f?style=flat-square)](https://pypi.org/project/imgstrip/)
+[![Version](https://img.shields.io/badge/version-1.2.3-2fbf8f?style=flat-square)](https://pypi.org/project/imgstrip/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://pypi.org/project/imgstrip/)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-blue?style=flat-square)](https://github.com/lloydsato/imgstrip/blob/main/LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/lloydsato/imgstrip/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/lloydsato/imgstrip/actions/workflows/ci.yml)
@@ -98,7 +98,7 @@ Check which version you have:
 
 ```console
 $ imgstrip --version
-imgstrip 1.2.2
+imgstrip 1.2.3
 ```
 
 Want to be sure the install works? Run `imgstrip --self-test`. It builds 21 booby-trapped test images, cleans them in every mode, and has independent image readers confirm the results.
