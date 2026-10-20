@@ -4,7 +4,7 @@ from .core import Options, Result, StripError, VerificationError, strip_image
 from .inspect import Finding, Report, inspect_bytes
 
 # The single place the version lives: pyproject.toml reads it from here.
-__version__ = "1.2.3"
+__version__ = "1.2.4"
 
 __all__ = [
     "Finding",
