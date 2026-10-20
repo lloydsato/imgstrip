@@ -1,24 +1,63 @@
+<!-- GENERATED FILE. Edit docs/README.template.md and run `python scripts/render_readme.py`; changes made here are overwritten. -->
 <div align="center">
 
-# 🧼 imgstrip
+<img src="https://raw.githubusercontent.com/lloydsato/imgstrip/main/docs/assets/banner.svg" alt="imgstrip. Share the picture. Keep everything else to yourself." width="100%">
 
-**Share the picture. Keep everything else to yourself.**
+<br>
 
-Photos quietly carry your location, your camera, the time you took them, and sometimes more.
+[![Version](https://img.shields.io/badge/version-1.2.2-2fbf8f?style=flat-square)](https://pypi.org/project/imgstrip/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://pypi.org/project/imgstrip/)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-blue?style=flat-square)](https://github.com/lloydsato/imgstrip/blob/main/LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/lloydsato/imgstrip/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/lloydsato/imgstrip/actions/workflows/ci.yml)
+![Runs locally](https://img.shields.io/badge/runs-100%25%20local-2fbf8f?style=flat-square)
+
+**Photos quietly carry your location, your camera, the time you took them, and sometimes more.**<br>
 `imgstrip` removes all of it, then checks its own work before it saves anything.
 
-
-[Quick start](#-quick-start) · [How it works](#-how-it-works) · [Everyday use](#-everyday-use) · [Web app](#-web-app) · [Good to know](#-good-to-know)
+[Quick start](#quick-start) · [How it works](#how-it-works) · [Which switch?](#which-switch-do-i-need) · [Everyday use](#everyday-use) · [Python](#use-it-from-python) · [Web app](#web-app) · [Limits](#good-to-know)
 
 </div>
 
----
+<br>
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<b>🧱 Rebuilt from pixels</b><br>
+It decodes the image and writes a brand-new file. By default only pixel values cross over, so there is nothing left to leak.
+</td>
+<td width="50%" valign="top">
+<b>🔬 Checked twice</b><br>
+A strict parser must account for every part of the new file, then the file is decoded again and compared with the pixels. If either check fails, <b>nothing is written</b>.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<b>👀 Look before you clean</b><br>
+See what a photo gives away first: location, camera, serial numbers, time taken, hidden previews. Nothing changes until you say so.
+</td>
+<td width="50%" valign="top">
+<b>🕵️ Beyond metadata</b><br>
+Data tacked on after the image, colour hidden under transparent pixels, and (opt-in) pixel and JPEG steganography and the camera's sensor fingerprint.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<b>🔒 Private by design</b><br>
+The web app runs only on your computer, works offline, never writes your originals to disk and uploads nothing.
+</td>
+<td width="50%" valign="top">
+<b>🖼 Your formats</b><br>
+JPEG, PNG, WebP, GIF (animated too), HEIC/HEIF, AVIF, TIFF and BMP, with 16-bit PNG and TIFF kept at full precision.
+</td>
+</tr>
+</table>
 
 ## Why imgstrip?
 
 Most metadata removers delete the tags they recognize and copy the rest of the file untouched. Anything they don't recognize survives.
 
-imgstrip works the other way around. It reads only the **pixels** and builds a **brand-new file** from them. By default nothing from the old file is copied over, so there is nothing left to leak. (The opt-in JPEG options `--jpeg-lossless`, `--jpeg-canonical` and `--scrub-dct` keep some of the picture's compressed data; see "Good to know" below.)
+imgstrip works the other way around. It reads only the **pixels** and builds a **brand-new file** from them. By default nothing from the old file is copied over, so there is nothing left to leak. (The opt-in JPEG options `--jpeg-lossless`, `--jpeg-canonical` and `--scrub-dct` keep some of the picture's compressed data; see [Good to know](#good-to-know) below.)
 
 ```console
 $ imgstrip --check holiday.jpg
@@ -38,7 +77,7 @@ clean    holiday.clean.jpg (JPEG 640x480)
 
 Your original file is never touched. The clean copy is saved next to it.
 
-## 🚀 Quick start
+## Quick start
 
 You need **Python 3.10 or newer**.
 
@@ -46,7 +85,7 @@ You need **Python 3.10 or newer**.
 pip install imgstrip
 ```
 
-Prefer to keep it out of your main Python setup? `pipx install imgstrip` works too.
+Prefer to keep it out of your main Python setup? `pipx install imgstrip` and `uv tool install imgstrip` work too.
 
 Then try it:
 
@@ -55,10 +94,17 @@ imgstrip photo.jpg          # writes photo.clean.jpg
 imgstrip-web                # or use the point-and-click web app
 ```
 
+Check which version you have:
+
+```console
+$ imgstrip --version
+imgstrip 1.2.2
+```
+
 Want to be sure the install works? Run `imgstrip --self-test`. It builds 21 booby-trapped test images, cleans them in every mode, and has independent image readers confirm the results.
 
 <details>
-<summary>Install from source instead</summary>
+<summary>Install from source instead, or add Content Credentials signing</summary>
 
 ```console
 git clone https://github.com/lloydsato/imgstrip.git
@@ -66,26 +112,48 @@ cd imgstrip
 pip install .
 ```
 
+Signing cleaned images with a Content Credential (C2PA) is optional and needs an extra, because it brings a native library:
+
+```console
+pip install 'imgstrip[c2pa]'
+```
+
 </details>
 
-## 🔍 How it works
+## How it works
 
 ```mermaid
 flowchart LR
-    A[Your photo] --> B[Decode to raw pixels]
-    B --> C[Write a brand-new file]
-    C --> D{Check 1: is every part of the new file accounted for?}
-    D -->|yes| E{Check 2: do the pixels still match?}
-    D -->|no| X[Stop. Nothing is saved]
-    E -->|yes| F[Clean copy saved]
+    A["📷 Your photo"] --> B["Decode to<br/>raw pixels"]
+    B --> C["Write a<br/>brand-new file"]
+    C --> D{"Check 1<br/>is every part<br/>accounted for?"}
+    D -->|yes| E{"Check 2<br/>do the pixels<br/>still match?"}
+    D -->|no| X["⛔ Stop.<br/>Nothing is saved"]
+    E -->|yes| F["✅ Clean copy saved"]
     E -->|no| X
 ```
 
 If either check fails, **nothing is written**. Failing safe is the whole point.
 
-(If you're reading this on PyPI and the diagram shows as plain text, the [GitHub page](https://github.com/lloydsato/imgstrip#-how-it-works) renders it.)
+(If you're reading this on PyPI and the diagram shows as plain text, the [GitHub page](https://github.com/lloydsato/imgstrip#how-it-works) renders it.)
 
-## 🛠 Everyday use
+## Which switch do I need?
+
+The defaults already remove metadata, hidden containers and appended data. The switches below are for specific worries.
+
+| If you're worried about... | Use | Cost |
+|---|---|---|
+| What a photo gives away (location, camera, dates) | `imgstrip photo.jpg` | JPEGs are re-encoded at quality 95 |
+| A JPEG losing any quality at all | `--jpeg-lossless` | Keeps the compressed picture data as it was, so use it for pictures you trust |
+| Data hidden in a JPEG's table layouts, padding or markers | `--jpeg-canonical` | Same pixels, rebuilt in one canonical form. DCT steganography survives |
+| Messages hidden in the low bits of pixels (LSB) | `--scrub-lsb`<br>(look first with `--deep`) | Changes each value by at most 1/255. Invisible |
+| Messages hidden in a JPEG's DCT coefficients (JSteg, F5, steghide, J-UNIWARD...) | `--scrub-dct` | Costs picture quality. The report says how much |
+| A photo being linked to your specific camera (sensor fingerprint) | `--scrub-prnu` | Moves parts of the picture by a few pixels. Strong reduction, never proof |
+| Colours that must stay exact | `--icc sanitize` | Embeds a rebuilt, anonymous colour profile |
+| Showing readers the image was sanitised, not altered | `--c2pa` | Needs `pip install 'imgstrip[c2pa]'` and a signing certificate |
+| File names that leak dates (`IMG_20240517_133700.jpg`) | `--random-name` | None |
+
+## Everyday use
 
 | I want to... | Run |
 |---|---|
@@ -93,26 +161,53 @@ If either check fails, **nothing is written**. Failing safe is the whole point.
 | Clean one photo | `imgstrip photo.jpg` |
 | Clean a whole folder, including subfolders | `imgstrip -r my-photos/ -o clean-photos/` |
 | Replace the originals with clean versions | `imgstrip -i photo.jpg` |
-| Give outputs random names (file names can leak dates) | `imgstrip --random-name photo.jpg` |
+| Give outputs random names | `imgstrip --random-name photo.jpg` |
 | Clean a JPEG with no quality loss at all | `imgstrip --jpeg-lossless photo.jpg` |
 | Convert while cleaning | `imgstrip --format png photo.jpg` |
 | Preview what would happen, write nothing | `imgstrip -n photo.jpg` |
+| Also search the pixels for hidden data | `imgstrip --check --deep photo.png` |
+| Clean from a pipe | `cat a.heic \| imgstrip - --format jpeg > a.jpg` |
 
 Run `imgstrip --help` to see every option.
 
-### Going further
+### In scripts and CI
 
-| Switch | What it does |
+`--check` writes nothing and sets the exit status, so it works as a gate. Add `--json` for machine-readable output.
+
+```console
+imgstrip --check --json photo.jpg
+imgstrip --check uploads/*.jpg || echo "something here would leak"
+```
+
+| Exit status | Meaning |
 |---|---|
-| `--deep` | Also scans the pixels for signs of hidden data (LSB steganography). |
-| `--scrub-lsb` | Randomizes the least-significant bit of every pixel value, which destroys hidden LSB messages. The change is invisible (at most 1/255). |
-| `--jpeg-canonical` | JPEG only. Rebuilds the compressed data in one canonical form so nothing can hide in table layouts, padding or markers. The picture stays pixel-identical. |
-| `--scrub-dct` | JPEG only. Also destroys steganography stored in the parity of the JPEG's DCT coefficients (JSteg, F5, steghide, J-UNIWARD...); payloads kept in higher bits are not covered. This costs picture quality, so the report says how much. Off unless you ask. |
-| `--scrub-prnu` | Disrupts your camera's sensor fingerprint, a pattern in the pixels themselves that can link a photo to a specific camera. Moves parts of the picture by a few pixels. |
-| `--icc sanitize` | Keeps the exact colors using a rebuilt, anonymous color profile. |
-| `--c2pa` | Signs each clean image with a Content Credential, so you can show it was sanitized without being altered. Needs the optional extra: `pip install 'imgstrip[c2pa]'`. |
+| `0` | Success, or (with `--check`) everything is clean |
+| `1` | At least one file failed |
+| `2` | Usage error |
+| `3` | `--check` found metadata or hidden data |
 
-## 🖥 Web app
+## Use it from Python
+
+```python
+from imgstrip import Options, StripError, strip_image
+
+with open("photo.jpg", "rb") as f:
+    data = f.read()
+
+try:
+    result = strip_image(data, Options(scrub_lsb=True))
+except StripError as exc:  # includes VerificationError: nothing was produced
+    raise SystemExit(f"could not clean it safely: {exc}")
+
+with open("photo.clean.jpg", "wb") as f:
+    f.write(result.data)
+
+print([str(item) for item in result.removed])
+```
+
+The engine is the same one the command line and the web app use, so it makes the same checks and fails the same way.
+
+## Web app
 
 ```console
 imgstrip-web
@@ -132,7 +227,7 @@ Options that do not apply to the images you added are greyed out, and ones that 
 - Your originals are **never written to disk**, and nothing is uploaded anywhere.
 - On a shared computer, start it with `imgstrip-web --no-browser` and open the printed link yourself.
 
-## 📁 What it handles
+## What it handles
 
 | | Formats |
 |---|---|
@@ -142,7 +237,7 @@ Options that do not apply to the images you added are greyed out, and ones that 
 
 Removed: EXIF, GPS, XMP, IPTC, comments, camera serial numbers, embedded thumbnails, depth maps, color profiles that name your device, data tacked on after the image, and colors hidden under transparent pixels.
 
-## ⚠️ Good to know
+## Good to know
 
 No tool can do everything, and it's better to know the limits up front.
 
@@ -156,20 +251,29 @@ No tool can do everything, and it's better to know the limits up front.
 - **`-i` is not a secure erase.** Old copies can linger in backups, cloud sync history and SSD wear-leveling.
 - **Very grainy JPEGs may be refused** by the default mode because the re-encoded copy would drift too far from the original, and imgstrip would rather refuse than save something it couldn't verify. Use `--jpeg-canonical` for those (same pixels, rebuilt in one canonical form).
 
-## 📚 Learn more
+## Learn more
 
-The full technical reference covers every option, the exact list of what gets removed, how the sensor-fingerprint scrub was measured, optional **Content Credentials (C2PA)** signing for journalists, and how the project is tested:
+The full technical reference covers every option, the exact list of what gets removed, how the sensor-fingerprint scrub was measured, optional **Content Credentials (C2PA)** signing for journalists, and how the project is tested.
 
-➡️ **[Technical reference](https://github.com/lloydsato/imgstrip/blob/main/docs/REFERENCE.md)**
+| Read | What's in it |
+|---|---|
+| 📘 [Technical reference](https://github.com/lloydsato/imgstrip/blob/main/docs/REFERENCE.md) | Every option, what gets removed and what changes, supported formats, how it is tested |
+| 🧬 [JPEG steganography workflow](https://github.com/lloydsato/imgstrip/blob/main/docs/DCT_WORKFLOW.md) | When and how to use `--jpeg-canonical` and `--scrub-dct` |
+| 🛰 [Sensor fingerprint (PRNU)](https://github.com/lloydsato/imgstrip/blob/main/docs/REFERENCE.md#camera-sensor-fingerprint-prnu) | What `--scrub-prnu` does and how well it works, measured |
+| 🪪 [Content Credentials (C2PA)](https://github.com/lloydsato/imgstrip/blob/main/docs/REFERENCE.md#content-credentials-c2pa-optional) | Signing sanitised images, trust, and what a credential can and cannot say |
 
-## 🧪 Development
+## Development
 
 ```console
+git clone https://github.com/lloydsato/imgstrip.git
+cd imgstrip
 pip install -e '.[test]'
 pytest
 ```
 
-## 📄 License
+**The version lives in one place:** `__version__` in `src/imgstrip/__init__.py`. The packaging reads it from there, and so does this page: `README.md` is generated from [`docs/README.template.md`](https://github.com/lloydsato/imgstrip/blob/main/docs/README.template.md) by `scripts/render_readme.py`. After a version bump, CI refreshes the README on `main`; to do it by hand, run `python scripts/render_readme.py` (add `--check` to only verify). Edit the template, never the generated file.
+
+## License
 
 imgstrip is free software, released under the [BSD 3-Clause License](https://github.com/lloydsato/imgstrip/blob/main/LICENSE).
 
