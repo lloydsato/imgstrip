@@ -1,0 +1,48 @@
+name: README
+
+# README.md is generated from docs/README.template.md, and the version it shows comes from __version__ in
+# src/imgstrip/__init__.py. When the version (or the template) changes on main, regenerate the README and
+# commit the result, so the version shown on GitHub and PyPI never drifts from the code.
+#
+# The commit is made with the built-in GITHUB_TOKEN, which does not start further workflow runs, so this
+# cannot loop. If main is a protected branch that blocks pushes from github-actions, allow the bot to bypass
+# the rule or run `python scripts/render_readme.py` yourself before merging (CI checks it on pull requests).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/imgstrip/__init__.py
+      - pyproject.toml
+      - docs/README.template.md
+      - scripts/render_readme.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: readme-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/render_readme.py
+      - name: Commit the refreshed README
+        run: |
+          if git diff --quiet -- README.md; then
+            echo "README.md is already up to date."
+            exit 0
+          fi
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/imgstrip/__init__.py)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: refresh README for ${version} [skip ci]"
+          git push

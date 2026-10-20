@@ -16,6 +16,19 @@ jobs:
       - run: pip install ruff
       - run: ruff check .
 
+  readme:
+    # README.md is generated from docs/README.template.md. Fail a pull request that bumps the version (or edits
+    # the template) without refreshing it. On main the "README" workflow refreshes it, so this runs for pull
+    # requests only (and is skipped when the publish workflow calls this one).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/render_readme.py --check
+
   test:
     runs-on: ubuntu-latest
     strategy:

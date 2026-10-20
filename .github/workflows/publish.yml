@@ -25,6 +25,10 @@ jobs:
             echo "::error::Release tag $GITHUB_REF_NAME does not match package version $version"
             exit 1
           fi
+      # The README is the package's PyPI page and is generated from __version__; render it here too so a release
+      # never ships a stale one, even if the README workflow has not caught up with the tag yet.
+      - name: Render README from its template
+        run: python scripts/render_readme.py
       - run: pip install build && python -m build
       - uses: actions/upload-artifact@v4
         with:
