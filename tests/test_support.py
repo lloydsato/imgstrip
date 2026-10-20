@@ -344,6 +344,27 @@ def test_bit_exact_jpeg_greys_out_the_pixel_scrubs_with_a_warning_and_the_qualit
     assert s["scrub_lsb"]["state"] == "ok" and s["scrub_prnu"]["state"] == "ok"
 
 
+def test_the_pixel_scrub_warnings_name_the_jpeg_switches_that_are_on(images, env):
+    """Not "bit-exact" when only the canonical rebuild or the coefficient scrub is on."""
+    labels = {
+        "jpeg_lossless": "Keep JPEG data bit-exact",
+        "scrub_dct": "Scrub JPEG coefficients",
+        "jpeg_canonical": "Rebuild JPEG data canonically",
+    }
+    for on in (["jpeg_lossless"], ["scrub_dct"], ["jpeg_canonical"], ["scrub_dct", "jpeg_canonical"], list(labels)):
+        s = _states(images, env, "jpeg", **{name: True for name in on})["states"]
+        for option in ("scrub_lsb", "scrub_prnu"):
+            reason = s[option]["reason"]
+            for name, label in labels.items():
+                assert (label in reason) == (name in on), (on, option, reason)
+            assert ("Turn it off" in reason) == (len(on) == 1), reason
+    fate = {"jpeg_lossless": "kept as it is", "jpeg_canonical": "rebuilt from its coefficients", "scrub_dct": "scrubbed"}
+    for name, words in fate.items():
+        assert words in _states(images, env, "jpeg", **{name: True})["states"]["quality"]["reason"], name
+    # the coefficient scrub wins over the other two in the engine, and so in the wording
+    assert "scrubbed" in _states(images, env, "jpeg", **dict.fromkeys(labels, True))["states"]["quality"]["reason"]
+
+
 def test_the_orientation_switch_follows_the_tag(images, env):
     assert _states(images, env, "jpeg")["states"]["auto_orient"]["state"] == "na"
     assert _states(images, env, "jpeg-rotated")["states"]["auto_orient"]["state"] == "ok"

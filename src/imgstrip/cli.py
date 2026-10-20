@@ -222,7 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--scrub-prnu",
         action="store_true",
         help="disrupt the camera sensor fingerprint (PRNU) with a smooth random warp "
-        "(moves pixels by a few pixels; cannot be combined with --jpeg-lossless)",
+        "(moves pixels by a few pixels; cannot be combined with --jpeg-lossless, --jpeg-canonical or --scrub-dct)",
     )
     proc.add_argument("--optimize", action="store_true", help="try extra compression strategies for PNG output")
     proc.add_argument(

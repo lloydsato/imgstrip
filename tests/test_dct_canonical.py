@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 import jpeg_craft
-from imgstrip import Options, dct, fixtures, inspect_bytes, strip_image
+from imgstrip import Options, StripError, dct, fixtures, inspect_bytes, strip_image
 from imgstrip.dct import ZIGZAG
 from test_dct_codec import canonical, make, pixels
 
@@ -204,6 +204,16 @@ def test_orientation_and_icc_are_handled_like_jpeg_lossless(fx):
     assert ra.info.get("icc") == rb.info.get("icc")
     assert [f.label for f in ra.findings] == [f.label for f in rb.findings]
     assert fixtures.CANARY not in b.data
+
+
+def test_messages_name_jpeg_canonical_not_scrub_dct(fx):
+    jpg = fx["jpeg_everything.jpg"]
+    result = strip_image(jpg, Options(scrub_dct="canonical", scrub_lsb=True))
+    assert "--scrub-lsb has no effect with --jpeg-canonical" in result.warnings
+    with pytest.raises(StripError, match=r"canonical JPEG rebuilding \(--jpeg-canonical\)"):
+        strip_image(jpg, Options(scrub_dct="canonical", scrub_prnu=True))
+    with pytest.raises(StripError, match="^--jpeg-canonical works on JPEG files"):
+        strip_image(jpg, Options(scrub_dct="canonical", format="png"))
 
 
 def test_combinations_do_not_explode():

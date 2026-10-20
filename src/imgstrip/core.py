@@ -115,6 +115,12 @@ def dct_mode(options: "Options") -> str:
     raise StripError(f"unknown DCT scrub mode {value!r} (use off, canonical or full)")
 
 
+# The command-line switch behind each DCT mode, so messages name the one the user gave (--jpeg-canonical sets
+# "canonical", --scrub-dct sets "full").
+_DCT_FLAG = {"canonical": "--jpeg-canonical", "full": "--scrub-dct"}
+_DCT_NAME = {"canonical": "canonical JPEG rebuilding", "full": "the DCT scrub"}
+
+
 class StripError(Exception):
     """The file could not be cleaned (the reason is user-facing)."""
 
@@ -626,11 +632,11 @@ class _Job:
         mode = dct_mode(self.opts)
         if mode != "off":
             if src != "JPEG" or out != "JPEG":
-                raise StripError("--scrub-dct works on JPEG files and keeps the output a JPEG")
+                raise StripError(f"{_DCT_FLAG[mode]} works on JPEG files and keeps the output a JPEG")
             if self.opts.scrub_prnu:
                 raise StripError(
-                    "the sensor-fingerprint scrub changes pixels, so it cannot be combined with the DCT scrub "
-                    "(--scrub-dct)"
+                    f"the sensor-fingerprint scrub changes pixels, so it cannot be combined with {_DCT_NAME[mode]} "
+                    f"({_DCT_FLAG[mode]})"
                 )
             return self._jpeg_lossless(im)
         if self.opts.jpeg_lossless and out == "JPEG":
@@ -1686,9 +1692,7 @@ class _Job:
                 + ")"
             )
         if self.opts.scrub_lsb:
-            self.warnings.append(
-                f"--scrub-lsb has no effect with {'--scrub-dct' if mode != 'off' else '--jpeg-lossless'}"
-            )
+            self.warnings.append(f"--scrub-lsb has no effect with {_DCT_FLAG.get(mode, '--jpeg-lossless')}")
         # Verify: structure must be clean apart from what we deliberately wrote.
         report = inspect_bytes(data)
         if report.format != "JPEG" or report.error:

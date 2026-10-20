@@ -55,7 +55,29 @@
   function jpegStays(facts, prefs) {
     return !!facts && facts.format === 'JPEG' && outputFormat(facts, prefs) === 'JPEG';
   }
-  const bitExact = (prefs) => !!(prefs.jpeg_lossless || prefs.scrub_dct || prefs.jpeg_canonical);
+  // The JPEG switches that work on the compressed data instead of the pixels, by the names the page shows them under.
+  const JPEG_DATA_OPTIONS = {
+    jpeg_lossless: 'Keep JPEG data bit-exact', scrub_dct: 'Scrub JPEG coefficients', jpeg_canonical: 'Rebuild JPEG data canonically',
+  };
+  const jpegDataOptions = (prefs) => Object.keys(JPEG_DATA_OPTIONS).filter((name) => prefs[name]).map((name) => JPEG_DATA_OPTIONS[name]);
+  const jpegDataOn = (prefs) => jpegDataOptions(prefs).length > 0;
+  const listed = (names) => (names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0]);
+
+  // What happens to the JPEG data instead of a re-encode, in the engine's order: a coefficient scrub wins over a
+  // canonical rebuild, which wins over a bit-exact copy.
+  function jpegDataFate(prefs) {
+    if (prefs.scrub_dct) return 'the JPEG coefficients are scrubbed directly';
+    if (prefs.jpeg_canonical) return 'the JPEG data is rebuilt from its coefficients';
+    return 'the JPEG data is kept as it is';
+  }
+
+  // Why a pixel scrub cannot run while one of the JPEG data switches is on, naming the ones that are.
+  function jpegDataBlocks(prefs, lead, goal) {
+    const names = jpegDataOptions(prefs);
+    const one = names.length === 1;
+    return `${lead} ${listed(names)} ${one ? 'is' : 'are'} on: ${one ? 'that option works' : 'those options work'} `
+      + `on the compressed JPEG data, not the pixels. Turn ${one ? 'it' : 'them'} off to ${goal}.`;
+  }
 
   function jpegOnly(facts, prefs, what) {
     if (!facts) return ok();
@@ -74,7 +96,7 @@
       if (!facts) return ok();
       const out = outputFormat(facts, prefs);
       if (!LOSSY.includes(out)) return na(`${nameOf(out)} is lossless, so it has no quality setting.`);
-      if (jpegStays(facts, prefs) && bitExact(prefs)) return na('Not used: the JPEG data is kept as it is, not re-encoded.');
+      if (jpegStays(facts, prefs) && jpegDataOn(prefs)) return na(`Not used: ${jpegDataFate(prefs)}, not re-encoded.`);
       return ok();
     },
 
@@ -105,8 +127,8 @@
 
     scrub_lsb(facts, prefs) {
       if (!facts) return ok();
-      if (jpegStays(facts, prefs) && bitExact(prefs)) {
-        return no('It has no effect while the JPEG data is kept bit-exact. Turn off the JPEG options above to scrub pixels.');
+      if (jpegStays(facts, prefs) && jpegDataOn(prefs)) {
+        return no(jpegDataBlocks(prefs, 'It has no effect while', 'scrub pixels'));
       }
       if (facts.frames <= 1 && NO_LSB_MODES.includes(facts.mode)) {
         return no(`${facts.mode === '1' ? '1-bit' : '32-bit'} images have no colour samples to scrub.`);
@@ -116,8 +138,8 @@
 
     scrub_prnu(facts, prefs, env) {
       if (!facts) return ok();
-      if (jpegStays(facts, prefs) && bitExact(prefs)) {
-        return no('It changes pixels, so it cannot be combined with the JPEG options that keep the data bit-exact.');
+      if (jpegStays(facts, prefs) && jpegDataOn(prefs)) {
+        return no(jpegDataBlocks(prefs, 'It changes pixels, so it cannot be used while', 'disrupt the fingerprint'));
       }
       const min = (env.limits && env.limits.prnu_min_side) || 0;
       if (smallSide(facts) < min) {
