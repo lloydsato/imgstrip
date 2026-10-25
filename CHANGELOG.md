@@ -16,7 +16,8 @@ tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `
   been committed). It is there now: every Atheris target in `fuzz/targets.py` runs for a minute on each push and pull
   request and for half an hour each night, and a second job fuzzes the decoders through a Pillow built with
   AddressSanitizer and UndefinedBehaviorSanitizer; a crashing input is kept as an artifact.
-  `tests/test_fuzz_targets.py` checks that the workflow lists every target.
+  `tests/test_fuzz_targets.py` checks that the workflow lists every target (and skips where the file is not in the
+  checkout, as in a source distribution).
 - **`--json` now lists a path that cannot be used** (missing, a directory without `-r`, not a regular file) as a
   `failed` record in `files`, with its message, instead of counting it in the summary only.
 - `--c2pa-date` and the other credential options without `--c2pa` now say "only works" for one option and "only

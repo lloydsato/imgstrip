@@ -70,7 +70,10 @@ def test_inputs_the_fuzzer_found_stay_fixed(path):
 
 
 def test_the_fuzz_workflow_runs_every_target():
-    workflow = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "fuzz.yml").read_text()
+    path = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "fuzz.yml"
+    if not path.is_file():  # a source distribution, or a copy of the package without the repository's CI files
+        pytest.skip("the fuzz workflow is not part of this checkout")
+    workflow = path.read_text()
     listed = re.search(r"target: \[([^\]]+)\]", workflow)
     assert listed, "no target matrix in fuzz.yml"
     assert [t.strip() for t in listed.group(1).split(",")] == list(targets.TARGETS)
