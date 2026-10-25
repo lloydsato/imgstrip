@@ -3,7 +3,7 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
-## [Unreleased]
+## [1.2.6]
 
 ### Fixed
 
