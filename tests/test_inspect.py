@@ -107,7 +107,7 @@ def test_truncation_never_crashes(fx, name):
     data = fx[name]
     for cut in (1, 7, len(data) // 3, len(data) // 2, len(data) - 1):
         report = inspect_bytes(data[:cut])  # must return, never raise
-        assert report.error or report.findings or report.format is None or True
+        assert isinstance(report.findings, list)
 
 
 def test_unknown_format():

@@ -353,9 +353,14 @@ def options_from_args(args) -> Options:
 # --------------------------------------------------------------------------
 
 
-def discover(paths: list[str], recursive: bool, suffix: str, errors: list[str]) -> list[Task]:
+def discover(paths: list[str], recursive: bool, suffix: str, problems: list[Outcome]) -> list[Task]:
+    """The files to work on; a path that cannot be used is added to ``problems`` as a failed outcome."""
     tasks: list[Task] = []
     seen: set[str] = set()
+
+    def fail(raw: str, message: str) -> None:
+        problems.append(Outcome(Task(raw, None), "failed", message=message))
+
     for raw in paths:
         if raw == STDIO:
             tasks.append(Task(STDIO, None))
@@ -363,7 +368,7 @@ def discover(paths: list[str], recursive: bool, suffix: str, errors: list[str]) 
         path = Path(raw)
         if path.is_dir():
             if not recursive:
-                errors.append(f"{raw}: is a directory (use -r to process directories)")
+                fail(raw, "is a directory (use -r to process directories)")
                 continue
             for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
                 # Skip hidden directories (.git, .thumbnails, ...) and keep a stable order.
@@ -381,14 +386,14 @@ def discover(paths: list[str], recursive: bool, suffix: str, errors: list[str]) 
                         tasks.append(Task(str(full), path, from_walk=True))
         elif path.exists():
             if not path.is_file():
-                errors.append(f"{raw}: not a regular file")
+                fail(raw, "not a regular file")
                 continue
             key = os.path.realpath(path)
             if key not in seen:
                 seen.add(key)
                 tasks.append(Task(str(path), None))
         else:
-            errors.append(f"{raw}: no such file or directory")
+            fail(raw, "no such file or directory")
     return tasks
 
 
@@ -437,11 +442,6 @@ def plan_destination(task: Task, fmt: str, args, single: bool, input_format: str
         return STDIO
     name = (secrets.token_hex(8) if args.random_name else stem + args.suffix) + ext
     return str(Path(task.source).with_name(name))
-
-
-def atomic_write(dest: str, data: bytes, mode: int | None) -> None:
-    """Replace ``dest`` with ``data`` in one rename (see ``fileio.replace_atomic``)."""
-    replace_atomic(dest, data, mode)
 
 
 # --------------------------------------------------------------------------
@@ -707,7 +707,7 @@ def _write_outcome(outcome: Outcome, args, planned: set[str]) -> None:
 
 def _work(task: Task, options: Options, args, single: bool, anchors: bytes | None = None) -> Outcome:
     if args.c2pa_verify:
-        return verify_one(task, args, anchors, None)
+        return verify_one(task, args, anchors)
     if args.check:
         return check_one(task, args.deep)
     return strip_one(task, options, args, single)
@@ -930,7 +930,7 @@ def make_test_identity_files(args) -> int:
     return EXIT_OK
 
 
-def verify_one(task: Task, args, anchors: bytes | None, originals: dict | None) -> Outcome:
+def verify_one(task: Task, args, anchors: bytes | None) -> Outcome:
     from . import credentials
 
     try:
@@ -1178,7 +1178,7 @@ def _check_credential_options(args, parser) -> None:
         if args.c2pa_receipt and not args.c2pa_verify:
             used.append("--c2pa-receipt")
         if used:
-            parser.error(f"{', '.join(used)} only work with --c2pa")
+            parser.error(f"{', '.join(used)} only {'works' if len(used) == 1 else 'work'} with --c2pa")
     if args.c2pa_original and not args.c2pa_verify:
         parser.error("--c2pa-original only applies with --c2pa-verify")
     if args.c2pa_trust_anchors and not (args.c2pa or args.c2pa_verify):
@@ -1222,10 +1222,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.paths.count(STDIO) > 1:
         parser.error("stdin can only be given once")
 
-    errors: list[str] = []
-    tasks = discover(args.paths, args.recursive, args.suffix if not args.in_place else "", errors)
-    for e in errors:
-        print(f"FAILED   {e}", file=sys.stderr)
+    problems: list[Outcome] = []
+    tasks = discover(args.paths, args.recursive, args.suffix if not args.in_place else "", problems)
     single = len(tasks) == 1 and not any(Path(p).is_dir() for p in args.paths if p != STDIO)
     if args.output == STDIO and len(tasks) > 1:
         parser.error("--output - (stdout) needs exactly one input")
@@ -1260,8 +1258,10 @@ def main(argv: list[str] | None = None) -> int:
         "verified": 0,
         "unverified": 0,
         "skipped": 0,
-        "failed": len(errors),
+        "failed": len(problems),
     }
+    for outcome in problems:  # reported like any other failure, so --json lists them too
+        reporter.emit(outcome)
     planned: set[str] = set()
     signing: Signing | None = None
     anchors = None

@@ -174,7 +174,7 @@ def test_stdin_to_stdout_carries_the_credential(creds, ids, signer):
 @pytest.mark.parametrize(
     "extra, message",
     [
-        (["--c2pa-receipt", "r.json"], "only work with --c2pa"),
+        (["--c2pa-receipt", "r.json"], "--c2pa-receipt only works with --c2pa"),
         (["--c2pa-trust-anchors", "x.pem", "--check"], "only applies with"),
         (["--c2pa-original", "x.png"], "only applies with --c2pa-verify"),
         (["--c2pa-verify", "--c2pa-original", "x.png"], "needs --c2pa-receipt"),
@@ -199,7 +199,12 @@ def test_a_commitment_and_its_receipt_go_together(ids, photo, capsys):
 )
 def test_credential_options_without_the_toggle_are_refused(photo, capsys, flag):
     assert exit_code([*flag.split(), str(photo)]) == 2
-    assert "only work with --c2pa" in capsys.readouterr().err
+    assert f"{flag.split()[0]} only works with --c2pa" in capsys.readouterr().err
+
+
+def test_several_credential_options_without_the_toggle_are_named_together(photo, capsys):
+    assert exit_code(["--c2pa-date", "minute", "--c2pa-detail", "full", str(photo)]) == 2
+    assert "--c2pa-date, --c2pa-detail only work with --c2pa" in capsys.readouterr().err
 
 
 def test_the_toggle_without_an_identity_is_refused(photo, capsys):

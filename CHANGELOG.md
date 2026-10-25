@@ -3,6 +3,40 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
+## [Unreleased]
+
+### Fixed
+
+- **Converting to HEIC/HEIF failed with `KeyError: 'HEIF'` when the input was not itself a HEIC/HEIF file** (command
+  line and web app, with the default decoder sandbox). The HEIF writer is registered by the plugin set-up that opening
+  an image does, and with the decode stage in the sandbox the process that encodes had never opened one. The encode
+  stage now registers the plugins itself. Test: `tests/test_sandbox.py` (it runs in a fresh process, because every
+  other test has already opened an image).
+- **The fuzzing workflow named in 1.2.5 was missing from the repository** (`.github/workflows/fuzz.yml` had never
+  been committed). It is there now: every Atheris target in `fuzz/targets.py` runs for a minute on each push and pull
+  request and for half an hour each night, and a second job fuzzes the decoders through a Pillow built with
+  AddressSanitizer and UndefinedBehaviorSanitizer; a crashing input is kept as an artifact.
+  `tests/test_fuzz_targets.py` checks that the workflow lists every target.
+- **`--json` now lists a path that cannot be used** (missing, a directory without `-r`, not a regular file) as a
+  `failed` record in `files`, with its message, instead of counting it in the summary only.
+- `--c2pa-date` and the other credential options without `--c2pa` now say "only works" for one option and "only
+  work" for several.
+- The web app's save-to-folder no longer reads each cleaned file whole into memory (a batch ZIP can be gigabytes):
+  `fileio.write_new` and `replace_atomic` accept the path of a file to copy as well as bytes. An unexpected server
+  error on a POST or DELETE now answers with the exception type only, like a GET, because its message can quote a
+  path.
+- The FFmpeg reader used by `--self-test` and the differential tests asks for every frame with `-fps_mode passthrough`
+  where FFmpeg has it (5.1 and later) instead of the deprecated `-vsync 0`. The exiftool cross-check reports a file
+  exiftool cannot read, or one it flags with an error, instead of crashing or passing it (`tests/test_selftest.py`).
+
+### Changed
+
+- The layout test that follows a review chip waits for the smooth scroll to stop instead of sleeping 700 ms, which a
+  long list on a slow machine overran; a truncation test no longer ends in `... or True`.
+- Removed code nothing used: `cli.atomic_write`, the `originals` parameter of `cli.verify_one`,
+  `dct.same_coefficients` and `credentials.seal`. `jumbf.extract_store` no longer reports a `KeyError` raised inside
+  an extractor as "cannot carry Content Credentials". Added a `.gitignore`.
+
 ## [1.2.5]
 
 This release answers the preprint *imgstrip: Sanitising Images by Rebuilding Them from Their Pixels, with Fail-Closed

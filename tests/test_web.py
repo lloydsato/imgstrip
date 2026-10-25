@@ -395,6 +395,21 @@ def test_write_new_refuses_existing(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["a.jpg"]
 
 
+def test_write_new_can_copy_a_file_instead_of_holding_it_in_memory(tmp_path):
+    source = tmp_path / "result.bin"
+    content = os.urandom(3 * (1 << 20) + 17)  # more than one copy chunk
+    source.write_bytes(content)
+    dest = tmp_path / "out" / "copy.bin"
+    web.write_new(dest, source)
+    assert dest.read_bytes() == content
+    with pytest.raises(FileExistsError):
+        web.write_new(dest, source)
+    assert [p.name for p in dest.parent.iterdir()] == ["copy.bin"]
+    with pytest.raises(FileNotFoundError):
+        web.write_new(tmp_path / "other.bin", tmp_path / "missing.bin")
+    assert not (tmp_path / "other.bin").exists() and not [p for p in tmp_path.iterdir() if p.name.startswith(".imgstrip-")]
+
+
 def test_delete_and_reset(app):
     a = app.clean(fixtures.jpeg_everything())
     b = app.clean(fixtures.jpeg_everything())
@@ -864,6 +879,7 @@ def test_zip_of_one_empty_file_and_zip_leaves_no_partial_file_on_failure(app, mo
     monkeypatch.setattr(web.shutil, "copyfileobj", boom)
     status, body = app.json("POST", "/api/zip", {"ids": [rid]})
     assert status == 500
+    assert body["error"] == "Internal error (OSError).", "the type only: a message can quote a path"
     assert sorted(p.name for p in app.session.dir.iterdir()) == before, "a failed ZIP must not leave a stray file"
     # ... and the earlier ZIP is still the one on offer
     monkeypatch.undo()

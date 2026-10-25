@@ -923,7 +923,7 @@ def save_results(session: Session, ids: list[str], folder: str) -> dict:
         name = unique_name(item.filename, taken)
         dest = target / name
         try:
-            write_new(dest, item.path.read_bytes())
+            write_new(dest, item.path)  # copied in chunks: a batch ZIP can be gigabytes
         except FileExistsError:
             files.append({"id": rid, "ok": False, "message": f"{name} appeared in the folder meanwhile; save again."})
             continue
@@ -1170,7 +1170,7 @@ class Handler(BaseHTTPRequestHandler):
         except ApiError as exc:
             self._error(exc.status, exc.message, exc.code)
         except Exception as exc:  # noqa: BLE001 - one bad file must never take the server down
-            self._error(500, f"Internal error ({type(exc).__name__}: {exc}).")
+            self._error(500, f"Internal error ({type(exc).__name__}).")  # never the message: it may quote a path
 
     # ---- pages ------------------------------------------------------------
 

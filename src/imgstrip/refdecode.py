@@ -33,8 +33,8 @@ from __future__ import annotations
 
 import struct
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 
@@ -475,7 +475,7 @@ def _has_adobe_segment(data: bytes) -> bool:
     """Whether an APP14 'Adobe' segment comes before the first scan."""
     end = data.find(b"\xff\xda")
     i = data.find(b"\xff\xee", 2, end)
-    while 0 <= i:
+    while i >= 0:
         if data[i + 4 : i + 9] == b"Adobe":
             return True
         i = data.find(b"\xff\xee", i + 2, end)

@@ -327,6 +327,36 @@ def test_a_script_without_a_main_guard_is_not_run_again(tmp_path):
     assert out.stdout.splitlines() == ["module body ran", "cleaned True"]
 
 
+@pytest.mark.skipif(not core.heif_available(), reason="needs pillow-heif")
+@pytest.mark.parametrize("name", ["jpeg_everything.jpg", "png_everything.png", "webp_lossy.webp"])
+def test_a_fresh_process_can_write_heif_from_a_format_it_never_opened_as_heif(fx, tmp_path, name):
+    """The HEIF writer is registered by the plugin set-up that opening an image does.  With the decode stage in the
+    sandbox, a process that has only ever sent images away used to reach the encoder without it (KeyError: 'HEIF').
+    The test process cannot show that, because some earlier test has always opened an image here, and the child gets
+    its input as a file because building the fixtures (one is a HEIC) would register the writer itself."""
+    (tmp_path / "input").write_bytes(fx[name])
+    script = tmp_path / "convert.py"
+    script.write_text(
+        textwrap.dedent(
+            """
+            from pathlib import Path
+
+            from imgstrip import strip_image
+            from imgstrip.core import Options
+
+            result = strip_image(Path("input").read_bytes(), Options(format="heic"))
+            print(result.output_format, result.data[4:12])
+            """
+        )
+    )
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
+    out = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=120, env=env, cwd=tmp_path
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split(None, 1)[0] == "HEIF", out.stdout
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
 @pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
 def test_a_forked_child_starts_its_own_zygote(fx):

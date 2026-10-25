@@ -871,16 +871,6 @@ def write(frame: Frame) -> bytes:
     return bytes(out)
 
 
-def same_coefficients(a: Frame, b: Frame) -> bool:
-    """True when two frames decode to the same picture data: geometry, tables and every coefficient."""
-    if (a.width, a.height, a.mcus_x, a.mcus_y, len(a.comps)) != (b.width, b.height, b.mcus_x, b.mcus_y, len(b.comps)):
-        return False
-    return all(
-        x.h == y.h and x.v == y.v and np.array_equal(x.qt, y.qt) and np.array_equal(x.coef, y.coef)
-        for x, y in zip(a.comps, b.comps, strict=True)
-    )
-
-
 # --------------------------------------------------------------------------
 # Scrubbing
 # --------------------------------------------------------------------------

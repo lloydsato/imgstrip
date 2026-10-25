@@ -222,7 +222,7 @@ def _canonical_xyz(body: bytes) -> bytes:
     return b"XYZ \x00\x00\x00\x00" + body[8:20]
 
 
-def _canonical_curve(curve: "_Curve") -> bytes:
+def _canonical_curve(curve: _Curve) -> bytes:
     """A fresh tone-curve tag written from the parsed curve, so nothing else in the source tag survives.
 
     Table entries are rounded to 12 bits.  The low bits of a 16-bit entry are invisible to the 1/255

@@ -140,7 +140,14 @@ SCRIPT = textwrap.dedent(
         const chip = await page.$('.review-group .chip:not(.chip-more)');
         r.chipName = await chip.getAttribute('title');
         await chip.click();
-        await page.waitForTimeout(700);
+        // The scroll is smooth, so wait for it to stop (the page position unchanged for 300 ms) instead of guessing a
+        // duration: a long list on a slow machine takes more than a second.
+        await page.waitForFunction(() => {
+          const now = performance.now();
+          const w = window.__scrollWatch || (window.__scrollWatch = { y: -1, since: now });
+          if (w.y !== window.scrollY) { w.y = window.scrollY; w.since = now; }
+          return now - w.since > 300;
+        }, null, { timeout: 15000, polling: 50 });
         r.chipTarget = await page.evaluate((name) => {
           const row = Array.from(document.querySelectorAll('.file')).find((f) => f.querySelector('.file-name').textContent === name);
           if (!row) return null;

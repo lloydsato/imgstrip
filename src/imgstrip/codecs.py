@@ -27,7 +27,7 @@ from PIL import Image
 # --------------------------------------------------------------------------
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _picked(mode: str, rawmode: str) -> tuple[int, ...] | None:
     """Which bytes (1-based) of a 16-bit-per-sample pixel an unpacker keeps."""
     width = len(mode) * 2
@@ -44,7 +44,7 @@ def _complement_rawmode(mode: str, rawmode: str) -> str | None:
     if hi is None:
         return None
     want = tuple(b + 1 if (b - 1) % 2 == 0 else b - 1 for b in hi)
-    prefix = rawmode.split(";")[0]
+    prefix = rawmode.split(";", maxsplit=1)[0]
     for suffix in (";16B", ";16L", ";16N"):
         if _picked(mode, prefix + suffix) == want:
             return prefix + suffix

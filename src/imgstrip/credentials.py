@@ -1161,12 +1161,6 @@ def sign(
     return Signed(signed, credential, receipt)
 
 
-def seal(source: bytes, result: Result, options: Options, identity: Identity, config: Config | None = None) -> Signed:
-    """Everything in one call: gather evidence about ``result`` and sign it."""
-    evidence = gather_evidence(source, result, options)
-    return sign(result.data, evidence, identity, config)
-
-
 # --------------------------------------------------------------------------
 # Verifying what was just written (fail closed)
 # --------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import os
 import stat
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -32,6 +33,17 @@ def test_default_output_name_and_no_clobber(jpg, capsys):
     assert main([str(jpg)]) == 1
     assert "already exists" in capsys.readouterr().err
     assert main([str(jpg), "--force"]) == 0
+
+
+def test_paths_that_cannot_be_used_are_listed_in_the_json_report(tmp_path, jpg, capsys):
+    assert main(["--check", "--json", str(jpg), str(tmp_path / "missing.png"), str(tmp_path)]) == 1
+    report = json.loads(capsys.readouterr().out)
+    failed = {Path(f["file"]).name: f["message"] for f in report["files"] if f["status"] == "failed"}
+    assert failed == {
+        "missing.png": "no such file or directory",
+        tmp_path.name: "is a directory (use -r to process directories)",
+    }
+    assert report["summary"]["failed"] == 2 and report["summary"]["checked"] == 1
 
 
 def test_original_is_never_modified(jpg, fx):

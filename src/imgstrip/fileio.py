@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import errno
 import os
+import shutil
 import sys
 import tempfile
 
@@ -47,12 +48,19 @@ def default_mode() -> int:
     return 0o666 & ~_UMASK
 
 
-def _temporary(directory: str, data: bytes, mode: int | None) -> str:
-    """A complete, flushed temporary file in ``directory`` holding ``data`` (removed again on any failure)."""
+def _temporary(directory: str, data: bytes | os.PathLike, mode: int | None) -> str:
+    """A complete, flushed temporary file in ``directory`` holding ``data`` (removed again on any failure).
+
+    ``data`` is the content, or the path of a file to copy it from (so a large file is never held in memory).
+    """
     fd, tmp = tempfile.mkstemp(prefix=_TEMP_PREFIX, suffix=".tmp", dir=directory)
     try:
         with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
+            if isinstance(data, os.PathLike):
+                with open(data, "rb") as src:
+                    shutil.copyfileobj(src, fh, 1 << 20)
+            else:
+                fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
         os.chmod(tmp, mode if mode is not None else default_mode())
@@ -89,8 +97,8 @@ def _directory_of(dest: str) -> str:
     return directory
 
 
-def replace_atomic(dest: str | os.PathLike, data: bytes, mode: int | None = None) -> None:
-    """Write ``data`` to ``dest``, replacing whatever is there in one rename."""
+def replace_atomic(dest: str | os.PathLike, data: bytes | os.PathLike, mode: int | None = None) -> None:
+    """Write ``data`` (bytes, or the path of a file to copy) to ``dest``, replacing whatever is there in one rename."""
     dest = os.fspath(dest)
     directory = _directory_of(dest)
     tmp = _temporary(directory, data, mode)
@@ -136,8 +144,9 @@ def _rename_noreplace(src: str, dest: str) -> bool:
     raise OSError(err, os.strerror(err), dest)
 
 
-def write_new(dest: str | os.PathLike, data: bytes, mode: int | None = None) -> None:
-    """Write ``data`` to ``dest`` completely or not at all, and never replace anything already there."""
+def write_new(dest: str | os.PathLike, data: bytes | os.PathLike, mode: int | None = None) -> None:
+    """Write ``data`` (bytes, or the path of a file to copy) to ``dest`` completely or not at all, and never replace
+    anything already there."""
     dest = os.fspath(dest)
     if os.path.lexists(dest):
         raise _exists_error(dest)

@@ -103,7 +103,7 @@ _ORIENT_TEXT = {
 }
 
 
-def dct_mode(options: "Options") -> str:
+def dct_mode(options: Options) -> str:
     """The normalised --scrub-dct setting: "off", "canonical" or "full"."""
     value = options.scrub_dct
     if value is True:
@@ -945,6 +945,9 @@ class _Job:
         self.source_subsampling = decoded.source_subsampling
 
     def _finish(self, decoded: Decoded) -> Result:
+        # With the decode stage in the sandbox this process may never have opened an image, and the HEIF writer is
+        # only registered by the plugin set-up that opening does.
+        _register_plugins()
         self._adopt(decoded)
         if decoded.kind == "jpeg":
             return self._finish_jpeg(decoded)

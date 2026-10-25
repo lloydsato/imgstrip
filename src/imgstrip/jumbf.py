@@ -509,9 +509,10 @@ _EXTRACT = {
 
 def extract_store(data: bytes, fmt: str) -> bytes:
     """The raw manifest store embedded in ``data`` (a container format name as in ``inspect``)."""
+    extract = _EXTRACT.get(fmt)
+    if extract is None:
+        raise JumbfError(f"{fmt} files cannot carry Content Credentials")
     try:
-        return _EXTRACT[fmt](data)
-    except KeyError:
-        raise JumbfError(f"{fmt} files cannot carry Content Credentials") from None
+        return extract(data)
     except (struct.error, IndexError) as exc:
         raise JumbfError(f"malformed {fmt} container ({exc})") from None

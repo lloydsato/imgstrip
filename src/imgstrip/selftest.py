@@ -67,10 +67,15 @@ def exiftool_findings(data: bytes, suffix: str, allow_icc: bool = False) -> list
         path = fh.name
     try:
         proc = subprocess.run([exe, "-j", "-a", "-G1", "-u", path], capture_output=True, text=True, timeout=60)
-        tags = json.loads(proc.stdout)[0]
+        try:
+            tags = json.loads(proc.stdout)[0]
+        except (ValueError, IndexError):  # exiftool printed no report: it could not read the file at all
+            return [f"exiftool could not read the output: {(proc.stderr or proc.stdout).strip()[:120]}"]
     finally:
         os.unlink(path)
     bad = []
+    if "ExifTool:Error" in tags:  # a file exiftool cannot parse is not one it has vouched for
+        bad.append(f"ExifTool:Error={str(tags['ExifTool:Error'])[:60]}")
     for key, value in tags.items():
         if ":" not in key:
             continue

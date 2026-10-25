@@ -19,6 +19,8 @@ read a format says so instead of guessing.  Used by ``imgstrip --self-test`` and
 
 from __future__ import annotations
 
+import functools
+import re
 import shutil
 import struct
 import subprocess
@@ -358,6 +360,23 @@ def _to16(frames: list[np.ndarray]) -> list[np.ndarray]:
     return [normalise((f[..., 0::2].astype(np.uint16) << 8) | f[..., 1::2]) for f in frames]
 
 
+@functools.cache
+def _passthrough_flags(ffmpeg: str) -> tuple[str, ...]:
+    """The options that make FFmpeg emit every decoded frame once, with no dropping or duplicating.
+
+    ``-fps_mode passthrough`` replaces ``-vsync 0`` from FFmpeg 5.1 on (``-vsync`` is deprecated there and may go);
+    older releases only know ``-vsync``.  A build that does not say its version (a git build) is taken to be new.
+    """
+    try:
+        banner = subprocess.run([ffmpeg, "-version"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ("-vsync", "0")
+    found = re.search(r"version\s+n?(\d+)\.(\d+)", banner)
+    if found and (int(found[1]), int(found[2])) < (5, 1):
+        return ("-vsync", "0")
+    return ("-fps_mode", "passthrough")
+
+
 class _External:
     name = ""
     formats: frozenset[str] = frozenset()
@@ -465,8 +484,7 @@ class FFmpeg(_External):
                     "-noautorotate",
                     "-i",
                     str(path),
-                    "-vsync",
-                    "0",
+                    *_passthrough_flags(self.ffmpeg),
                     "-f",
                     "rawvideo",
                     "-pix_fmt",

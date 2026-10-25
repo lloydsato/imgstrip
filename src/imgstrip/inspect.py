@@ -31,7 +31,7 @@ C2PA_LABEL = "C2PA content credentials"
 C2PA_BMFF_UUID = bytes.fromhex("d8fec3d61b0e483c92975828877ec481")
 
 
-def is_c2pa_finding(finding: "Finding") -> bool:
+def is_c2pa_finding(finding: Finding) -> bool:
     return C2PA_LABEL in finding.label
 
 
@@ -899,9 +899,7 @@ def _inspect_webp(d: bytes, r: Report) -> None:
         elif fourcc in (b"VP8 ", b"VP8L"):
             image_chunks += 1
             r.info["lossless"] = fourcc == b"VP8L"
-        elif fourcc == b"ALPH":
-            pass
-        elif fourcc == b"ANIM":
+        elif fourcc in (b"ALPH", b"ANIM"):
             pass
         elif fourcc == b"ANMF":
             image_chunks += 1

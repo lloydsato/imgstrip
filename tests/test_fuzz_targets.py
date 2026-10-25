@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -66,3 +67,11 @@ REGRESSIONS = sorted((Path(__file__).resolve().parent.parent / "fuzz" / "regress
 def test_inputs_the_fuzzer_found_stay_fixed(path):
     """Each file is named <target>-<what it found>; it once made that target fail."""
     targets.TARGETS[path.name.split("-")[0]](path.read_bytes())
+
+
+def test_the_fuzz_workflow_runs_every_target():
+    workflow = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "fuzz.yml").read_text()
+    listed = re.search(r"target: \[([^\]]+)\]", workflow)
+    assert listed, "no target matrix in fuzz.yml"
+    assert [t.strip() for t in listed.group(1).split(",")] == list(targets.TARGETS)
+    assert "python fuzz/run.py ${{ matrix.target }}" in workflow
