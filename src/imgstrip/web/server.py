@@ -48,8 +48,9 @@ from pathlib import Path
 
 from .. import __version__
 from .. import credentials, stego
-from ..cli import RAW_EXTENSIONS, atomic_write, output_extension
+from ..cli import RAW_EXTENSIONS, output_extension
 from ..core import EXTENSIONS, OUTPUT_FORMATS, Options, StripError, heif_available, strip_image
+from ..fileio import write_new
 from ..inspect import HIDDEN, METADATA, Finding, inspect_bytes
 
 STATIC_DIR = Path(__file__).with_name("static")
@@ -59,7 +60,7 @@ MAX_JSON = 1 << 20
 MAX_NAME = 180
 DEEP_SCAN_MAX_PIXELS = 40_000_000  # keeps a scan to a few seconds (it reads the picture in strips, so not memory)
 PREVIEW_MAX_PIXELS = 100_000_000
-WEB_MAX_PIXELS = 100_000_000  # the CLI default is 300 MP; a browser upload is buffered whole, so the web app is stricter
+WEB_MAX_PIXELS = 100_000_000  # the CLI default is 150 MP; a browser upload is buffered whole, so the web app is stricter
 MAX_CONNECTIONS = 32  # simultaneous connections; extra ones are closed at once
 SOCKET_TIMEOUT = 30  # seconds a connection may sit idle in the middle of a read
 DEFAULT_SUFFIX = ".clean"
@@ -614,6 +615,30 @@ def test_identity_payload(session: Session, payload: dict) -> dict:
 
 def _probe(data: bytes) -> tuple[str | None, tuple[int, int] | None]:
     """Format and size from the image header alone, for containers the inspector does not parse."""
+    return _survey(data)[0]
+
+
+def image_facts(data: bytes) -> dict | None:
+    """What the options panel needs to judge which options apply to an image, read from its header alone.
+
+    None when the file cannot be opened: the page then leaves every option available for it.
+    """
+    return _survey(data)[1]
+
+
+def _survey(data: bytes) -> tuple[tuple[str | None, tuple[int, int] | None], dict | None]:
+    """``_probe`` and ``image_facts`` together, read in the decoder sandbox unless it is switched off."""
+    from .. import sandbox
+
+    if not sandbox.enabled():
+        return _probe_here(data), image_facts_here(data)
+    try:
+        return sandbox.facts(data)
+    except StripError:  # a decoder that fails on the header: not an image this app can decode
+        return (None, None), None
+
+
+def _probe_here(data: bytes) -> tuple[str | None, tuple[int, int] | None]:
     from ..core import _pillow_guard, canonical_format, open_image
 
     try:
@@ -624,11 +649,7 @@ def _probe(data: bytes) -> tuple[str | None, tuple[int, int] | None]:
         return None, None
 
 
-def image_facts(data: bytes) -> dict | None:
-    """What the options panel needs to judge which options apply to an image, read from its header alone.
-
-    None when the file cannot be opened: the page then leaves every option available for it.
-    """
+def image_facts_here(data: bytes) -> dict | None:
     from ..core import OUTPUT_FORMATS, _orientation, _pillow_guard, canonical_format, open_image
 
     try:
@@ -636,7 +657,7 @@ def image_facts(data: bytes) -> dict | None:
             im = open_image(data)
             fmt = canonical_format(im.format)
             frames = getattr(im, "n_frames", 1) or 1
-            # The same test the engine uses to decide that there is a profile to manage (see _Job._run).
+            # The same test the engine uses to decide that there is a profile to manage (see _Job._decode).
             profile = bool(im.info.get("icc_profile")) or ("gamma" in im.info and "srgb" not in im.info)
             return {
                 "format": fmt,
@@ -662,9 +683,9 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
     size = report.info.get("size")
     decodable = report.format
     raw = camera_raw_kind(data)
-    header_size = None
+    (probed, header_size), facts = _survey(data)
     if report.format is None:
-        decodable, header_size = _probe(data)
+        decodable = probed
         size = header_size
     pixels_scanned = False
     verdict = stego.not_scanned("the pixels were not scanned (turn on Deep scan, or choose Scan the pixels too)")
@@ -673,8 +694,6 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
     if deep and decodable and not raw:
         # The container summary does not always know the size (simple WebP, oversized GIF
         # frames), so ask the decoder before committing to a scan.
-        if header_size is None:
-            _, header_size = _probe(data)
         dims = header_size or size
         if not dims or dims[0] * dims[1] > DEEP_SCAN_MAX_PIXELS:
             notes.append(
@@ -682,10 +701,10 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
             )
             verdict = stego.not_scanned(f"the image is over {DEEP_SCAN_MAX_PIXELS // 1_000_000} megapixels")
         else:
-            from ..analysis import scan_pixels
+            from .. import analysis
 
             try:
-                scan = scan_pixels(data)
+                scan = analysis.scan(data)
                 findings += scan.findings
                 verdict = scan.verdict
                 pixels_scanned = True
@@ -705,7 +724,7 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
         "format": report.format,
         "decodable": decodable,
         "raw": raw,
-        "facts": None if raw else image_facts(data),
+        "facts": None if raw else facts,
         "credential": credential,
         "pixels_scanned": pixels_scanned,
         "size": list(size) if size else None,
@@ -721,17 +740,33 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
 
 
 def preview_bytes(data: bytes, edge: int = 160) -> bytes:
-    """A small PNG built from pixels only, for formats the browser cannot show."""
+    """A small PNG built from pixels only, for formats the browser cannot show.  The input is decoded in the
+    sandbox unless it is switched off; this process only encodes the pixels it hands back."""
+    from PIL import Image
+
+    from .. import sandbox
+    from ..core import fresh
+
+    limit = PREVIEW_MAX_PIXELS
+    pixels = sandbox.preview(data, edge, limit) if sandbox.enabled() else preview_pixels_here(data, edge, limit)
+    out = io.BytesIO()
+    fresh(Image.fromarray(pixels, "RGBA" if pixels.shape[2] == 4 else "RGB")).save(out, "PNG")
+    return out.getvalue()
+
+
+def preview_pixels_here(data: bytes, edge: int, limit: int):
+    """The pixels of a preview at most ``edge`` pixels on a side, as an RGB or RGBA array, of an image of at most
+    ``limit`` pixels."""
     from PIL import Image, ImageOps
 
-    from ..core import _pillow_guard, fresh, open_image
+    from ..core import _pillow_guard, open_image
 
     import numpy as np
 
     caught: list[str] = []
     with _pillow_guard(caught):
         im = open_image(data)
-        if im.size[0] * im.size[1] > PREVIEW_MAX_PIXELS:
+        if im.size[0] * im.size[1] > limit:
             raise StripError("too large for a preview")
         im.draft("RGB", (edge * 2, edge * 2))  # JPEG only: decode at reduced scale
         try:
@@ -747,9 +782,7 @@ def preview_bytes(data: bytes, edge: int = 160) -> bytes:
             im = Image.fromarray(arr.clip(0, 255).astype(np.uint8), "L")
         im = im.convert("RGBA" if "A" in im.getbands() or im.mode == "P" else "RGB")
         im.thumbnail((edge, edge), Image.Resampling.LANCZOS)
-        out = io.BytesIO()
-        fresh(im).save(out, "PNG")
-        return out.getvalue()
+        return np.array(im)
 
 
 def _credential_payload(signed, evidence, assessment, config) -> dict:
@@ -825,6 +858,8 @@ def clean_payload(
         "size": list(result.size),
         "frames": result.frames,
         "pixels_exact": result.pixels_exact,
+        "verified_by": list(result.verified_by),
+        "kept": dict(result.kept),
         "lossy": not result.verified_exact,
         "scrubbed": scrubbed,  # what the engine did, not what was asked for
         "scrub_requested": options.scrub_lsb,
@@ -863,33 +898,6 @@ def zip_results(session: Session, ids: list[str]) -> dict:
     rid = session.put_with(name, "application/zip", write)
     session.replace_zip(rid)
     return {"id": rid, "filename": name, "bytes": session.get(rid).size}
-
-
-def write_new(dest: Path, data: bytes) -> None:
-    """Write ``dest`` completely or not at all, and never replace an existing file."""
-    if dest.exists():
-        raise FileExistsError(str(dest))
-    tmp = dest.with_name(f".imgstrip-{secrets.token_hex(6)}.tmp")
-    atomic_write(str(tmp), data, None)
-    try:
-        os.link(tmp, dest)  # fails if dest exists: no race with other writers
-    except FileExistsError:
-        tmp.unlink(missing_ok=True)
-        raise
-    except OSError:  # file systems without hard links (FAT, exFAT, some network shares)
-        try:  # claim the name exclusively, then swap our own placeholder for the content
-            os.close(os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
-        except FileExistsError:
-            tmp.unlink(missing_ok=True)
-            raise
-        try:
-            os.replace(tmp, dest)
-        except OSError:
-            dest.unlink(missing_ok=True)
-            tmp.unlink(missing_ok=True)
-            raise
-    else:
-        tmp.unlink(missing_ok=True)
 
 
 def save_results(session: Session, ids: list[str], folder: str) -> dict:
@@ -1265,10 +1273,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print the link instead of opening a browser (recommended on computers shared with other users)",
     )
+    p.add_argument(
+        "--no-sandbox",
+        action="store_true",
+        help="decode uploads in this process instead of a separate, restricted one (a decoder bug triggered by a "
+        "hostile file then runs with everything this process holds, including the signing identity)",
+    )
     p.add_argument("--version", action="version", version=f"imgstrip {__version__}")
     args = p.parse_args(argv)
     if not 0 <= args.port <= 65535:
         p.error("--port must be between 0 and 65535")
+    if args.no_sandbox:
+        from .. import sandbox
+
+        sandbox.set_default(False)
     sweep_stale_sessions()
     httpd, session = make_server(args.port)
     atexit.register(session.close)

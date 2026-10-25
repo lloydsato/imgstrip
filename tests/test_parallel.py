@@ -149,3 +149,51 @@ def test_self_test_reports_a_surviving_canary(monkeypatch, fx):
     found, _, _ = selftest._run_variant(("png_everything.png", fx["png_everything.png"], Options(), "default", False))
     assert any("canary string survived" in p for p in found)
     assert all(p.startswith("png_everything.png: ") for p in found)
+
+
+GIB = 1 << 30
+
+
+@pytest.mark.parametrize(
+    ("available", "per_job", "expected"),
+    [
+        (None, 4 * GIB, 8),  # the system does not say: one per core
+        (64 * GIB, 1 * GIB, 8),  # plenty
+        (16 * GIB, 2 * GIB, 5),  # 12 GiB usable, 2.2 GiB per worker
+        (4 * GIB, 8 * GIB, 1),  # never fewer than one
+    ],
+)
+def test_the_automatic_worker_count_fits_in_memory(monkeypatch, available, per_job, expected):
+    monkeypatch.setattr(cli.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(cli, "_available_memory", lambda: available)
+    assert _worker_count(None, 50, per_job) == expected
+    assert _worker_count(6, 50, per_job) == 6  # an explicit -j is not second-guessed
+
+
+def _png_header(width, height, depth=8) -> bytes:
+    import struct
+    import zlib
+
+    body = struct.pack(">IIBBBBB", width, height, depth, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + body + struct.pack(">I", zlib.crc32(b"IHDR" + body))
+
+
+def test_the_peak_is_estimated_from_the_largest_files_headers(tmp_path):
+    small = tmp_path / "small.png"
+    small.write_bytes(_png_header(100, 100))
+    big = tmp_path / "big.png"
+    big.write_bytes(_png_header(10_000, 5_000) + b"\0" * 1000)  # larger on disk, so it is looked at
+    deep = tmp_path / "deep.png"
+    deep.write_bytes(_png_header(1_000, 1_000, depth=16) + b"\0" * 500)
+    tasks = [cli.Task(str(p), tmp_path) for p in (small, big, deep)]
+    assert cli._peak_estimate(tasks, 150_000_000) == 50_000_000 * cli.PEAK_BYTES_PER_PIXEL
+    assert cli._peak_estimate(tasks, 10_000_000) == 10_000_000 * cli.PEAK_BYTES_PER_PIXEL  # capped by --max-pixels
+    assert cli._peak_estimate([tasks[2]], 150_000_000) == 1_000_000 * cli.PEAK_BYTES_PER_PIXEL_16BIT
+    assert cli._peak_estimate([cli.Task(str(tmp_path / "gone.png"), tmp_path)], 150_000_000) is None
+
+
+def test_the_default_pixel_limit_is_150_megapixels():
+    from imgstrip.core import DEFAULT_MAX_PIXELS
+
+    assert Options().max_pixels == DEFAULT_MAX_PIXELS == 150_000_000
+    assert cli.build_parser().parse_args(["x.png"]).max_pixels == 150_000_000

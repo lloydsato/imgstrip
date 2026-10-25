@@ -328,7 +328,7 @@ def test_deep_does_not_apply_to_credential_verification(files):
     assert exc.value.code == 2
 
 
-def test_a_pixel_scan_that_fails_is_not_scanned_not_an_error(files, capsys, monkeypatch):
+def test_a_pixel_scan_that_fails_is_not_scanned_not_an_error(files, capsys, monkeypatch, in_process):
     from imgstrip import analysis
     from imgstrip.core import StripError
 

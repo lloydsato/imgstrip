@@ -43,6 +43,7 @@ _CLEAN_ONE_PHOTO = """
 import io, sys
 import numpy as np
 from PIL import Image
+from imgstrip import sandbox
 from imgstrip.core import Options, strip_image
 w, h, fmt = 3000, 2000, sys.argv[1]
 small = np.random.default_rng(0).integers(0, 256, (h // 50 + 2, w // 50 + 2, 3), dtype=np.uint8)
@@ -51,21 +52,30 @@ exif[0x0112] = 6  # rotated, as phone photos usually are
 buf = io.BytesIO()
 Image.fromarray(small).resize((w, h), Image.BICUBIC).save(buf, fmt, **({"quality": 90, "exif": exif} if fmt == "JPEG" else {}))
 data = buf.getvalue()
+sandbox.probe_limits("/nonexistent", "/nonexistent")  # the zygote is started before the measurement
 with open("/proc/self/clear_refs", "w") as fh:
     fh.write("5")  # resets the peak resident size to the current one
 status = lambda key: int(open("/proc/self/status").read().split(key + ":")[1].split()[0])
 base = status("VmRSS")
-strip_image(data, Options())
-print((status("VmHWM") - base) * 1024 / (w * h * 3))
+strip_image(data, Options(sandbox=sys.argv[2] == "on"))
+print((status("VmHWM") - base) * 1024 / (w * h * 3), (sandbox.last_peak() or 0) / (w * h * 3))
 """
 
 
 @pytest.mark.skipif(not os.access("/proc/self/clear_refs", os.W_OK), reason="needs Linux peak-RSS accounting")
+@pytest.mark.parametrize("sandboxed", ["on", "off"])
 @pytest.mark.parametrize("fmt", ["JPEG", "PNG"])
-def test_cleaning_a_photo_needs_a_few_copies_of_it(fmt):
-    """Decode, rotate, encode and verify a 6 MP photo: the whole-image code peaked at about 8.5 times its pixels."""
-    out = subprocess.run([sys.executable, "-c", _CLEAN_ONE_PHOTO, fmt], capture_output=True, text=True, check=True)
-    assert float(out.stdout) < 6.0, out.stdout
+def test_cleaning_a_photo_needs_a_few_copies_of_it(fmt, sandboxed):
+    """Decode, rotate, encode and verify a 6 MP photo: the whole-image code peaked at about 8.5 times its pixels.
+
+    With the sandbox the decode stage's peak is in its worker, which has exited by the time this process encodes, so
+    the two peaks do not add up; each is bounded on its own."""
+    out = subprocess.run(
+        [sys.executable, "-c", _CLEAN_ONE_PHOTO, fmt, sandboxed], capture_output=True, text=True, check=True
+    )
+    here, worker = map(float, out.stdout.split())
+    assert here < 6.0, out.stdout
+    assert worker < 3.0 if sandboxed == "on" else worker == 0, out.stdout
 
 
 def test_the_canonical_jpeg_writer_works_in_bands():
@@ -183,7 +193,7 @@ def test_the_integer_ws_terms_are_the_floating_point_formula_to_the_bit():
     [Options(), Options(format="PNG"), Options(format="GIF"), Options(format="WEBP"), Options(icc="sanitize")],
     ids=["default", "png", "gif", "webp", "icc"],
 )
-def test_one_row_strips_give_the_same_cleaned_files(monkeypatch, fx, options):
+def test_one_row_strips_give_the_same_cleaned_files(monkeypatch, in_process, fx, options):
     names = [n for n in fx if n.endswith((".png", ".gif", ".webp", ".tif", ".bmp"))] + ["jpeg_everything.jpg"]
     expected = {}
     for name in names:
@@ -200,7 +210,7 @@ def test_one_row_strips_give_the_same_cleaned_files(monkeypatch, fx, options):
         assert got == expected[name], name
 
 
-def test_the_jpeg_coefficient_modes_compare_in_strips(monkeypatch, fx):
+def test_the_jpeg_coefficient_modes_compare_in_strips(monkeypatch, in_process, fx):
     data = fx["jpeg_everything.jpg"]
     canonical = strip_image(data, Options(scrub_dct="canonical")).data
     monkeypatch.setattr(core, "_STRIP_BYTES", 1)

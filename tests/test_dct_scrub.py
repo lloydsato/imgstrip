@@ -157,12 +157,66 @@ def test_matching_embedders_leak_only_to_an_attacker_who_knows_the_carriers():
 
     An embedder that changes values by +-1 (LSB matching, here steghide-like and moving +-1 away from zero) leaves
     the pair, so the pair index of the scrubbed value says a little about the bit.  Using that needs the carrier
-    positions, and those were chosen among the non-zero coefficients, which the scrub changes: the attacker in
-    this test is given them anyway.  The key-based extractor still reads noise (see the payload tests above).
+    positions.  A tool that picks its carriers among the non-zero coefficients loses them, because the scrub changes
+    that set; one that indexes every coefficient by key (the syndrome embedder) does not, so the attacker in this
+    test, who is given the positions, is a realistic one.  See test_matching_payload_leaks_through_the_zero_zone.
     """
     raw, scrubbed_accuracy = _attacker_accuracy("steghide")
     assert raw > 0.99
     assert scrubbed_accuracy < 0.75
+
+
+def _mutual_information(bits: np.ndarray, values: np.ndarray) -> float:
+    """I(bit; scrubbed value) in bits (plug-in, Miller-Madow), values beyond 12 binned with their parity kept."""
+    v = values.astype(np.int64)
+    v = np.where(np.abs(v) > 12, np.sign(v) * (13 + (np.abs(v) & 1)), v)
+    joint = np.zeros((2, 29))
+    np.add.at(joint, (bits.astype(np.int64), v + 14), 1)
+    n = joint.sum()
+
+    def entropy(counts):
+        p = counts[counts > 0] / n
+        return float(-(p * np.log2(p)).sum()) + (np.count_nonzero(counts) - 1) / (2 * n * np.log(2))
+
+    return entropy(joint.sum(1)) + entropy(joint.sum(0)) - entropy(joint)
+
+
+def test_matching_payload_leaks_through_the_zero_zone():
+    """Finding F5, investigated: why a +-1 payload read at its true positions is not at chance after the scrub.
+
+    The review's embedder (keyed +-1 matching, away from zero at |c| = 1) read at the true carrier positions gave a
+    bit error rate of 0.562.  The cause is the zero zone: the scrub sends -2..1 to 0 and keeps every other value
+    non-zero, and a +-1 change at its edge (1 <-> 2, -2 <-> -3) decides whether a carrier ends up zero.  A carrier at
+    +1 that must hold 1 stays and is zeroed; one that must hold 0 moves to 2 and survives.  So the carriers the scrub
+    zeroed read a deterministic 0 that is correlated with the payload, while every carrier it kept reads noise.
+    scripts/dct_matching_leak.py reproduces the review's numbers and measures the fixes considered (a wider or
+    randomised zero zone): none reached chance for less than 1.3 dB of extra picture loss, so the scrub is unchanged
+    and the limit is documented.  This pins the mechanism and the size of the leak.
+    """
+    bits_all, values_all, own_reader = [], [], []
+    for seed, quality in [(11, 60), (12, 75), (13, 90), (14, 95)]:
+        stego_frame = dct.read(cover(256, 192, quality=quality, seed=seed))
+        n = E.capacity_matching(stego_frame)
+        bits = np.random.default_rng(seed).integers(0, 2, n, dtype=np.uint8)
+        positions = E.carrier_positions(stego_frame, "matching", n, key=seed)
+        E.embed_matching(stego_frame, bits, key=seed)
+        stego_jpeg = b"\xff\xd8" + dct.write(stego_frame) + b"\xff\xd9"
+        assert E.read_back(stego_jpeg, "matching", bits, seed=seed) == 0.0, "the embedder must work first"
+        out = scrubbed(stego_jpeg).data
+        own_reader.append(E.read_back(out, "matching", bits, seed=seed))
+        bits_all.append(bits)
+        values_all.append(E.values_at(dct.read(out), positions))
+    bits, values = np.concatenate(bits_all), np.concatenate(values_all)
+    zeroed = values == 0
+    wrong = (values & 1) != bits
+    # The tool's own extractor walks the non-zero coefficients, which the scrub changed: it reads noise.
+    assert all(abs(ber - 0.5) < 0.05 for ber in own_reader), own_reader
+    # A reader given the true positions: the kept carriers are noise, the zeroed ones carry the bias.
+    assert abs(wrong[~zeroed].mean() - 0.5) < 0.03
+    assert wrong[zeroed].mean() > 0.55
+    assert 0.52 < wrong.mean() < 0.65
+    # What such a reader can learn at best, from the value itself (documented: about 0.08 to 0.13 bit per carrier).
+    assert _mutual_information(bits, values) < 0.2
 
 
 def test_default_reencode_leaves_a_zero_changing_payload_but_the_dct_scrub_does_not():

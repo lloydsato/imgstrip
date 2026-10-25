@@ -1,0 +1,35 @@
+# Read by GitHub ("Cite this repository") and by Zenodo, which takes the title, authors, version and licence of each
+# archived release from this file.  Add the DOI Zenodo mints for a release to `identifiers` once it exists; the
+# concept DOI (the one that always resolves to the latest version) goes in `doi`.
+cff-version: 1.2.0
+message: "If you use imgstrip in your work, please cite the version you used, as below."
+type: software
+title: "imgstrip"
+abstract: >-
+  imgstrip removes metadata and hidden data from images by rebuilding each file from its decoded pixels, and verifies
+  every output before releasing it: a strict structural walk that must account for every byte, then a re-decode
+  that must match the intended pixels. JPEG, PNG, WebP, GIF, TIFF, BMP, HEIC/HEIF and AVIF, with optional scrubbers
+  for pixel and DCT steganography and the camera sensor fingerprint, and optional C2PA Content Credentials.
+authors:
+  - family-names: "Sato"
+    given-names: "Lloyd"
+version: "1.2.5"
+license: BSD-3-Clause
+repository-code: "https://github.com/lloydsato/imgstrip"
+url: "https://github.com/lloydsato/imgstrip"
+keywords:
+  - image sanitisation
+  - metadata removal
+  - content disarm and reconstruction
+  - steganography
+  - PRNU
+  - privacy
+references:
+  - type: report
+    title: "imgstrip: Sanitising Images by Rebuilding Them from Their Pixels, with Fail-Closed Verification of the Result"
+    authors:
+      - family-names: "Sato"
+        given-names: "Lloyd"
+    year: 2026
+    month: 10
+    notes: "Preprint describing imgstrip 1.2.4; the changes in 1.2.5 answer its findings (see CHANGELOG.md)."

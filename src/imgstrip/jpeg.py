@@ -84,13 +84,15 @@ def _scan_tables(marker_sof: int, scan: bytes) -> tuple[list[int], list[int]]:
                 keys = [t >> 4 for t in selectors]
         else:
             keys = [0x10 | (t & 15) for t in selectors]
+    elif marker_sof in (0xC3, 0xC7, 0xCB, 0xCF):  # lossless: differences are coded with the DC tables only
+        keys = [t >> 4 for t in selectors]
     else:
         keys = [t >> 4 for t in selectors] + [0x10 | (t & 15) for t in selectors]
     return ids, sorted(set(keys))
 
 
 def rebuild(
-    data: bytes, orientation: int = 1, icc: bytes | None = None, canonical: bytes | None = None
+    data: bytes, orientation: int = 1, icc: bytes | None = None, canonical: bytes | None = None, _facts=None
 ) -> tuple[bytes, int]:
     """Return (clean JPEG, number of embedded images dropped after the main image).
 
@@ -135,6 +137,8 @@ def rebuild(
             continue
         if marker in (0x00, 0xD8):
             raise JpegError(f"unexpected marker 0xFF{marker:02X}")
+        if pos + 2 > n:
+            raise JpegError("truncated segment")
         (length,) = struct.unpack_from(">H", data, pos)
         if length < 2 or pos + length > n:
             raise JpegError("segment overruns the file")
@@ -205,6 +209,22 @@ def rebuild(
         # Conditioning tables only matter to arithmetic decoders; write one canonical segment before the frame.
         body[0:0] = _segment(_DAC, b"".join(bytes((k, v)) for k, v in sorted(dac.items())))
     dropped = _count_images(data, pos)
+    if _facts is not None:
+        _facts.update(had_jfif=had_jfif, adobe_transform=adobe_transform, dropped=dropped)
+    return assemble(bytes(body), orientation, icc, had_jfif, adobe_transform), dropped
+
+
+def wrapper_facts(data: bytes) -> tuple[bool, int | None, int]:
+    """(had a JFIF segment, Adobe colour-transform byte or None, embedded images after the main one): all that
+    ``assemble`` takes from the input around a body built elsewhere.  Raises JpegError where ``rebuild`` would."""
+    facts: dict = {}
+    rebuild(data, canonical=b"", _facts=facts)
+    return facts["had_jfif"], facts["adobe_transform"], facts["dropped"]
+
+
+def assemble(body: bytes, orientation: int, icc: bytes | None, had_jfif: bool, adobe_transform: int | None) -> bytes:
+    """A complete JPEG around ``body`` (tables, frame header and scans): SOI, a minimal JFIF block (or the Adobe
+    segment that says how the colours are coded), the optional one-tag orientation block and ICC profile, EOI."""
     out = bytearray(b"\xff\xd8")
     if had_jfif or adobe_transform is None:
         out += _JFIF
@@ -221,7 +241,7 @@ def rebuild(
         out += _segment(0xEE, b"Adobe" + struct.pack(">HHHB", 100, 0, 0, adobe_transform))
     out += body
     out += b"\xff\xd9"
-    return bytes(out), dropped
+    return bytes(out)
 
 
 def _count_images(data: bytes, pos: int) -> int:
@@ -264,14 +284,23 @@ def _image_end(data: bytes, start: int) -> int | None:
 
 
 def _scan_end(data: bytes, pos: int) -> int:
-    """Offset of the first marker after entropy-coded data (RSTn markers are part of the scan)."""
+    """Offset of the first marker after entropy-coded data (RSTn markers are part of the scan).
+
+    Like libjpeg, a run of 0xFF bytes followed by 0x00 or a restart marker is part of the data (the extra 0xFF
+    bytes are fill that decoders skip); the offset returned is where the run of 0xFF before the next marker starts.
+    """
     n = len(data)
     while True:
         i = data.find(b"\xff", pos)
         if i < 0 or i + 1 >= n:
             raise JpegError("truncated entropy-coded data")
-        b = data[i + 1]
+        j = i + 1
+        while j < n and data[j] == 0xFF:
+            j += 1
+        if j >= n:
+            raise JpegError("truncated entropy-coded data")
+        b = data[j]
         if b == 0x00 or 0xD0 <= b <= 0xD7:
-            pos = i + 2
+            pos = j + 1
             continue
         return i

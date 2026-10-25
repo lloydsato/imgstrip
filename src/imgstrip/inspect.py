@@ -337,6 +337,95 @@ def _icc_finding(profile: bytes, report: Report) -> None:
 
 # DNL/DHP/EXP (0xDC/0xDE/0xDF) are ignored or rejected by decoders and are reported as unknown markers.
 _JPEG_STRUCTURAL = {m for m in range(0xC0, 0xD0) if m != 0xC8} | {0xDA, 0xDB, 0xDD}
+_JPEG_ARITHMETIC = {0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+_JPEG_PROGRESSIVE = {0xC2, 0xC6, 0xCA, 0xCE}
+_JPEG_LOSSLESS = {0xC3, 0xC7, 0xCB, 0xCF}
+
+
+class _JpegTables:
+    """Which quantisation, Huffman and arithmetic-conditioning table definitions a decoder actually uses.
+
+    A table that no component or scan uses, or that is redefined before anything used it, is never read by a
+    decoder, so whatever it holds is hidden data.  The rules are a decoder's: a component's quantisation table is
+    latched when the first scan that contains the component starts; a Huffman scan reads the DC and AC tables of its
+    components (a progressive DC scan only the DC ones, a DC refinement none, an AC scan only the AC one, a lossless
+    scan only the DC ones); conditioning tables are read only by arithmetic-coded frames, Huffman tables never.
+    """
+
+    _NAMES = {0xDB: "quantisation", 0xC4: "Huffman", 0xCC: "arithmetic conditioning"}
+
+    def __init__(self) -> None:
+        self.defs: list[list] = []  # [marker, key, offset, used]
+        self.in_force: dict[tuple[int, int], int] = {}  # (marker, key) -> index into defs
+        self.sof = 0
+        self.comps: list[tuple[int, int]] = []  # (component id, quantisation table slot)
+        self.latched: set[int] = set()
+
+    def _define(self, marker: int, key: int, offset: int) -> None:
+        self.in_force[(marker, key)] = len(self.defs)
+        self.defs.append([marker, key, offset, False])
+
+    def _use(self, marker: int, key: int) -> None:
+        index = self.in_force.get((marker, key))
+        if index is not None:
+            self.defs[index][3] = True
+
+    def define(self, marker: int, p: bytes, offset: int, r: Report) -> None:
+        i = 0
+        while i < len(p):
+            if marker == 0xDB:
+                size = 1 + 64 * ((p[i] >> 4) + 1)
+                bad = p[i] >> 4 > 1 or p[i] & 15 > 3
+                key = p[i] & 15
+            elif marker == 0xC4:
+                size = 17 + sum(p[i + 1 : i + 17])
+                bad = i + 17 > len(p) or p[i] >> 4 > 1 or p[i] & 15 > 3
+                key = p[i]
+            else:  # DAC: (class << 4 | slot, value) pairs
+                size, bad, key = 2, p[i] >> 4 > 1 or p[i] & 15 > 3, p[i]
+            if bad or i + size > len(p):
+                r.add(STRUCTURE, f"Malformed {self._NAMES[marker]} table", f"at offset {offset}")
+                return
+            self._define(marker, key, offset)
+            i += size
+
+    def frame(self, marker: int, p: bytes) -> None:
+        if len(p) >= 6 and len(p) >= 6 + 3 * p[5]:
+            self.sof = marker
+            self.comps = [(p[6 + 3 * i], p[8 + 3 * i]) for i in range(p[5])]
+
+    def scan(self, p: bytes) -> None:
+        if not p or len(p) < 4 + 2 * p[0]:
+            return
+        ns = p[0]
+        ss, ah = p[1 + 2 * ns], p[3 + 2 * ns] >> 4
+        for k in range(ns):
+            ident, selectors = p[1 + 2 * k], p[2 + 2 * k]
+            if ident not in self.latched:
+                self.latched.add(ident)
+                for comp, slot in self.comps:
+                    if comp == ident:
+                        self._use(0xDB, slot)
+            dc, ac = selectors >> 4, 0x10 | (selectors & 15)
+            if self.sof in _JPEG_PROGRESSIVE:
+                keys = ([dc] if not ah else []) if ss == 0 else [ac]
+            elif self.sof in _JPEG_LOSSLESS:
+                keys = [dc]
+            else:
+                keys = [dc, ac]
+            for key in keys:
+                self._use(0xCC if self.sof in _JPEG_ARITHMETIC else 0xC4, key)
+
+    def report(self, r: Report) -> None:
+        for marker, key, offset, used in self.defs:
+            if used:
+                continue
+            name = self._NAMES[marker]
+            if marker == 0xDB:
+                which = f"table {key}"
+            else:
+                which = f"{'AC' if key >> 4 else 'DC'} table {key & 15}"
+            r.add(HIDDEN, f"Unused {name} table", f"{which} at offset {offset}: no decoder reads it")
 
 
 def _inspect_jpeg(d: bytes, r: Report) -> None:
@@ -345,6 +434,8 @@ def _inspect_jpeg(d: bytes, r: Report) -> None:
     icc_chunks: list[tuple[int, bytes]] = []
     scans = 0
     sequential = False
+    tables = _JpegTables()
+    fill = fill_at = 0  # 0xFF fill bytes before markers (decoders skip them), and where the first one is
     while True:
         if pos >= n:
             raise _Malformed("missing end-of-image marker")
@@ -355,8 +446,12 @@ def _inspect_jpeg(d: bytes, r: Report) -> None:
             r.add(HIDDEN, "Stray bytes between segments", f"{nxt - pos} bytes at offset {pos}")
             pos = nxt
             continue
+        start = pos
         while pos < n and d[pos] == 0xFF:
             pos += 1
+        if pos - start > 1:
+            fill_at = fill_at if fill else start
+            fill += pos - start - 1
         if pos >= n:
             raise _Malformed("truncated marker")
         marker = d[pos]
@@ -371,41 +466,67 @@ def _inspect_jpeg(d: bytes, r: Report) -> None:
         if length < 2 or pos + length > n:
             raise _Malformed(f"segment 0xFF{marker:02X} overruns the file")
         payload = d[pos + 2 : pos + length]
+        segment_at = pos - 2
         pos += length
         if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
             h, w = struct.unpack_from(">HH", payload, 1)
             r.info.setdefault("size", (w, h))
             r.info["components"] = payload[5]
             sequential = marker in (0xC0, 0xC1)
+            tables.frame(marker, payload)
+        elif marker in (0xC4, 0xCC, 0xDB):
+            tables.define(marker, payload, segment_at, r)
         if marker == 0xE2 and payload.startswith(b"ICC_PROFILE\x00") and len(payload) >= 14:
             icc_chunks.append((payload[12], payload[14:]))
             continue
         _classify_jpeg_segment(marker, payload, r)
         if marker == 0xDA:
             scans += 1
+            tables.scan(payload)
             # A sequential scan always covers coefficients 0..63 in one pass; decoders ignore these bytes.
             if sequential and payload[-3:] != b"\x00\x3f\x00":
                 r.add(HIDDEN, "Non-standard scan parameters", payload[-3:].hex())
-            pos = _skip_entropy(d, pos)
+            pos, inside = _skip_entropy(d, pos)
+            if inside:
+                fill_at = fill_at if fill else inside[1]
+                fill += inside[0]
     if scans == 0:
         raise _Malformed("no image scan")
+    tables.report(r)
+    if fill:
+        r.add(HIDDEN, "Fill bytes before markers", f"{fill} extra 0xFF byte(s), the first at offset {fill_at}")
     if icc_chunks:
         icc_chunks.sort(key=lambda c: c[0])
         _icc_finding(b"".join(c[1] for c in icc_chunks), r)
     _check_trailing(d, pos, r, "end of JPEG image")
 
 
-def _skip_entropy(d: bytes, pos: int) -> int:
+def _skip_entropy(d: bytes, pos: int) -> tuple[int, tuple[int, int] | None]:
+    """(offset of the marker that ends the entropy-coded data, (extra 0xFF bytes inside it, first offset) or None).
+
+    Inside the data a 0xFF is followed by 0x00 (a stuffed data byte) or by a restart marker.  Decoders skip any
+    further 0xFF bytes before either (libjpeg reads ``FF FF 00`` as one data byte), so a run of them is fill: room
+    for data that no decoder reads.
+    """
     n = len(d)
+    fill = first = 0
     while True:
         i = d.find(b"\xff", pos)
         if i < 0 or i + 1 >= n:
             raise _Malformed("truncated entropy-coded data")
-        b = d[i + 1]
+        j = i + 1
+        while j < n and d[j] == 0xFF:
+            j += 1
+        if j >= n:
+            raise _Malformed("truncated entropy-coded data")
+        b = d[j]
         if b == 0x00 or 0xD0 <= b <= 0xD7:
-            pos = i + 2
+            if j - i > 1:
+                first = first if fill else i
+                fill += j - i - 1
+            pos = j + 1
             continue
-        return i
+        return i, ((fill, first) if fill else None)
 
 
 def _app_ident(payload: bytes) -> str:

@@ -60,7 +60,7 @@ def _intent(profile: ImageCms.ImageCmsProfile) -> int:
         intent = ImageCms.getDefaultIntent(profile)
         if ImageCms.isIntentSupported(profile, intent, ImageCms.Direction.INPUT):
             return intent
-    except ImageCms.PyCMSError:
+    except (ImageCms.PyCMSError, OverflowError, ValueError):  # a header intent outside the range (found by fuzzing)
         pass
     return ImageCms.Intent.RELATIVE_COLORIMETRIC
 
@@ -344,15 +344,8 @@ def _text_tag(text: str) -> bytes:
     return b"text" + b"\x00" * 4 + text.encode("ascii") + b"\x00"
 
 
-def build_sanitized(icc: bytes) -> bytes:
-    """Rebuild a profile from its colorimetric tags only.
-
-    The result has a fixed header (no creator, device, date or profile ID), a
-    generic description and only the matrix/curve tags, re-serialised from their
-    parsed values (no source bytes are copied).  Raises ProfileError if the
-    profile cannot be represented this way or if the rebuilt profile is not
-    colorimetrically identical.
-    """
+def _rebuild(icc: bytes) -> tuple[bytes, MatrixShaper]:
+    """The sanitised form of a profile, in pure Python (no colour engine reads ``icc``)."""
     model = MatrixShaper(icc)
     tags: list[tuple[bytes, bytes]] = [
         (b"desc", _desc_tag("RGB" if model.space == "RGB" else "Gray")),
@@ -362,7 +355,31 @@ def build_sanitized(icc: bytes) -> bytes:
     tags += sorted(model.raw_tags.items())
     # Fixed header: version 2.1 display profile, no CMM/platform/device/creator,
     # constant date, zero profile ID.
-    rebuilt = _assemble(tags, model.space == "GRAY")
+    return _assemble(tags, model.space == "GRAY"), model
+
+
+def is_sanitized(profile: bytes) -> bool:
+    """Whether ``profile`` is exactly what ``build_sanitized`` makes: its own rebuild, byte for byte.
+
+    Checked without a colour engine, so a profile that came from the sandbox can be checked in the process that
+    writes the output.
+    """
+    try:
+        return _rebuild(profile)[0] == profile
+    except (ProfileError, ValueError, IndexError, struct.error):
+        return False
+
+
+def build_sanitized(icc: bytes) -> bytes:
+    """Rebuild a profile from its colorimetric tags only.
+
+    The result has a fixed header (no creator, device, date or profile ID), a
+    generic description and only the matrix/curve tags, re-serialised from their
+    parsed values (no source bytes are copied).  Raises ProfileError if the
+    profile cannot be represented this way or if the rebuilt profile is not
+    colorimetrically identical.
+    """
+    rebuilt, model = _rebuild(icc)
     # Fail closed: the new profile must describe exactly the same colours.
     original, clean = load(icc), load(rebuilt)
     probe = _probe_rgb() if model.space == "RGB" else Image.fromarray(np.arange(256, dtype=np.uint8)[None, :], "L")

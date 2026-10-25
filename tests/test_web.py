@@ -559,17 +559,40 @@ def test_stale_work_folders_are_swept(tmp_path, monkeypatch):
     live.close()
 
 
+def _default_signal_dispositions() -> None:
+    """Run in the child before exec: undo an ignored or blocked SIGHUP/SIGTERM inherited from the test runner.
+
+    nohup, some CI runners and some process supervisors start the test process with SIGHUP ignored, and an
+    ignored signal stays ignored across exec.  The server then (rightly) respects it, so the signal test below
+    would test the runner's set-up instead of the server.
+    """
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGHUP, signal.SIGTERM})
+
+
 @pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX only")
+@pytest.mark.parametrize("inherited", ["default", "ignored"])
 @pytest.mark.parametrize("sig", ["SIGTERM", "SIGHUP"])
-def test_signals_still_delete_cleaned_files(tmp_path, sig):
+def test_signals_still_delete_cleaned_files(tmp_path, sig, inherited):
+    """Closing the terminal or `kill` deletes the cleaned files, whatever SIGHUP disposition the runner has.
+
+    ``inherited="ignored"`` reproduces a test run under nohup (finding F7): the test process itself ignores
+    SIGHUP while it starts the server, and the test must pass all the same.
+    """
     env = {**os.environ, "TMPDIR": str(tmp_path)}
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "imgstrip.web", "--no-browser", "--port", "0"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-        text=True,
-    )
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN if inherited == "ignored" else signal.SIG_DFL)
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "imgstrip.web", "--no-browser", "--port", "0"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            text=True,
+            preexec_fn=_default_signal_dispositions,
+        )
+    finally:
+        signal.signal(signal.SIGHUP, previous)
     try:
         proc.stdout.readline()
         url = proc.stdout.readline().strip()

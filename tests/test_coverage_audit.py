@@ -420,6 +420,11 @@ def jpeg_insert(marker: int, payload: bytes):
     return go
 
 
+def jpeg_fill(marker: bytes, count: int = 2):
+    """Extra 0xFF fill bytes before the first occurrence of ``marker`` (decoders skip them; finding F1)."""
+    return lambda d: d.replace(marker, b"\xff" * count + marker, 1)
+
+
 def jpeg_stray(d):
     end = next(e for _s, e, n in regions.jpeg(d) if n == "JFIF")
     return d[:end] + b"\x00\x00CANARY" + d[end:]
@@ -514,6 +519,15 @@ INJECTIONS = [
     ("jpeg", "non-standard scan parameters", jpeg_scan_params, "Non-standard scan parameters"),
     ("jpeg", "an impossible JFIF version", jpeg_jfif_version, "Non-standard JFIF version"),
     ("jpeg", "a JFIF thumbnail", jpeg_jfif_thumbnail, "JFIF thumbnail"),
+    # Finding F1 of the review: whole tables nobody uses, and fill bytes, were accepted.
+    ("jpeg", "a quantisation table no component uses", jpeg_insert(0xDB, bytes((3,)) + b"CANARY" * 10 + b"!!!!"),
+     "Unused quantisation table"),
+    ("jpeg", "a Huffman table no scan uses", jpeg_insert(0xC4, b"\x13" + bytes((0, 6)) + bytes(14) + b"CANARY"),
+     "Unused Huffman table"),
+    ("jpeg", "a Huffman table redefined before any scan uses it",
+     jpeg_insert(0xC4, b"\x00" + bytes((0, 6)) + bytes(14) + b"CANARY"), "Unused Huffman table"),
+    ("jpeg", "fill bytes before the scan", jpeg_fill(b"\xff\xda"), "Fill bytes"),
+    ("jpeg", "fill bytes before the end of the image", jpeg_fill(b"\xff\xd9", 5), "Fill bytes"),
     # WebP
     ("webp lossless", "an unknown chunk", riff_chunk(b"ABCD", b"CANARY!"), "chunk"),
     ("webp lossless", "an EXIF chunk", riff_chunk(b"EXIF", b"CANARY!!"), "EXIF"),
@@ -618,8 +632,9 @@ def test_a_smaller_header_that_runs_into_the_pixels_is_rejected():
 
 
 @pytest.mark.parametrize("fmt", ["PNG", "TIFF", "BMP", "WEBP"])  # GIF stores no colour for a transparent pixel
-def test_the_engine_refuses_to_write_hidden_colour_if_its_own_scrub_regresses(monkeypatch, fmt):
-    """Break the step that clears colour under transparent pixels: verification must stop the write."""
+def test_the_engine_refuses_to_write_hidden_colour_if_its_own_scrub_regresses(monkeypatch, in_process, fmt):
+    """Break the step that clears colour under transparent pixels: verification must stop the write.  (In the
+    sandbox the decode stage clears it as well, out of reach of this patch.)"""
     monkeypatch.setattr(_Job, "_scrub_transparent", lambda self, frames: None)
     with pytest.raises(VerificationError, match="hidden under|transparent"):
         strip_image(FX["png_hidden_alpha.png"], Options(format=fmt))

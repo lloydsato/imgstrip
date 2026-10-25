@@ -112,7 +112,7 @@
               <label class="switch">
                 <input type="checkbox" role="switch" name="scrub_dct">
                 <span class="switch-track" aria-hidden="true"></span>
-                <span class="switch-text"><span>Scrub JPEG coefficients</span><span class="hint">JPEG only. Destroys steganography hidden in the DCT data (JSteg, F5, steghide, J-UNIWARD). Costs picture quality, so the result shows how much. Off by default.</span></span>
+                <span class="switch-text"><span>Scrub JPEG coefficients</span><span class="hint">JPEG only. Destroys parity payloads hidden in the DCT data (JSteg, F5, steghide) and greatly weakens ±1 ones (J-UNIWARD). Costs picture quality, so the result shows how much. Off by default.</span></span>
               </label>
               <label class="switch">
                 <input type="checkbox" role="switch" name="jpeg_canonical">

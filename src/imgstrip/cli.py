@@ -13,12 +13,12 @@ import os
 import secrets
 import stat
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import __version__, stego
-from .core import EXTENSIONS, OUTPUT_FORMATS, Options, StripError, strip_image
+from . import __version__, sandbox, stego
+from .core import DEFAULT_MAX_PIXELS, EXTENSIONS, OUTPUT_FORMATS, Options, StripError, strip_image
+from .fileio import replace_atomic, write_new
 from .inspect import inspect_bytes
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_FOUND = 0, 1, 2, 3
@@ -226,11 +226,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     proc.add_argument("--optimize", action="store_true", help="try extra compression strategies for PNG output")
     proc.add_argument(
+        "--independent-jpeg-check",
+        action="store_true",
+        help="also verify JPEG output with imgstrip's own JPEG decoder, which shares no code with the encoder "
+        "(pure Python: about 0.3 s per megapixel; PNG and BMP output always get an independent reader)",
+    )
+    proc.add_argument(
+        "--no-sandbox",
+        action="store_true",
+        help="decode inputs in this process instead of a separate, restricted one (faster for many small files; "
+        "a decoder bug triggered by a hostile file then runs with everything this process holds)",
+    )
+    proc.add_argument(
         "--max-pixels",
         type=int,
-        default=300_000_000,
+        default=DEFAULT_MAX_PIXELS,
         metavar="N",
-        help="refuse images larger than N pixels (default: 300M)",
+        help=f"refuse images larger than N pixels (default: {DEFAULT_MAX_PIXELS // 1_000_000}M)",
     )
     cred = p.add_argument_group(
         "content credentials (C2PA, optional)",
@@ -331,6 +343,8 @@ def options_from_args(args) -> Options:
         scrub_prnu=args.scrub_prnu,
         optimize=args.optimize,
         max_pixels=args.max_pixels,
+        independent_jpeg=args.independent_jpeg_check,
+        sandbox=False if args.no_sandbox else None,
     )
 
 
@@ -425,43 +439,9 @@ def plan_destination(task: Task, fmt: str, args, single: bool, input_format: str
     return str(Path(task.source).with_name(name))
 
 
-_UMASK = None
-
-
-def _default_mode() -> int:
-    global _UMASK
-    if _UMASK is None:
-        _UMASK = os.umask(0)
-        os.umask(_UMASK)
-    return 0o666 & ~_UMASK
-
-
 def atomic_write(dest: str, data: bytes, mode: int | None) -> None:
-    """Write via a temporary file in the same directory, fsync, then rename."""
-    directory = os.path.dirname(os.path.abspath(dest))
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".imgstrip-", suffix=".tmp", dir=directory)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.chmod(tmp, mode if mode is not None else _default_mode())
-        os.replace(tmp, dest)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    try:
-        dfd = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
-    except OSError:
-        pass
+    """Replace ``dest`` with ``data`` in one rename (see ``fileio.replace_atomic``)."""
+    replace_atomic(dest, data, mode)
 
 
 # --------------------------------------------------------------------------
@@ -473,15 +453,83 @@ def atomic_write(dest: str, data: bytes, mode: int | None) -> None:
 AUTO_PARALLEL_MIN = 4
 
 
-def _worker_count(requested: int | None, tasks: int) -> int:
-    """Workers to use for `tasks` files: an explicit -j wins, otherwise one per core for real batches."""
+def _worker_count(requested: int | None, tasks: int, per_job: int | None = None) -> int:
+    """Workers to use for `tasks` files: an explicit -j wins, otherwise one per core for real batches, but no more
+    than the available memory holds when each may need ``per_job`` bytes at its peak (review item 12)."""
     if tasks < 2:
         return 1
     if requested is not None:
         return requested
     if tasks < AUTO_PARALLEL_MIN:
         return 1
-    return max(1, min(os.cpu_count() or 1, tasks))
+    workers = max(1, min(os.cpu_count() or 1, tasks))
+    available = _available_memory() if per_job else None
+    if available:
+        workers = max(1, min(workers, int(available * 0.75) // (per_job + WORKER_OVERHEAD)))
+    return workers
+
+
+# Measured with scripts/memory_table.py (docs/REFERENCE.md): the larger of the two processes' peaks, per pixel, with
+# some room, and what a worker process and its decoder zygote hold before they start on a file.
+PEAK_BYTES_PER_PIXEL = 12
+PEAK_BYTES_PER_PIXEL_16BIT = 44
+WORKER_OVERHEAD = 200 << 20
+_LARGEST = 16  # the batch's largest files (by size) whose headers are read for the estimate
+_HEADER = 1 << 18
+
+
+def _available_memory() -> int | None:
+    """Bytes of memory available to new processes, or None when this system does not say."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    if sys.platform == "win32":  # pragma: no cover - Windows
+        import ctypes
+
+        class Status(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
+                (name, ctypes.c_ulonglong)
+                for name in ("total", "avail", "page_total", "page_avail", "virt_total", "virt_avail", "ext")
+            ]
+
+        status = Status()
+        status.length = ctypes.sizeof(Status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.avail)
+        return None
+    try:  # macOS and the other POSIX systems: half the physical memory, as a cautious stand-in
+        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // 2
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _peak_estimate(tasks: list, max_pixels: int) -> int | None:
+    """The memory the batch's largest picture may need at its peak, from the headers of its largest files (read by
+    imgstrip's pure-Python inspector, never a decoder); None when no file can be looked at."""
+    sized = []
+    for task in tasks:
+        try:
+            sized.append((os.stat(task.source).st_size, task.source))
+        except OSError:
+            continue
+    peak = None
+    for size, source in sorted(sized, reverse=True)[:_LARGEST]:
+        try:
+            with open(source, "rb") as fh:
+                head = fh.read(_HEADER)
+        except OSError:
+            continue
+        dims = inspect_bytes(head).info.get("size")
+        pixels = dims[0] * dims[1] if dims else max(size * 4, 1_000_000)  # unknown: a generous guess from the size
+        wide = head[:8] == b"\x89PNG\r\n\x1a\n" and len(head) > 24 and head[24] == 16
+        per_pixel = PEAK_BYTES_PER_PIXEL_16BIT if wide or head[:4] in (b"II*\x00", b"MM\x00*") else PEAK_BYTES_PER_PIXEL
+        need = min(pixels, max_pixels) * per_pixel
+        peak = need if peak is None else max(peak, need)
+    return peak
 
 
 def _read(source: str) -> bytes:
@@ -497,10 +545,10 @@ def _findings_payload(findings) -> list[dict]:
 
 def pixel_scan(data: bytes):
     """Scan the pixels; a failure becomes a 'not scanned' verdict instead of an error."""
-    from .analysis import PixelScan, scan_pixels
+    from .analysis import PixelScan, scan
 
     try:
-        return scan_pixels(data)
+        return scan(data)
     except StripError as exc:
         return PixelScan([], stego.not_scanned(f"pixel analysis failed: {exc}"))
     except MemoryError:
@@ -586,6 +634,8 @@ def strip_one(task: Task, options: Options, args, single: bool) -> Outcome:
         "size": list(result.size),
         "frames": result.frames,
         "pixels_exact": result.pixels_exact,
+        "verified_by": list(result.verified_by),
+        "kept": dict(result.kept),
         "bytes_in": len(data),
         "bytes_out": len(result.data),
         "removed": _findings_payload(result.removed),
@@ -637,13 +687,20 @@ def _write_outcome(outcome: Outcome, args, planned: set[str]) -> None:
         if source_real is not None and os.path.exists(dest) and os.path.samefile(dest, task.source):
             outcome.status, outcome.message = "failed", "output would overwrite the input (use --in-place)"
             return
-        if os.path.exists(dest) and not args.force:
+        if os.path.lexists(dest) and not args.force:
             outcome.status, outcome.message = "failed", f"{dest} already exists (use --force)"
             return
     if args.dry_run:
         return
     try:
-        atomic_write(dest, data, mode)
+        # A new file never replaces anything, even one that appears while this file is being written; --force and
+        # --in-place replace the destination with one rename.  Neither ever writes into an existing file.
+        if args.in_place or args.force:
+            replace_atomic(dest, data, mode)
+        else:
+            write_new(dest, data, mode)
+    except FileExistsError:
+        outcome.status, outcome.message = "failed", f"{dest} already exists (use --force)"
     except OSError as exc:
         outcome.status, outcome.message = "failed", f"cannot write {dest}: {exc.strerror or exc}"
 
@@ -765,7 +822,7 @@ class ReceiptFile:
 
         self.items.append(receipt)
         doc = json.dumps(credentials.receipts_document(self.items), indent=2).encode("utf-8")
-        atomic_write(self.path, doc, 0o600)
+        replace_atomic(self.path, doc, 0o600)
 
 
 @dataclass
@@ -858,9 +915,12 @@ def make_test_identity_files(args) -> int:
     if clash:
         raise _Usage("will not overwrite: " + ", ".join(clash))
     test = credentials.make_test_identity(args.c2pa_test_name)
-    atomic_write(str(names["chain"]), test.chain_pem, None)
-    atomic_write(str(names["key"]), test.key_pem, 0o600)
-    atomic_write(str(names["root"]), test.root_pem, None)
+    try:
+        write_new(names["chain"], test.chain_pem)
+        write_new(names["key"], test.key_pem, 0o600)
+        write_new(names["root"], test.root_pem)
+    except FileExistsError as exc:
+        raise _Usage(f"will not overwrite: {exc.filename}") from None
     print(f"created a TEST identity for '{args.c2pa_test_name}' in {folder}:")
     print(f"  {names['chain'].name}   signing certificate   (--c2pa-cert)")
     print(f"  {names['key'].name}     private key           (--c2pa-key)")
@@ -1049,6 +1109,10 @@ class Reporter:
                 print(f"           - removed [{f['category']}] {f['label']}{detail}", file=p)
             for act in pl["actions"]:
                 print(f"           * {act}", file=p)
+            print(f"           verified by: {', '.join(pl['verified_by'])}", file=p)
+            if pl["kept"]:
+                kept = ", ".join(f"{k} {v}" for k, v in pl["kept"].items())
+                print(f"           kept from the input: {kept}", file=p)
         elif removed:
             labels = []
             for f in removed:
@@ -1131,6 +1195,8 @@ def _check_credential_options(args, parser) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.no_sandbox:
+        sandbox.set_default(False)
     if args.self_test:
         from .selftest import run_self_test
 
@@ -1230,10 +1296,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             counts[outcome.status] += 1
 
-    jobs = _worker_count(args.jobs, len(tasks))
+    per_job = (
+        _peak_estimate(tasks, options.max_pixels) if args.jobs is None and len(tasks) >= AUTO_PARALLEL_MIN else None
+    )
+    jobs = _worker_count(args.jobs, len(tasks), per_job)
     parallel = jobs > 1 and STDIO not in args.paths
     if parallel:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as pool:
+        # Workers started with spawn (macOS, Windows) do not inherit --no-sandbox, so it is passed on.
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=jobs, initializer=sandbox.set_default, initargs=(sandbox.enabled(),)
+        ) as pool:
             # A bounded window keeps finished results (each carries the cleaned bytes) from piling up
             # in memory behind one slow early file; outcomes are still reported in input order.
             pending: collections.deque = collections.deque()

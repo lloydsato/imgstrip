@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from . import __version__, jumbf, stego
-from .core import Options, Result, StripError, canonical_frames
+from .core import DEFAULT_MAX_PIXELS, Options, Result, StripError, canonical_frames
 from .inspect import Finding, inspect_bytes, is_c2pa_finding, sniff_format
 
 # --------------------------------------------------------------------------
@@ -897,8 +897,8 @@ def gather_evidence(source: bytes, result: Result, options: Options) -> Evidence
 
     This decodes both files again; it is only done when credentials are requested.
     """
-    want = canonical_frames(source, options.max_pixels)
-    got = canonical_frames(result.data, options.max_pixels)
+    want = canonical_frames(source, options.max_pixels, options.sandbox)
+    got = canonical_frames(result.data, options.max_pixels, options.sandbox)
     identical = len(want) == len(got) and all(
         x.shape == y.shape and x.dtype == y.dtype and np.array_equal(x, y) for x, y in zip(want, got, strict=True)
     )
@@ -1663,7 +1663,7 @@ def audit(
     original: bytes,
     receipts: dict | list[dict],
     anchors: bytes | None = None,
-    max_pixels: int = 300_000_000,
+    max_pixels: int = DEFAULT_MAX_PIXELS,
 ) -> Audit:
     """Check a signed image against the original file and the signer's receipt.
 

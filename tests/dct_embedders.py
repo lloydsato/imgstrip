@@ -228,6 +228,41 @@ def extract_syndrome(frame, n, key=0):
     return np.array(out[:n], dtype=np.uint8)
 
 
+# -- +-1 matching (the review's third embedder, finding F5) ----------------------------------------------------
+#
+# Keyed LSB matching over the non-zero luma AC coefficients: a value whose low bit is wrong moves by +-1 at random,
+# away from zero when |c| = 1, so no zero is created and the carrier set survives embedding.  Not in NAMES: unlike
+# the others it is not brought to chance by --scrub-dct for a reader who knows the carrier positions, which the
+# tests pin as a documented limit.
+
+
+def capacity_matching(frame):
+    return int((_luma_ac(frame) != 0).sum())
+
+
+def _matching_order(flat, key):
+    carriers = np.nonzero(flat != 0)[0]
+    return carriers[np.random.default_rng(key).permutation(len(carriers))]
+
+
+def embed_matching(frame, bits, key=0):
+    ac = _luma_ac(frame).copy()
+    flat = ac.reshape(-1)
+    order = _matching_order(flat, key)
+    assert len(bits) <= len(order)
+    direction = np.random.default_rng(key + 1).choice((-1, 1), size=len(bits))
+    for pos, bit, step in zip(order[: len(bits)], bits, direction, strict=True):
+        c = int(flat[pos])
+        if (c & 1) != bit:
+            flat[pos] = c + ((1 if c > 0 else -1) if abs(c) == 1 else int(step))
+    _store(frame, flat.reshape(ac.shape))
+
+
+def extract_matching(frame, n, key=0):
+    flat = _luma_ac(frame).reshape(-1)
+    return (flat[_matching_order(flat, key)[:n]] & 1).astype(np.uint8)
+
+
 def carrier_positions(frame, name, n, key=0):
     """Flat indices (into the visible luma AC array) that carry the first ``n`` bits, for the direct embedders.
 
@@ -243,6 +278,8 @@ def carrier_positions(frame, name, n, key=0):
     if name == "outguess":
         carriers = np.nonzero((flat != 0) & (flat != 1))[0]
         return carriers[_stride_order(len(carriers), n, key)]
+    if name == "matching":
+        return _matching_order(flat, key)[:n]
     raise ValueError(name)
 
 
@@ -256,6 +293,7 @@ EMBEDDERS = {
     "outguess": (embed_outguess, extract_outguess, capacity_outguess),
     "f5": (embed_f5, extract_f5, capacity_f5),
     "syndrome": (embed_syndrome, extract_syndrome, capacity_syndrome),
+    "matching": (embed_matching, extract_matching, capacity_matching),
 }
 
 

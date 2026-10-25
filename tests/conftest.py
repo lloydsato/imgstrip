@@ -36,6 +36,15 @@ def fx():
     return fixtures.all_fixtures()
 
 
+@pytest.fixture
+def in_process(monkeypatch):
+    """Decode in the test process: for tests that monkeypatch the decode stage, which a sandbox worker (a process of
+    its own, started from a clean interpreter) would never see."""
+    from imgstrip import sandbox
+
+    monkeypatch.setattr(sandbox, "_DEFAULT", False)
+
+
 def decode(data: bytes, frame: int = 0) -> Image.Image:
     im = Image.open(io.BytesIO(data))
     if frame:

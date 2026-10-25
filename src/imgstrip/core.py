@@ -24,7 +24,7 @@ from PIL import Image, ImageCms, UnidentifiedImageError
 
 from . import codecs
 from . import icc as iccmod
-from . import prnu, stego
+from . import prnu, refdecode, stego
 from .inspect import Finding, Report, inspect_bytes, transparent_palette_colour, unused_palette_entries
 
 try:  # optional HEIC/HEIF support
@@ -129,6 +129,11 @@ class VerificationError(StripError):
     """The produced file failed the post-write safety checks."""
 
 
+# The largest picture accepted unless --max-pixels says otherwise.  At about 16 bytes per pixel at the peak (more for
+# 16-bit pictures; docs/REFERENCE.md has the measured table) 150 megapixels already need over 2 GB; 1.2.4 allowed 300.
+DEFAULT_MAX_PIXELS = 150_000_000
+
+
 @dataclass
 class Options:
     format: str | None = None  # output format; None keeps the input format
@@ -143,7 +148,13 @@ class Options:
     dct_min_psnr: float = 25.0  # "full" refuses a picture it would change by more than this (dB); 0 disables
     scrub_prnu: bool = False  # desynchronise the camera sensor fingerprint (see prnu.py)
     optimize: bool = False  # extra compression trials for PNG
-    max_pixels: int = 300_000_000
+    max_pixels: int = DEFAULT_MAX_PIXELS
+    # Also decode default-mode JPEG output with imgstrip's own, independent decoder (pure Python, about 0.3 s per
+    # megapixel).  PNG and BMP output always get an independent reader; see refdecode.
+    independent_jpeg: bool = False
+    # Decode the input in a separate, freshly forked process that hands back only pixels and a few typed values (see
+    # sandbox.py).  None follows the process-wide setting (on unless sandbox.set_default(False) or --no-sandbox).
+    sandbox: bool | None = None
 
 
 @dataclass
@@ -188,6 +199,42 @@ class Result:
     # when coefficients were scrubbed.
     dct_scrub: str = stego.DCT_OFF
     dct_psnr: float | None = None
+    # Which checks the output passed: the structural walk, Pillow's decode, and any independent reader (refdecode).
+    verified_by: list[str] = field(default_factory=list)
+    # What the output carries over from the input besides its pixel values: the choices that are part of the mode's
+    # equivalence relation (docs/REFERENCE.md, "What the output keeps").  Only values taken from the input appear.
+    kept: dict = field(default_factory=dict)
+
+
+@dataclass
+class Decoded:
+    """What the decode stage hands to the encoder.  Nothing else crosses from the input to the output: when the
+    decode stage runs in the sandbox, these fields are all that comes back, as raw pixels or coefficients plus a
+    short list of typed values (sandbox.py validates every one)."""
+
+    kind: str  # "pixels" (decoded and normalised frames) or "jpeg" (the JPEG modes that keep compressed data)
+    report: Report  # the input's inspection: what will be reported as removed
+    src: str  # the input format
+    out: str  # the output format
+    actions: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    decoder_warnings: list[str] = field(default_factory=list)  # what the decoders themselves warned about
+    exact: bool = True  # nothing so far changed a pixel value beyond the documented normalisation
+    # kind "pixels"
+    frames: list[Frame] = field(default_factory=list)
+    loop: int | None = None
+    embed_icc: bytes | None = None  # the rebuilt anonymous profile (--icc sanitize)
+    source_subsampling: int | None = None  # a JPEG input's chroma subsampling (0, 1 or 2), kept on re-encoding
+    # kind "jpeg"
+    orientation: int = 1
+    icc_out: bytes | None = None
+    original: np.ndarray | None = None  # the input's decoded pixels, for the comparison
+    original_mode: str = ""
+    rebuilt: bytes | None = None  # --jpeg-lossless: the input's compressed data inside a rebuilt file
+    coefficients: object = None  # the input's quantised DCT coefficients (a dct.Frame), when imgstrip can read them
+    had_jfif: bool = False
+    adobe_transform: int | None = None
+    dropped: int = 0  # embedded images found after the main image
 
 
 # --------------------------------------------------------------------------
@@ -261,7 +308,7 @@ def _guard_exit(limit: int) -> None:
 
 
 @contextlib.contextmanager
-def _pillow_guard(collected: list[str], max_pixels: int = 300_000_000):
+def _pillow_guard(collected: list[str], max_pixels: int = DEFAULT_MAX_PIXELS):
     """Tie Pillow's decompression-bomb limit to ``max_pixels`` and capture warnings.
 
     Pillow raises DecompressionBombError above 2 x MAX_IMAGE_PIXELS, and it
@@ -360,11 +407,171 @@ def fresh(img: Image.Image) -> Image.Image:
 _STRIP_BYTES = 1 << 22
 
 
-def _strips(height: int, row_bytes: int):
-    """(top, bottom) row ranges of about ``_STRIP_BYTES`` each."""
+def _strips(height: int, row_bytes: int, align: int = 1):
+    """(top, bottom) row ranges of about ``_STRIP_BYTES`` each, every one starting at a multiple of ``align``."""
     step = max(1, _STRIP_BYTES // max(1, row_bytes))
+    step = max(align, step - step % align)
     for top in range(0, height, step):
         yield top, min(height, top + step)
+
+
+# --------------------------------------------------------------------------
+# Stage 2 for lossy formats: where the error is, not only how large it is on average
+# --------------------------------------------------------------------------
+
+# A mean over the whole picture lets a change to a small area through (finding F2 of the review: a black rectangle
+# over 2 % of a JPEG, or 1 % of its pixels replaced, passed).  Lossy encoders spread their error over every block,
+# so the worst 8 x 8 block is the sharper test: a re-encode moves no block far, a local change moves a few blocks a
+# lot.  The difference is split the way the lossy codecs see it: luma (BT.601 Y), which every codec stores at full
+# resolution; chroma, which most subsample, so it gets a looser bound; and alpha, which WebP and AVIF store apart.
+_BLOCK = 8
+_LUMA = np.array([0.299, 0.587, 0.114], np.float32)
+_CB = np.array([-0.168736, -0.331264, 0.5], np.float32)
+_CR = np.array([0.5, -0.418688, -0.081312], np.float32)
+
+
+@dataclass
+class BlockError:
+    """The worst 8 x 8 block of a decoded lossy frame against the frame that was written: RMS differences in 8-bit
+    levels for luma, chroma and alpha, with the top-left corner of the block that set each one."""
+
+    luma: float = 0.0
+    chroma: float = 0.0
+    alpha: float = 0.0
+    # A subsampled four-component (CMYK) JPEG keeps its first channel at full resolution and the other three at a
+    # lower one, like luma and chroma.
+    split_cmyk: bool = False
+    luma_at: tuple[int, int] = (0, 0)
+    chroma_at: tuple[int, int] = (0, 0)
+    alpha_at: tuple[int, int] = (0, 0)
+
+    def add(self, got: np.ndarray, want: np.ndarray, alpha: bool, top: int) -> None:
+        """Account for rows [top, top + len(got)) of the frame (``top`` a multiple of the block size)."""
+        for start in range(0, got.shape[0], 8 * _BLOCK):  # a few block rows at a time keeps the float copies small
+            self._add(got[start : start + 8 * _BLOCK], want[start : start + 8 * _BLOCK], alpha, top + start)
+
+    def _add(self, got: np.ndarray, want: np.ndarray, alpha: bool, top: int) -> None:
+        if got.ndim == 2:
+            got, want = got[..., None], want[..., None]
+        full = _full_scale(got, want)
+        if alpha:
+            got, want = _premultiplied(got, full), _premultiplied(want, full)
+        diff = (got.astype(np.float32) - want.astype(np.float32)) * np.float32(255.0 / full)
+        colour = diff[..., :-1] if alpha else diff
+        if colour.shape[-1] == 3:
+            parts = {"luma": colour @ _LUMA, "chroma": np.hypot(colour @ _CB, colour @ _CR)}
+        elif colour.shape[-1] == 4 and self.split_cmyk:
+            parts = {"luma": colour[..., 0], "chroma": np.abs(colour[..., 1:]).max(axis=-1)}
+        else:  # grey, or CMYK at full resolution (no colour transform): every channel is stored like luma
+            parts = {"luma": np.abs(colour).max(axis=-1)}
+        if alpha:
+            parts["alpha"] = diff[..., -1]
+        for name, values in parts.items():
+            rms = _block_rms(values)
+            k = int(np.argmax(rms))
+            if rms.flat[k] > getattr(self, name):
+                setattr(self, name, float(rms.flat[k]))
+                by, bx = divmod(k, rms.shape[1])
+                setattr(self, f"{name}_at", (bx * _BLOCK, top + by * _BLOCK))
+
+
+@dataclass(frozen=True)
+class BlockLimits:
+    luma: float
+    chroma: float
+    alpha: float
+
+
+# The worst 8 x 8 block (RMS of luma, chroma and alpha, in 8-bit levels) that a re-encode left in an output the mean
+# test accepted, measured by scripts/calibrate_lossy.py at each anchor quality, per output format and chroma layout
+# (subsampled or not).  Its corpus is meant to hold the worst cases: natural photographs, grey textures, photographs
+# with Gaussian noise up to sigma 60, uniform white noise, saturated one-pixel colour graphics, gradients, CMYK, and
+# alpha gradients.  Re-run the script after changing an encoder setting or a codec library; it fails if a measured
+# block exceeds the bound below.
+_BLOCK_MEASURED: dict[tuple[str, bool], dict[int, tuple[float, float, float]]] = {
+    ("AVIF", False): {1: (57.2, 66.6, 0.0), 5: (56.6, 72.0, 0.0), 10: (47.3, 69.1, 0.0), 25: (40.8, 52.3, 0.0),
+                      50: (16.6, 25.7, 0.0), 75: (6.2, 19.9, 0.0), 85: (4.1, 13.1, 0.0), 90: (2.6, 8.6, 0.0),
+                      95: (2.0, 3.6, 0.0), 100: (0.7, 1.7, 0.0)},
+    ("AVIF", True): {1: (60.8, 54.8, 12.6), 5: (56.3, 54.0, 9.4), 10: (57.2, 42.0, 8.2), 25: (49.0, 32.6, 4.0),
+                     50: (21.3, 22.4, 2.5), 75: (5.9, 17.5, 1.4), 85: (4.3, 17.0, 1.1), 90: (3.7, 17.1, 0.9),
+                     95: (3.7, 17.0, 0.8), 100: (2.3, 6.6, 0.0)},
+    ("GIF", False): {1: (20.7, 25.2, 0.0)},  # colour quantisation: the quality setting plays no part
+    ("HEIF", False): {1: (63.8, 98.6, 0.0), 5: (68.2, 97.9, 0.0), 10: (55.8, 95.4, 0.0), 25: (41.2, 63.5, 0.0),
+                      50: (6.8, 19.4, 0.0), 75: (1.7, 4.2, 0.0), 85: (1.1, 2.6, 0.0), 90: (0.9, 1.9, 0.0),
+                      95: (0.8, 1.5, 0.0), 100: (0.8, 1.5, 0.0)},
+    ("HEIF", True): {1: (64.6, 45.5, 0.0), 5: (57.9, 36.8, 0.0), 10: (54.5, 37.1, 0.0), 25: (25.6, 26.0, 0.0),
+                     50: (6.1, 23.4, 0.0), 75: (3.0, 23.1, 0.0), 85: (2.9, 23.1, 0.0), 90: (2.8, 23.1, 0.0),
+                     95: (2.7, 23.1, 0.0), 100: (2.7, 23.1, 0.0)},
+    ("JPEG", False): {1: (103.9, 74.6, 0.0), 5: (94.7, 74.4, 0.0), 10: (87.9, 72.6, 0.0), 25: (59.2, 55.2, 0.0),
+                      50: (31.6, 33.9, 0.0), 75: (16.1, 19.0, 0.0), 85: (10.0, 12.7, 0.0), 90: (6.7, 8.5, 0.0),
+                      95: (3.5, 4.4, 0.0), 100: (0.7, 0.9, 0.0)},
+    ("JPEG", True): {1: (59.4, 111.0, 0.0), 5: (57.4, 109.1, 0.0), 10: (53.9, 106.6, 0.0), 25: (40.1, 106.8, 0.0),
+                     50: (23.5, 105.3, 0.0), 75: (12.3, 28.8, 0.0), 85: (7.5, 26.2, 0.0), 90: (5.6, 18.0, 0.0),
+                     95: (3.9, 17.2, 0.0), 100: (3.6, 16.9, 0.0)},
+    ("WEBP", True): {1: (39.4, 40.3, 0.0), 5: (32.5, 31.8, 0.0), 10: (26.6, 30.9, 0.0), 25: (18.8, 23.2, 0.0),
+                     50: (14.3, 18.9, 0.0), 75: (9.0, 16.8, 0.0), 85: (5.5, 17.1, 0.0), 90: (4.8, 16.8, 0.0),
+                     95: (4.1, 17.0, 0.0), 100: (3.9, 16.8, 0.0)},
+}  # fmt: skip
+# The bound is this multiple of the worst block measured at the nearest anchor at or below the quality, plus a floor
+# (luma, chroma, alpha) that covers rounding and decoder differences on near-lossless settings.
+_BLOCK_MARGIN = 2.0
+_BLOCK_FLOOR = (3.0, 6.0, 3.0)
+
+
+def block_tolerance(fmt: str, quality: int, chroma_subsampled: bool) -> BlockLimits:
+    """How far (RMS, 8-bit levels) a re-encode may move one 8 x 8 block of a lossy output."""
+    table = _BLOCK_MEASURED.get((fmt, chroma_subsampled)) or _BLOCK_MEASURED.get((fmt, not chroma_subsampled))
+    if table is None:
+        inf = float("inf")
+        return BlockLimits(inf, inf, inf)
+    # The nearest anchor at or below the quality (a lower quality moves blocks further), and every anchor above it,
+    # so that a measurement that happened to come out larger at a higher quality still counts.
+    nearest = max([q for q in table if q <= quality] or [min(table)])
+    worst = [max(table[q][k] for q in table if q >= nearest) for k in range(3)]
+    return BlockLimits(*(_BLOCK_MARGIN * w + f for w, f in zip(worst, _BLOCK_FLOOR, strict=True)))
+
+
+def _cmyk_subsampling(im: Image.Image) -> int:
+    """Pillow's subsampling setting (0, 1 or 2) that keeps a four-component JPEG's own layout, 0 when it has none.
+
+    Pillow can only write the first component at a higher resolution than the other three; any other layout is
+    kept at full resolution, which loses nothing.
+    """
+    layer = getattr(im, "layer", None) or []
+    factors = [(h, v) for _id, h, v, _q in layer]
+    if len(factors) == 4 and all(f == (1, 1) for f in factors[1:]):
+        return {(1, 1): 0, (2, 1): 1, (2, 2): 2}.get(factors[0], 0)
+    return 0
+
+
+def _expected_rows16(frame: Frame, top: int, bottom: int) -> np.ndarray:
+    """Rows [top, bottom) of a frame as written, as uint16 RGBA with 8-bit samples scaled by 257 and colour under
+    fully transparent pixels zeroed: the form refdecode compares with."""
+    from .oracles import expand
+
+    if frame.array is not None:
+        return expand(frame.array[top:bottom], 16)
+    img = frame.image
+    part = img.crop((0, top, img.width, bottom))
+    if img.mode == "I;16":
+        grey = np.asarray(part).astype(np.uint16)
+        out = expand(grey[..., None], 16)
+        if frame.key is not None:
+            out[grey == frame.key] = 0
+        return out
+    if img.mode == "1":
+        return expand(np.asarray(part).astype(np.uint8)[..., None] * 255, 8)
+    return expand(_rgba_array(replace(frame, image=part)), 8)
+
+
+def _block_rms(values: np.ndarray) -> np.ndarray:
+    """Root mean square of a (rows, cols) array over 8 x 8 blocks; edge blocks average the pixels they hold."""
+    h, w = values.shape
+    squared = values.astype(np.float64) ** 2
+    rows, cols = np.arange(0, h, _BLOCK), np.arange(0, w, _BLOCK)
+    sums = np.add.reduceat(np.add.reduceat(squared, rows, axis=0), cols, axis=1)
+    counts = np.outer(np.diff(np.append(rows, h)), np.diff(np.append(cols, w)))
+    return np.sqrt(sums / counts)
 
 
 def _rows(img: Image.Image, top: int, bottom: int) -> np.ndarray:
@@ -579,24 +786,33 @@ def _zero_isobmff_timestamps(data: bytes) -> bytes:
 
 
 class _Job:
-    def __init__(self, data: bytes, options: Options, before: Report):
-        self.data = data
+    def __init__(self, data: bytes, options: Options, before: Report | None, sandboxed: bool = False):
+        self.data = data  # the input; only the decode stage reads it
         self.opts = options
         self.before = before
+        self.sandboxed = sandboxed  # decode what still holds the input's compressed data in the sandbox too
+        self.source_subsampling: int | None = None
         self.actions: list[str] = []
         self.warnings: list[str] = []
         self.embed_icc: bytes | None = None
         self.exact = True
         self.prnu_applied = False
         self.lsb_scrub = stego.SCRUB_OFF if not options.scrub_lsb else stego.SCRUB_NOT_APPLIED
+        self.chroma_subsampled = False  # the lossy output stores colour at a lower resolution than luma
+        self.kept: dict = {}  # see Result.kept
+        self.verified_by = ["structure", "Pillow"]
 
-    # -- entry point ------------------------------------------------------
+    # -- entry points -----------------------------------------------------
+    #
+    # decode() reads the input and returns a Decoded; finish() scrubs, encodes and verifies.  strip_image runs the
+    # first in the sandbox (sandbox.py) and the second here; with the sandbox off, both run here.
 
-    def run(self) -> Result:
+    def _guarded(self, step):
+        """Run ``step`` under Pillow's guard; return (its result, the decoders' own warnings)."""
         caught: list[str] = []
         with _pillow_guard(caught, self.opts.max_pixels):
             try:
-                result = self._run()
+                result = step()
             except StripError:
                 raise
             except Image.DecompressionBombError:
@@ -611,12 +827,28 @@ class _Job:
                 # written at this point, so report it as a per-file failure.
                 raise StripError(f"cannot process image ({type(exc).__name__}: {exc})") from exc
         noisy = ("palette images with transparency", "Truncated File Read")
-        for msg in caught:
-            if not any(n in msg for n in noisy):
-                self.warnings.append(f"decoder: {msg}")
+        return result, [msg for msg in caught if not any(n in msg for n in noisy)]
+
+    def decode(self) -> Decoded:
+        """The decode stage: everything that reads the input."""
+        decoded, caught = self._guarded(self._decode)
+        decoded.decoder_warnings = caught
+        return decoded
+
+    def finish(self, decoded: Decoded) -> Result:
+        """The encode stage: from what the decode stage handed over to a verified file."""
+        result, caught = self._guarded(lambda: self._finish(decoded))
+        for msg in dict.fromkeys(decoded.decoder_warnings + caught):
+            self.warnings.append(f"decoder: {msg}")
         return result
 
-    def _run(self) -> Result:
+    def run(self) -> Result:
+        """Both stages in this process."""
+        return self.finish(self.decode())
+
+    def _decode(self) -> Decoded:
+        if self.before is None:
+            self.before = inspect_bytes(self.data)
         raw = camera_raw_kind(self.data)
         if raw:
             raise StripError(f"camera RAW files ({raw}) are not supported; export the photo to TIFF, PNG or JPEG first")
@@ -638,7 +870,7 @@ class _Job:
                     f"the sensor-fingerprint scrub changes pixels, so it cannot be combined with {_DCT_NAME[mode]} "
                     f"({_DCT_FLAG[mode]})"
                 )
-            return self._jpeg_lossless(im)
+            return self._decode_jpeg(im, mode)
         if self.opts.jpeg_lossless and out == "JPEG":
             if src != "JPEG":
                 raise StripError("--jpeg-lossless requires a JPEG input")
@@ -648,7 +880,7 @@ class _Job:
                     "the sensor-fingerprint scrub changes pixels, so it cannot be combined with bit-exact JPEG "
                     "mode (--jpeg-lossless)"
                 )
-            return self._jpeg_lossless(im)
+            return self._decode_jpeg(im, "off")
 
         indices, loop = self._select_frames(im, src, out)
         if len(indices) * w * h > 4 * self.opts.max_pixels:
@@ -690,11 +922,41 @@ class _Job:
         if icc:
             self._color_manage(frames, icc, out)
         self._scrub_transparent(frames)
+        return Decoded(
+            kind="pixels",
+            report=self.before,
+            src=src,
+            out=out,
+            actions=self.actions,
+            warnings=self.warnings,
+            exact=self.exact,
+            frames=frames,
+            loop=loop,
+            embed_icc=self.embed_icc,
+            source_subsampling=self._source_subsampling() if src == "JPEG" else None,
+        )
+
+    def _adopt(self, decoded: Decoded) -> None:
+        """Take over what the decode stage found (it may have run in another process)."""
+        self.before = decoded.report
+        self.actions, self.warnings = decoded.actions, decoded.warnings
+        self.exact = decoded.exact
+        self.embed_icc = decoded.embed_icc
+        self.source_subsampling = decoded.source_subsampling
+
+    def _finish(self, decoded: Decoded) -> Result:
+        self._adopt(decoded)
+        if decoded.kind == "jpeg":
+            return self._finish_jpeg(decoded)
+        src, out, loop = decoded.src, decoded.out, decoded.loop
+        frames, decoded.frames = decoded.frames, []  # this stage owns the pixels now
+        self._scrub_transparent(frames)  # again, because the decode stage may have run in another process
         if self.opts.scrub_prnu:
             self._scrub_prnu(frames)
         if self.opts.scrub_lsb:  # last, so the final low bits are random whatever the warp did
             self._scrub_lsb(frames)
         data, expected, exact = self._encode(frames, out, loop, src)
+        kept = self._kept(out, expected)
         # The encoder returns the frames as written (new ones whenever it converted them), so the ones it was given
         # need not stay in memory while the output is verified.
         size, count = frames[0].size, len(frames)
@@ -719,7 +981,21 @@ class _Job:
             verified_exact=exact,
             prnu_applied=self.prnu_applied,
             lsb_scrub=self.lsb_scrub,
+            verified_by=self.verified_by,
+            kept=kept,
         )
+
+    def _kept(self, out: str, written: list[Frame]) -> dict:
+        kept = {"format": out} if not self.opts.format else {}
+        first = written[0]
+        mode = first.image.mode if first.image is not None else None
+        if mode == "CMYK":
+            kept["colour"] = "CMYK"
+        if first.array is not None or mode == "I;16":
+            kept["depth"] = 16
+        if self.embed_icc:
+            kept["profile"] = "rebuilt from the input's"
+        return {**kept, **self.kept}
 
     # -- format / frame selection -----------------------------------------
 
@@ -779,6 +1055,8 @@ class _Job:
             self.warnings.append(f"{out} cannot hold several frames; kept only the first of {len(indices)}")
             indices = indices[:1]
         loop = im.info.get("loop") if len(indices) > 1 else None
+        if loop is not None:  # one representation: a whole number in the range every animated format can store
+            loop = max(0, min(0xFFFF, int(loop)))
         return indices, loop
 
     # -- decoding -----------------------------------------------------------
@@ -1155,9 +1433,15 @@ class _Job:
         """Returns (file bytes, frames as written for comparison, lossless?)."""
         if frames[0].array is not None:
             return self._encode_16bit(frames[0], out)
+        frames = self._canonical_model(frames, out)
         frames = [self._adapt(f, out) for f in frames]
         animated = len(frames) > 1
-        durations = [int(round(f.duration or 0)) for f in frames]
+        # One representation of timing: whole, non-negative milliseconds (GIF then stores tens of them).
+        durations = [max(0, int(round(f.duration or 0))) for f in frames]
+        if animated and out != "TIFF":  # pages of a TIFF have no timing
+            self.kept.update(frames=len(frames), durations=durations, loop=loop)
+        elif len(frames) > 1:
+            self.kept["frames"] = len(frames)
         buf = io.BytesIO()
         icc_kw = {"icc_profile": self.embed_icc} if self.embed_icc else {}
         lossless = True
@@ -1176,10 +1460,22 @@ class _Job:
             kw = {"quality": self._quality("JPEG"), "optimize": True}
             if img.mode in ("RGB", "CMYK"):
                 kw["subsampling"] = self._subsampling(src)
-            img.save(buf, "JPEG", **kw, **icc_kw)
-            self.actions.append(f"re-encoded JPEG at quality {kw['quality']}")
+                self.chroma_subsampled = kw["subsampling"] != 0
+                if src == "JPEG":
+                    self.kept["chroma"] = {0: "4:4:4", 1: "4:2:2", 2: "4:2:0"}[kw["subsampling"]]
+            try:
+                img.save(buf, "JPEG", **kw, **icc_kw)
+                self.actions.append(f"re-encoded JPEG at quality {kw['quality']}")
+            except OSError:
+                # To optimise the Huffman tables Pillow gives libjpeg an output buffer of one or two bytes per pixel,
+                # and libjpeg cannot suspend there ("broken data stream"), so a very noisy picture does not fit.
+                # Standard tables need no such buffer.
+                buf = io.BytesIO()
+                img.save(buf, "JPEG", **{**kw, "optimize": False}, **icc_kw)
+                self.actions.append(f"re-encoded JPEG at quality {kw['quality']} (standard Huffman tables)")
         elif out == "WEBP":
             lossless = bool(self.before.info.get("lossless")) if src == "WEBP" else src in ("PNG", "GIF", "BMP", "TIFF")
+            self.kept["lossless"] = lossless
             kw = (
                 {"lossless": True, "quality": 100, "method": 6, "exact": True}
                 if lossless
@@ -1192,6 +1488,7 @@ class _Job:
                     kw["loop"] = loop
             imgs[0].save(buf, "WEBP", **kw, **icc_kw)
             if not lossless:
+                self.chroma_subsampled = True  # lossy WebP is always 4:2:0
                 self.actions.append(f"re-encoded lossy WebP at quality {kw['quality']}")
         elif out == "GIF":
             arrays = [self._gif_frame(f) for f in frames]
@@ -1215,6 +1512,9 @@ class _Job:
             lossless = False
             imgs = [f.image for f in frames]
             kw = {"quality": self._quality("AVIF"), "subsampling": self._chroma(src)}
+            self.chroma_subsampled = kw["subsampling"] != "4:4:4"
+            if src in ("AVIF", "HEIF", "JPEG", "WEBP"):
+                self.kept["chroma"] = kw["subsampling"]
             if animated:
                 kw.update(save_all=True, append_images=imgs[1:], duration=durations)
             imgs[0].save(buf, "AVIF", **kw, **icc_kw)
@@ -1224,6 +1524,9 @@ class _Job:
         elif out == "HEIF":
             lossless = False
             kw = {"quality": self._quality("HEIF"), "chroma": int(self._chroma(src).replace(":", ""))}
+            self.chroma_subsampled = kw["chroma"] != 444
+            if src in ("AVIF", "HEIF", "JPEG", "WEBP"):
+                self.kept["chroma"] = self._chroma(src)
             frames[0].image.save(buf, "HEIF", **kw, **icc_kw)
             self.actions.append(f"re-encoded HEIF at quality {kw['quality']}")
         return buf.getvalue(), frames, lossless
@@ -1240,17 +1543,25 @@ class _Job:
 
     def _subsampling(self, src: str) -> int:
         if src == "JPEG":
-            try:
-                from PIL import JpegImagePlugin
-
-                im = open_image(self.data)
-                sampling = JpegImagePlugin.get_sampling(im)
-                if sampling in (0, 1, 2):
-                    return sampling
-            except Exception:  # noqa: BLE001
-                pass
-            return 2
+            return self.source_subsampling if self.source_subsampling is not None else 2
         return 0 if self._quality("JPEG") >= 90 else 2
+
+    def _source_subsampling(self) -> int:
+        """The chroma subsampling of a JPEG input (decode stage: it reads the input's frame header)."""
+        try:
+            from PIL import JpegImagePlugin
+
+            im = open_image(self.data)
+            if getattr(im, "layers", None) == 4:
+                # Pillow reports no sampling for four components (and would then default to 4:2:0, which keeps
+                # M, Y and K at a quarter of their resolution): read the factors from the frame header instead.
+                return _cmyk_subsampling(im)
+            sampling = JpegImagePlugin.get_sampling(im)
+            if sampling in (0, 1, 2):
+                return sampling
+        except Exception:  # noqa: BLE001
+            pass
+        return 2
 
     def _encode_png_static(self, frame: Frame) -> bytes:
         img = frame.image
@@ -1396,6 +1707,25 @@ class _Job:
         rgba[rgba[..., 3] == 0] = 0
         return rgba
 
+    def _canonical_model(self, frames: list[Frame], out: str) -> list[Frame]:
+        """Store the pixels in the colour model they need, not the one the input happened to use: otherwise an opaque
+        alpha channel, grey stored as colour, or a few colours stored without a palette would each carry a choice of
+        the input's into the output (review item 6).  PNG gets the same reduction when it is written."""
+        if out in ("TIFF", "BMP"):
+            # One page only: the pages of a multi-page TIFF must share one model (an animation's frames already do).
+            if len(frames) == 1 and frames[0].image is not None:
+                return [self._reduce_png(frames[0])]
+            return frames
+        if len(frames) == 1 and frames[0].image is not None and out in ("JPEG", "WEBP", "AVIF", "HEIF"):
+            img = frames[0].image
+            if img.mode in ("RGBA", "LA") and img.getextrema()[-1] == (255, 255):
+                img = img.convert(img.mode[:-1])
+            if out == "JPEG" and img.mode == "RGB" and self._grey(img):
+                img = img.getchannel("R")
+            if img is not frames[0].image:
+                return [Frame(image=fresh(img), duration=frames[0].duration)]
+        return frames
+
     def _adapt(self, frame: Frame, out: str) -> Frame:
         """Convert a frame into a mode the output format can store."""
         img = frame.image
@@ -1516,7 +1846,8 @@ class _Job:
             if check.size != frame.size:
                 raise VerificationError(f"frame {i}: output size {check.size} differs from {frame.size}")
             alpha, pairs = self._decoded_against_written(data, i, check, frame, kind)
-            total, samples, hidden, full = 0.0, 0, 0, 255
+            total, samples, hidden, full, top = 0.0, 0, 0, 255, 0
+            blocks = BlockError(split_cmyk=self.chroma_subsampled)
             rows = frame.size[1]
             for got, want in pairs:
                 if got.shape != want.shape:
@@ -1532,11 +1863,77 @@ class _Job:
                 full = _full_scale(got, want)
                 total += _error_total(got, want, alpha, full)
                 samples += got.size
+                blocks.add(got, want, alpha, top)
+                top += got.shape[0]
             if tolerance == 0.0:
                 self._verify_nothing_hidden_in_pixels(i, check, hidden, alpha, frame.array is not None)
+                continue
             error = total / max(1, samples) * (255.0 / full)
             if error > tolerance:
                 raise VerificationError(f"frame {i}: re-encoded image deviates too much (mean error {error:.1f})")
+            self._check_blocks(i, blocks, out)
+        check.close()  # Pillow's decode is no longer needed while the independent reader works
+        del check
+        if out in ("PNG", "BMP") or (out == "JPEG" and self.opts.independent_jpeg):
+            self._independent_check(data, out, expected, tolerance)
+
+    def _independent_check(self, data: bytes, out: str, expected: list[Frame], tolerance: float) -> None:
+        """Stage 2 again, with a reader that shares no code with Pillow or with imgstrip's encoders (refdecode)."""
+
+        def rows(k: int, top: int, bottom: int) -> np.ndarray:
+            return _expected_rows16(expected[k], top, bottom)
+
+        try:
+            if out == "PNG":
+                name = refdecode.check_png(data, len(expected), rows)
+            elif out == "BMP":
+                name = refdecode.check_bmp(data, rows)
+            else:
+                name = self._independent_jpeg(data, expected[0], tolerance)
+        except refdecode.Disagreement as exc:
+            raise VerificationError(f"an independent reader disagrees with the output: {exc}") from None
+        self.verified_by.append(name)
+
+    def _independent_jpeg(self, data: bytes, frame: Frame, tolerance: float) -> str:
+        """Decode a default-mode JPEG with imgstrip's own decoder: it must show the written pixels within the same
+        bounds as Pillow's decode, and agree with Pillow's decode within what two decoders may differ by."""
+        mine = refdecode.decode_jpeg(data, self.opts.max_pixels)
+        want = np.asarray(frame.image)
+        theirs = np.asarray(open_image(data))
+        mine, want, theirs = (a if a.ndim == 3 else a[..., None] for a in (mine, want, theirs))
+        if mine.shape != want.shape or theirs.shape != want.shape:
+            raise refdecode.Disagreement(f"decoded layout {mine.shape} differs from {want.shape}")
+        written = block_tolerance("JPEG", self._quality("JPEG"), self.chroma_subsampled)
+        for other, label, mean_limit, limits in (
+            (want, "the written pixels", tolerance, written),
+            (theirs, "Pillow's decode", refdecode.JPEG_DECODERS.mean, refdecode.JPEG_DECODERS),
+        ):
+            blocks = BlockError(split_cmyk=self.chroma_subsampled)
+            total = 0.0
+            for top, bottom in _strips(want.shape[0], want.shape[1] * 4, _BLOCK):
+                blocks.add(mine[top:bottom], other[top:bottom], False, top)
+                total += _error_total(mine[top:bottom], other[top:bottom], False, 255)
+            mean = total / max(1, mine.size)
+            worst = max((("luma", blocks.luma, limits.luma), ("chroma", blocks.chroma, limits.chroma)), key=lambda r: r[1] - r[2])
+            if mean > mean_limit or worst[1] > worst[2]:
+                raise refdecode.Disagreement(
+                    f"imgstrip's JPEG decoder and {label} differ by {mean:.2f} levels on average and {worst[1]:.1f} "
+                    f"in the worst block ({worst[0]}; allowed {mean_limit:.2f} and {worst[2]:.1f})"
+                )
+        return "imgstrip JPEG decoder"
+
+    def _check_blocks(self, i: int, blocks: BlockError, out: str) -> None:
+        """Refuse a lossy output whose worst 8 x 8 block is further from what was written than a re-encode moves one."""
+        limits = block_tolerance(out, self._quality(out), self.chroma_subsampled)
+        for name in ("luma", "chroma", "alpha"):
+            value, limit = getattr(blocks, name), getattr(limits, name)
+            if value > limit:
+                x, y = getattr(blocks, f"{name}_at")
+                raise VerificationError(
+                    f"frame {i}: the 8x8 block at x={x}, y={y} differs from the written pixels by {value:.1f} levels "
+                    f"(RMS, {name}; a re-encode at this quality moves no block more than {limit:.1f}), so part of the "
+                    "picture changed"
+                )
 
     @staticmethod
     def _verify_nothing_hidden_in_pixels(i: int, check: Image.Image, hidden: int, alpha: bool, wide: bool) -> None:
@@ -1567,13 +1964,13 @@ class _Job:
                 return alpha, [(codecs.decode_16bit(lambda: open_image(data), i, kind), want)]
 
             def wide():
-                for top, bottom in _strips(check.height, want[0].nbytes):
+                for top, bottom in _strips(check.height, want[0].nbytes, _BLOCK):
                     got = _rows(check, top, bottom).astype(np.uint16)
                     yield (got[..., None] if got.ndim == 2 else got), want[top:bottom]
 
             return alpha, wide()
         img = frame.image
-        strips = _strips(img.height, img.width * 4)
+        strips = _strips(img.height, img.width * 4, _BLOCK)
         if check.mode == img.mode and img.mode != "P":
             return img.mode in ("LA", "RGBA"), ((_rows(check, t, b), _rows(img, t, b)) for t, b in strips)
 
@@ -1584,37 +1981,13 @@ class _Job:
 
         return True, rgba()
 
-    # -- lossless JPEG ----------------------------------------------------------
+    # -- the JPEG modes that keep compressed data --------------------------------
 
-    def _dct_body(self, mode: str):
-        """Canonical tables, frame header and scan for this JPEG (scrubbed first in "full" mode).
+    def _check_scan_slack(self):
+        """Bit-for-bit mode copies the scan data, so refuse a file whose scans hold bytes no decoder reads.
 
-        Returns (body, frame as written, ScrubStats or None).  Fails closed: a JPEG that cannot be represented
-        exactly (arithmetic coding, 12 bits, ...) is refused rather than copied with its coefficients intact.
+        Returns the input's coefficients (None when imgstrip's own decoder cannot read the file).
         """
-        from . import dct, jpeg
-
-        try:
-            frame = dct.read(self.data, self.opts.max_pixels)
-            stats = None
-            if mode == "full":
-                stats = dct.scrub(frame, np.random.default_rng(int.from_bytes(os.urandom(16), "big")))
-                floor = self.opts.dct_min_psnr
-                if floor and stats.psnr is not None and stats.psnr < floor:
-                    raise StripError(
-                        f"scrubbing the DCT coefficients would cost about {stats.psnr} dB of picture quality "
-                        f"(limit {floor:g} dB, see --dct-min-psnr); re-encoding without --scrub-dct is gentler "
-                        "but does not guarantee that DCT steganography is gone"
-                    )
-            return dct.write(frame), frame, stats
-        except jpeg.JpegError as exc:
-            raise StripError(
-                f"cannot rebuild this JPEG from its DCT coefficients ({exc}); nothing was written because "
-                "--scrub-dct would otherwise have kept the hidden-data channel it was asked to remove"
-            ) from None
-
-    def _check_scan_slack(self) -> None:
-        """Bit-for-bit mode copies the scan data, so refuse a file whose scans hold bytes no decoder reads."""
         from . import dct, jpeg
 
         try:
@@ -1624,17 +1997,19 @@ class _Job:
                 "this JPEG's compressed data could not be checked for unused bytes (arithmetic coding, 12 bits or "
                 "another form imgstrip's own decoder does not read)"
             )
-            return
+            return None
         if frame.slack:
             raise StripError(
                 f"the compressed data holds {frame.slack} byte(s) that no decoder uses, which --jpeg-lossless would "
                 "copy; use --jpeg-canonical (same picture, rebuilt) or the default mode instead"
             )
+        return frame
 
-    def _jpeg_lossless(self, im: Image.Image) -> Result:
+    def _decode_jpeg(self, im: Image.Image, mode: str) -> Decoded:
+        """Decode stage of --jpeg-lossless (mode "off"), --jpeg-canonical and --scrub-dct: the input's coefficients,
+        its decoded pixels, and (bit-exact mode only) the rebuilt file that keeps its compressed data."""
         from . import dct, jpeg
 
-        mode = dct_mode(self.opts)
         orientation = _orientation(im, self.warnings)
         icc = im.info.get("icc_profile") or None
         icc_out = None
@@ -1661,12 +2036,71 @@ class _Job:
         if orientation != 1 and not self.opts.auto_orient:
             self.warnings.append("orientation tag discarded without rotating (--no-auto-orient)")
             orientation = 1
-        canonical = frame = stats = None
-        if mode != "off":
-            canonical, frame, stats = self._dct_body(mode)
-        data, dropped = jpeg.rebuild(self.data, orientation, icc_out, canonical)
-        if dropped:
-            self.actions.append(f"removed {dropped} embedded image(s) after the main image")
+        decoded = Decoded(
+            kind="jpeg",
+            report=self.before,
+            src="JPEG",
+            out="JPEG",
+            actions=self.actions,
+            warnings=self.warnings,
+            orientation=orientation,
+            icc_out=icc_out,
+        )
+        if mode == "off":
+            decoded.rebuilt, decoded.dropped = jpeg.rebuild(self.data, orientation, icc_out, None)
+            decoded.coefficients = self._check_scan_slack()
+        else:
+            try:
+                decoded.coefficients = dct.read(self.data, self.opts.max_pixels)
+            except jpeg.JpegError as exc:
+                raise StripError(
+                    f"cannot rebuild this JPEG from its DCT coefficients ({exc}); nothing was written because "
+                    "--scrub-dct would otherwise have kept the hidden-data channel it was asked to remove"
+                ) from None
+            decoded.had_jfif, decoded.adobe_transform, decoded.dropped = jpeg.wrapper_facts(self.data)
+        im.load()
+        decoded.original, decoded.original_mode = np.asarray(im), im.mode
+        return decoded
+
+    def _decode_output(self, data: bytes) -> tuple[np.ndarray, str]:
+        """Decoded pixels of an output that still holds the input's compressed data (bit-exact mode): in the sandbox
+        when the input was decoded there, since that data came from the input."""
+        if self.sandboxed:
+            from . import sandbox
+
+            return sandbox.pixels(data, self.opts.max_pixels)
+        im = open_image(data)
+        im.load()
+        return np.asarray(im), im.mode
+
+    def _finish_jpeg(self, decoded: Decoded) -> Result:
+        from . import dct, jpeg
+
+        mode = dct_mode(self.opts)
+        orientation, icc_out, frame = decoded.orientation, decoded.icc_out, decoded.coefficients
+        stats = None
+        if mode == "off":
+            data = decoded.rebuilt
+        else:
+            try:
+                if mode == "full":
+                    stats = dct.scrub(frame, np.random.default_rng(int.from_bytes(os.urandom(16), "big")))
+                    floor = self.opts.dct_min_psnr
+                    if floor and stats.psnr is not None and stats.psnr < floor:
+                        raise StripError(
+                            f"scrubbing the DCT coefficients would cost about {stats.psnr} dB of picture quality "
+                            f"(limit {floor:g} dB, see --dct-min-psnr); re-encoding without --scrub-dct is gentler "
+                            "but does not guarantee that DCT steganography is gone"
+                        )
+                body = dct.write(frame)
+            except jpeg.JpegError as exc:
+                raise StripError(
+                    f"cannot rebuild this JPEG from its DCT coefficients ({exc}); nothing was written because "
+                    "--scrub-dct would otherwise have kept the hidden-data channel it was asked to remove"
+                ) from None
+            data = jpeg.assemble(body, orientation, icc_out, decoded.had_jfif, decoded.adobe_transform)
+        if decoded.dropped:
+            self.actions.append(f"removed {decoded.dropped} embedded image(s) after the main image")
         if orientation != 1:
             self.actions.append(
                 f"kept orientation as a minimal 1-tag EXIF block ({_ORIENT_TEXT[orientation]}); "
@@ -1674,7 +2108,6 @@ class _Job:
             )
         if mode == "off":
             self.actions.append("kept the compressed image data bit-for-bit (no re-encoding)")
-            self._check_scan_slack()
             self.warnings.append(
                 "the compressed picture data was kept as it is, so data hidden in it survives (JPEG steganography "
                 "stored in the coefficients, or in how the file is encoded); --jpeg-canonical removes the "
@@ -1707,21 +2140,32 @@ class _Job:
             leftovers.append(f)
         if leftovers:
             raise VerificationError("output still contains: " + "; ".join(map(str, leftovers)))
-        original = im  # opened from the same bytes in _run and only read for its header so far
-        original.load()
-        rebuilt = open_image(data)
-        rebuilt.load()
-        if original.size != rebuilt.size or original.mode != rebuilt.mode:
+        original = decoded.original
+        decoded.original = None
+        rebuilt, rebuilt_mode = self._decode_output(data) if mode == "off" else self._decode_here(data)
+        if original.shape != rebuilt.shape or decoded.original_mode != rebuilt_mode:
             raise VerificationError("lossless JPEG rebuild changed the image geometry")
         measured = None
         if mode == "full":
             measured = self._verify_dct_scrub(data, original, rebuilt, frame, stats)
         else:
-            strips = _strips(original.height, original.width * 4)
-            if not all(np.array_equal(_rows(original, t, b), _rows(rebuilt, t, b)) for t, b in strips):
+            row_bytes = int(np.prod(original.shape[1:])) * original.itemsize
+            strips = _strips(original.shape[0], row_bytes)
+            if not all(np.array_equal(original[t:b], rebuilt[t:b]) for t, b in strips):
                 raise VerificationError("lossless JPEG rebuild changed the decoded pixels")
-            if mode == "canonical" and not dct.visible_equal(dct.read(data), frame):
-                raise VerificationError("canonical JPEG rebuild changed the DCT coefficients")
+            if frame is not None:
+                # A second, independent decoder: imgstrip's own entropy decoder must read the output's coefficients
+                # as the input's (lossless) or as the ones that were written (canonical).
+                written = dct.read(data)
+                if not dct.visible_equal(written, frame):
+                    raise VerificationError(
+                        "canonical JPEG rebuild changed the DCT coefficients"
+                        if mode == "canonical"
+                        else "imgstrip's coefficient reader sees other coefficients in the output than in the input"
+                    )
+                if mode == "canonical":
+                    self._verify_canonical_form(data, written)
+                self.verified_by.append("imgstrip JPEG coefficient reader")
         return Result(
             data=data,
             input_format="JPEG",
@@ -1729,7 +2173,7 @@ class _Job:
             removed=list(self.before.findings),
             actions=self.actions,
             warnings=self.warnings,
-            size=rebuilt.size,
+            size=(rebuilt.shape[1], rebuilt.shape[0]),
             frames=1,
             pixels_exact=mode != "full",
             input_report=self.before,
@@ -1737,9 +2181,34 @@ class _Job:
             lsb_scrub=self.lsb_scrub,
             dct_scrub={"off": stego.DCT_OFF, "canonical": stego.DCT_CANONICAL, "full": stego.DCT_SCRUBBED}[mode],
             dct_psnr=measured,
+            verified_by=self.verified_by,
+            kept={
+                **({"format": "JPEG"} if not self.opts.format else {}),
+                "dct": {"off": "compressed data bit-exact", "canonical": "coefficients", "full": "scrubbed coefficients"}[
+                    mode
+                ],
+                **({"orientation": orientation} if orientation != 1 else {}),
+                **({"profile": "rebuilt from the input's"} if icc_out else {}),
+            },
         )
 
-    def _verify_dct_scrub(self, data, original, rebuilt, frame, stats) -> float | None:
+    @staticmethod
+    def _decode_here(data: bytes) -> tuple[np.ndarray, str]:
+        """Decoded pixels of an output this process built from coefficients (nothing in it came from the input)."""
+        im = open_image(data)
+        im.load()
+        return np.asarray(im), im.mode
+
+    @staticmethod
+    def _verify_canonical_form(data: bytes, written) -> None:
+        """The canonical form is a pure function of the coefficients: writing what was read back must give the very
+        same bytes, so nothing else (an encoding choice, a hidden bit) can be in the compressed data."""
+        from . import dct
+
+        if not data.endswith(dct.write(written) + b"\xff\xd9"):
+            raise VerificationError("the rebuilt JPEG data is not in canonical form")
+
+    def _verify_dct_scrub(self, data, original: np.ndarray, rebuilt: np.ndarray, frame, stats) -> float | None:
         """Check a scrubbed file against what the scrub promises, and against how it actually decodes."""
         from . import dct
 
@@ -1749,9 +2218,12 @@ class _Job:
         problem = dct.check_scrub(written, stats.before)
         if problem:
             raise VerificationError(f"DCT scrub check failed: {problem}")
+        self._verify_canonical_form(data, written)
+        self.verified_by.append("imgstrip JPEG coefficient reader")
         sse = samples = 0
-        for top, bottom in _strips(original.height, original.width * 4):
-            a, b = _rows(original, top, bottom), _rows(rebuilt, top, bottom)
+        row_bytes = int(np.prod(original.shape[1:])) * original.itemsize
+        for top, bottom in _strips(original.shape[0], row_bytes):
+            a, b = original[top:bottom], rebuilt[top:bottom]
             sse += dct.squared_error(a, b)
             samples += a.size
         measured = dct.psnr_of(sse, samples)
@@ -1773,11 +2245,21 @@ class _Job:
 
 
 def strip_image(data: bytes, options: Options | None = None) -> Result:
-    """Remove all metadata and hidden data from an image file held in memory."""
+    """Remove all metadata and hidden data from an image file held in memory.
+
+    The input is inspected and decoded in the sandbox (a separate, freshly forked process: see sandbox.py) unless
+    ``options.sandbox`` is False or the sandbox was switched off for the process; the output is encoded and verified
+    here, from what the sandbox handed back.
+    """
     if not data:
         raise StripError("file is empty")
-    before = inspect_bytes(data)
-    return _Job(data, options or Options(), before).run()
+    options = options or Options()
+    from . import sandbox
+
+    if sandbox.enabled(options.sandbox):
+        decoded = sandbox.decode(data, options)
+        return _Job(data, options, decoded.report, sandboxed=True).finish(decoded)
+    return _Job(data, options, inspect_bytes(data)).run()
 
 
 def _canonical_array(frame: Frame) -> np.ndarray:
@@ -1797,13 +2279,23 @@ def _canonical_array(frame: Frame) -> np.ndarray:
     return rgba
 
 
-def canonical_frames(data: bytes, max_pixels: int = 300_000_000) -> list[np.ndarray]:
+def canonical_frames(data: bytes, max_pixels: int = DEFAULT_MAX_PIXELS, sandboxed: bool | None = None) -> list[np.ndarray]:
     """Decode every frame the engine would keep from ``data``, as comparable arrays.
 
     No orientation, colour management or other normalisation is applied, so the arrays of
     an original and of its cleaned copy are equal exactly when the cleaned file shows the
-    very same pixel values (nothing is rotated, re-encoded, converted or scrubbed).
+    very same pixel values (nothing is rotated, re-encoded, converted or scrubbed).  The
+    decoding runs in the sandbox unless it is switched off (``sandboxed``, as Options.sandbox).
     """
+    from . import sandbox
+
+    if sandbox.enabled(sandboxed):
+        return sandbox.frames(data, max_pixels)
+    return canonical_frames_here(data, max_pixels)
+
+
+def canonical_frames_here(data: bytes, max_pixels: int = DEFAULT_MAX_PIXELS) -> list[np.ndarray]:
+    """``canonical_frames`` in this process."""
     caught: list[str] = []
     with _pillow_guard(caught, max_pixels):
         try:

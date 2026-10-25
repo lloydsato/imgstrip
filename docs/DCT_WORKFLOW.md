@@ -221,7 +221,7 @@ flowchart LR
     class UN uncovered
 ```
 
-Layer A, the canonical write, closes every hiding place around the coefficients and leaves the decoded pixels unchanged, so `--jpeg-canonical` costs nothing in picture quality but keeps the coefficients. Layer B, which only `--scrub-dct` runs (after Layer A), closes the two channels that live in the coefficient values themselves: their parity, and the support pattern used by zero-changing embedders such as J-UNIWARD. The red node is the honest limit: robust watermarks, payloads carried by the picture content, ternary embedders and second-order leakage from plus-or-minus-one embedders are outside what the guarantee covers.
+Layer A, the canonical write, closes every hiding place around the coefficients and leaves the decoded pixels unchanged, so `--jpeg-canonical` costs nothing in picture quality but keeps the coefficients. Layer B, which only `--scrub-dct` runs (after Layer A), closes the two channels that live in the coefficient values themselves: their parity, and the support pattern used by zero-changing embedders such as J-UNIWARD. The red node is the honest limit: robust watermarks, payloads carried by the picture content, ternary embedders and the leak of plus-or-minus-one embedders at the edge of the zero zone (finding F5: about 0.08 bit per carrier for a receiver who knows the carrier positions, see the reference) are outside what the guarantee covers.
 
 ### D. Verification sequence
 

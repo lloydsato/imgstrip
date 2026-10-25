@@ -24,7 +24,7 @@ import subprocess
 import tempfile
 import time
 
-from . import fixtures, oracles
+from . import fixtures, oracles, sandbox
 from .core import OUTPUT_FORMATS, Options, StripError, dct_mode, heif_available, strip_image
 from .inspect import inspect_bytes
 
@@ -221,6 +221,40 @@ def _credential_self_test(fx: dict, verbose: bool) -> tuple[int, list[str]]:
     return runs, problems
 
 
+def _sandbox_self_test() -> list[str]:
+    """With the decoder sandbox on: a worker must not be able to write, create or delete a file."""
+    if not sandbox.enabled():
+        print("  decoder sandbox: off (--no-sandbox); inputs are decoded in this process")
+        return []
+    with tempfile.TemporaryDirectory(prefix="imgstrip-selftest-") as tmp:
+        victim = os.path.join(tmp, "victim")
+        with open(victim, "wb") as fh:
+            fh.write(b"keep")
+        try:
+            limits = sandbox.probe_limits(tmp, victim)
+        except StripError as exc:
+            return [f"decoder sandbox: {exc}"]
+        problems = []
+        if limits["fsize"] is None:  # Windows
+            print("  decoder sandbox: on (a separate process; Windows offers no further limits here)")
+            return []
+        if not limits["write"].startswith("no") or os.path.exists(os.path.join(tmp, "written")):
+            problems.append("decoder sandbox: a worker could write a file")
+        if limits["landlock"] and not (limits["create"].startswith("no") and limits["remove"].startswith("no")):
+            problems.append("decoder sandbox: a worker could create or delete a file despite Landlock")
+        if not os.path.exists(victim):
+            problems.append("decoder sandbox: a worker deleted a file")
+    extra = (
+        f"Landlock ABI {limits['landlock']}: no file changes, no programs, no access to other processes"
+        + (", no TCP" if limits["landlock"] >= 4 else "")
+        if limits["landlock"]
+        else "no Landlock on this system: a worker cannot write to files, but could still create empty files or "
+        "delete them"
+    )
+    print(f"  decoder sandbox: on ({extra})")
+    return problems
+
+
 def run_self_test(verbose: bool = False) -> int:
     start = time.time()
     print("imgstrip self test: building fixtures ...")
@@ -231,7 +265,7 @@ def run_self_test(verbose: bool = False) -> int:
         f"HEIF {'enabled' if heif_available() else 'not available'}"
     )
     print(f"  independent readers: {', '.join(oracles.available())}")
-    problems: list[str] = []
+    problems: list[str] = _sandbox_self_test()
     readers: dict[str, int] = {}
     formats = [f for f in OUTPUT_FORMATS if f != "HEIF" or heif_available()]
     jobs = [
@@ -243,7 +277,9 @@ def run_self_test(verbose: bool = False) -> int:
     workers = _worker_count(len(jobs))
     # Each check strips, inspects and spawns external readers; run them side by side, reported in a fixed order.
     if workers > 1:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=workers, initializer=sandbox.set_default, initargs=(sandbox.enabled(),)
+        ) as pool:
             results = list(pool.map(_run_variant, jobs, chunksize=4))
     else:
         results = [_run_variant(job) for job in jobs]

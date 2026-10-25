@@ -163,8 +163,9 @@ _DCT_CAVEATS = {
     ),
     DCT_SCRUBBED: (
         "This destroys payloads hidden in the parity of the DCT coefficients (JSteg, JPHide, OutGuess, steghide, "
-        "F5, nsF5, J-UNIWARD and similar). It does not cover watermarks built to survive re-saving or data carried "
-        "by the picture itself, so it is not proof that nothing is hidden."
+        "F5, nsF5 and similar) and greatly weakens +-1 payloads (J-UNIWARD and similar), which a receiver who knows "
+        "where the bits sit can still read in small part. It does not cover watermarks built to survive re-saving or "
+        "data carried by the picture itself, so it is not proof that nothing is hidden."
     ),
 }
 

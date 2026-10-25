@@ -180,6 +180,15 @@ def analyze_pixels(data: bytes) -> list[Finding]:
     return scan_pixels(data).findings
 
 
+def scan(data: bytes, sandboxed: bool | None = None) -> PixelScan:
+    """``scan_pixels``, run in the decoder sandbox unless it is switched off (``sandboxed`` as Options.sandbox)."""
+    from . import sandbox
+
+    if sandbox.enabled(sandboxed):
+        return sandbox.scan(data)
+    return scan_pixels(data)
+
+
 _LOSSY = {"JPEG", "MPO", "AVIF", "HEIF", "HEIC", "WEBP"}
 
 
@@ -204,7 +213,7 @@ def scan_pixels(data: bytes) -> PixelScan:
     """Look inside the pixels of ``data``: findings, plus an honest verdict on what was covered."""
     findings: list[Finding] = []
     caught: list[str] = []
-    with _pillow_guard(caught):  # default 300 MP limit
+    with _pillow_guard(caught):  # the default pixel limit
         im = open_image(data)
         fmt = canonical_format(im.format)
         sniffed = sniff_format(data) or fmt

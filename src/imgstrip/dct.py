@@ -43,6 +43,8 @@ _ZIG = np.array(ZIGZAG, dtype=np.intp)
 _SOF = {0xC0, 0xC1, 0xC2}  # Huffman baseline, extended sequential, progressive
 _UNSUPPORTED_SOF = {0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
 _RST_SPLIT = re.compile(rb"\xff+[\xd0-\xd7]")
+_STUFFED = re.compile(rb"\xff+\x00")
+_FILL = re.compile(rb"\xff{2,}")
 # The canonical writer works through the picture in bands of about this many blocks, so its working arrays stay
 # small; what it keeps for the whole picture is 4 bytes per Huffman symbol (one per non-zero coefficient, plus
 # about two per block).  Anything above the budget is refused rather than left to exhaust the machine.
@@ -465,6 +467,9 @@ def _decode_scan(frame: Frame, payload: bytes, entropy: bytes, ri: int, dct: dic
         if ah and ah != al + 1:
             raise JpegError("bad successive approximation")
     n_mcus = len(base_list) // bpm
+    # Every 0xFF of a run but the last is fill that decoders skip (libjpeg reads FF FF 00 as one data byte), so it
+    # is room for data no decoder reads.
+    frame.slack += sum(len(m) - 1 for m in _FILL.findall(entropy))
     parts = _RST_SPLIT.split(entropy)
     expected = -(-n_mcus // ri) if ri else 1
     if len(parts) != expected:
@@ -472,7 +477,7 @@ def _decode_scan(frame: Frame, payload: bytes, entropy: bytes, ri: int, dct: dic
     per = ri * bpm if ri else len(base_list)
     scan_planes = [planes[i] for i in slots]
     for n, part in enumerate(parts):
-        part = part.rstrip(b"\xff").replace(b"\xff\x00", b"\xff")
+        part = _STUFFED.sub(b"\xff", part.rstrip(b"\xff"))
         real = len(part)
         data = part + bytes(16)
         sl = slot_list[n * per : (n + 1) * per]
@@ -505,7 +510,7 @@ def _decode_scan(frame: Frame, payload: bytes, entropy: bytes, ri: int, dct: dic
     return set(slots)
 
 
-def read(data: bytes, max_pixels: int = 300_000_000) -> Frame:
+def read(data: bytes, max_pixels: int = 150_000_000) -> Frame:
     """Decode the first image in ``data`` to its quantised coefficients."""
     if not data.startswith(b"\xff\xd8"):
         raise JpegError("not a JPEG file")

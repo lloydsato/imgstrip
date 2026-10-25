@@ -29,11 +29,11 @@
 <tr>
 <td width="50%" valign="top">
 <b>🧱 Rebuilt from pixels</b><br>
-It decodes the image and writes a brand-new file. By default only pixel values cross over, so there is nothing left to leak.
+It decodes the image, in a separate, locked-down process, and writes a brand-new file. By default only pixel values cross over, so there is nothing left to leak.
 </td>
 <td width="50%" valign="top">
 <b>🔬 Checked twice</b><br>
-A strict parser must account for every part of the new file, then the file is decoded again and compared with the pixels. If either check fails, <b>nothing is written</b>.
+A strict parser must account for every part of the new file, then the file is decoded again and compared with the pixels, by a second, independent reader too where one exists. If any check fails, <b>nothing is written</b>.
 </td>
 </tr>
 <tr>
@@ -129,7 +129,7 @@ pip install 'imgstrip[c2pa]'
 
 ```mermaid
 flowchart LR
-    A["📷 Your photo"] --> B["Decode to<br/>raw pixels"]
+    A["📷 Your photo"] --> B["Decode to raw pixels<br/>(in a separate,<br/>locked-down process)"]
     B --> C["Write a<br/>brand-new file"]
     C --> D{"Check 1<br/>is every part<br/>accounted for?"}
     D -->|yes| E{"Check 2<br/>do the pixels<br/>still match?"}
@@ -138,7 +138,7 @@ flowchart LR
     E -->|no| X
 ```
 
-If either check fails, **nothing is written**. Failing safe is the whole point.
+If either check fails, **nothing is written**. Failing safe is the whole point. The decoding runs in a fresh process for every file, which hands back only pixels and a few checked values and, on Linux and macOS, cannot write to files, so a hostile file that exploits a decoder bug is cut off from imgstrip's own memory and from the file it writes ([what it does and does not stop](docs/REFERENCE.md#decoding-in-a-sandbox); `--no-sandbox` turns it off).
 
 (If you're reading this on PyPI and the diagram shows as plain text, the [GitHub page](https://github.com/lloydsato/imgstrip#how-it-works) renders it.)
 
@@ -252,9 +252,9 @@ No tool can do everything, and it's better to know the limits up front.
 - **`--check` is a structural check, not proof.** It lists what a file's container holds. It does not look inside compressed picture data, so it cannot see data hidden in JPEG image data or in the pixels (use `--deep` for the pixel tests).
 - **A clean scan isn't proof.** "Not detected" means the tests found nothing, not that nothing is hidden.
 - **Invisible watermarks** built to survive re-saving (such as SynthID) live in the picture itself and may survive.
-- **JPEGs are re-encoded** (quality 95) by default. Use `--jpeg-lossless` to avoid any quality loss. That mode keeps the compressed picture data exactly as it was, so it doesn't clear steganography hidden in the image data itself, and it is meant for pictures you trust, not as a fix for a file the default mode refused. It does drop tables nothing uses and refuses a file that carries bytes no decoder reads. Re-encoding doesn't reliably clear it either: hiding tools that change zero coefficients mostly survive. `--scrub-dct` is built for that and destroys payloads read from the DCT coefficients, at a cost of roughly 33 to 39 dB of picture quality against the original. It never claims that nothing is hidden. See [how it works](https://github.com/lloydsato/imgstrip/blob/main/docs/DCT_WORKFLOW.md).
+- **JPEGs are re-encoded** (quality 95) by default. Use `--jpeg-lossless` to avoid any quality loss. That mode keeps the compressed picture data exactly as it was, so it doesn't clear steganography hidden in the image data itself, and it is meant for pictures you trust, not as a fix for a file the default mode refused. It does drop tables nothing uses and refuses a file that carries bytes no decoder reads. Re-encoding doesn't reliably clear it either: hiding tools that change zero coefficients mostly survive. `--scrub-dct` is built for that: it destroys payloads read from the parity of the DCT coefficients and greatly weakens ±1 ones (a receiver who already knows where the bits sit can still read a small part, about 0.08 bit per carrier), at a cost of roughly 33 to 39 dB of picture quality against the original. It never claims that nothing is hidden. See [how it works](https://github.com/lloydsato/imgstrip/blob/main/docs/DCT_WORKFLOW.md).
 - **`-i` is not a secure erase.** Old copies can linger in backups, cloud sync history and SSD wear-leveling.
-- **Very grainy JPEGs may be refused** by the default mode because the re-encoded copy would drift too far from the original, and imgstrip would rather refuse than save something it couldn't verify. Use `--jpeg-canonical` for those (same pixels, rebuilt in one canonical form).
+- **Very grainy JPEGs may be refused** by the default mode because the re-encoded copy would drift too far from the original, and imgstrip would rather refuse than save something it couldn't verify. For lossy formats the check also bounds the error of every 8 x 8 block, so a change to a small part of the picture is caught as well as a change to all of it. Use `--jpeg-canonical` for those (same pixels, rebuilt in one canonical form).
 
 ## Learn more
 
