@@ -3,6 +3,34 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
+## [1.2.7]
+
+### Fixed
+
+- **Six legal, invisible structures were accepted by the output verifier and reported as clean by `--check`.**
+  Each could carry data that no viewer shows:
+  - a suggested palette (`PLTE`) in a truecolour or RGBA PNG (up to 768 bytes);
+  - a PNG `tRNS` colour key with bits above the sample depth or matching no pixel, and a palette `tRNS` in which every
+    entry is opaque;
+  - empty `IDAT` chunks and `IDAT` chunk boundaries chosen by the writer;
+  - a JPEG restart interval (`DRI`) that no restart marker uses;
+  - JPEG component identifiers other than 1..n;
+  - GIF still images with a frame delay, a loop count or the GIF87a signature.
+
+  Rules that no legitimate input breaks are in the inspector, so `--check` reports them. Choices that other encoders
+  make differently and that imgstrip's writers fix (the `IDAT` chunk size, the JPEG component identifiers, the GIF89a
+  signature) are an output-only canonical-form check in the verifier, `canonical_form_problems`. A colour key that no
+  pixel is transparent through is caught by the independent PNG readers. `--check` still reports an unused colour key
+  and non-standard JPEG component identifiers as clean (the first needs the pixels, the second is normal in inputs);
+  the verifier refuses both in an output. `--jpeg-lossless` keeps the input's component identifiers, as it keeps the
+  rest of the compressed data. Tests: `tests/test_invisible_structures.py`.
+- **A valid 1-bit BMP whose palette maps index 0 to white was refused** ("pixels changed during lossless
+  re-encoding"). Pillow reads an 8-bit BMP with a two-entry black, white palette as a 1-bit image, so the verifier
+  saw different pixels. Such a picture is now written as a 1-bit BMP.
+- **A PNG whose text keyword was corrupted into a very long string was refused with the decoder sandbox on but cleaned
+  with `--no-sandbox`.** The label of a finding could exceed the 400 characters the sandbox's answer validator
+  accepts. Every finding label is now cut at 300 characters where it is made, so both paths agree.
+
 ## [1.2.6]
 
 ### Fixed
@@ -159,5 +187,7 @@ of it that followed (items 1 to 14 below). Each entry names the finding or item 
 Released before this changelog was started; see the `v1.2.4` tag and its GitHub release. This is the version the
 preprint describes.
 
+[1.2.7]: https://github.com/lloydsato/imgstrip/compare/v1.2.6...v1.2.7
+[1.2.6]: https://github.com/lloydsato/imgstrip/compare/v1.2.5...v1.2.6
 [1.2.5]: https://github.com/lloydsato/imgstrip/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/lloydsato/imgstrip/releases/tag/v1.2.4

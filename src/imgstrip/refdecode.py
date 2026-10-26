@@ -162,6 +162,10 @@ def _raw_samples(want: np.ndarray, header: _Header, palette: _Palette) -> np.nda
             key = palette.key.astype(np.uint32) * scale
             if np.any(opaque & (colour == key).all(axis=-1)):
                 raise Disagreement("an opaque pixel has the colour-key value and would show as transparent")
+            if opaque.all():
+                # The key would hide pixels that store it, and none does: its sample values (up to 48 bits) change
+                # nothing a viewer shows, so they are a place to put data.
+                raise Disagreement("a colour key that no pixel is transparent through")
             samples[~opaque] = key
     if np.any(samples % scale):
         raise Disagreement(f"a sample does not fit {depth} bits")

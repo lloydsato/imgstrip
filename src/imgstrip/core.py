@@ -25,7 +25,14 @@ from PIL import Image, ImageCms, UnidentifiedImageError
 from . import codecs
 from . import icc as iccmod
 from . import prnu, refdecode, stego
-from .inspect import Finding, Report, inspect_bytes, transparent_palette_colour, unused_palette_entries
+from .inspect import (
+    Finding,
+    Report,
+    canonical_form_problems,
+    inspect_bytes,
+    transparent_palette_colour,
+    unused_palette_entries,
+)
 
 try:  # optional HEIC/HEIF support
     import pillow_heif
@@ -1791,6 +1798,11 @@ class _Job:
                 return to("L", "16-bit grayscale reduced to 8 bits for BMP")
             if mode == "P" and frame.alpha:
                 return to("RGBA")
+            if mode == "P" and (img.getpalette("RGB") or [])[:6] == [0, 0, 0, 255, 255, 255] and len(img.getpalette("RGB")) == 6:
+                # An 8-bit BMP whose two-entry palette is black, white is read by Pillow as a 1-bit image although its
+                # bytes are 8-bit indices, so the picture would be mis-decoded (and the verifier would rightly refuse
+                # it).  Write it as a 1-bit BMP instead: the same pixels, and a layout every reader agrees on.
+                return to("1")
             return frame
         return frame
 
@@ -1833,6 +1845,9 @@ class _Job:
         leftovers = [f for f in report.findings if not allowed(f)]
         if leftovers:
             raise VerificationError("output still contains: " + "; ".join(map(str, leftovers)))
+        departures = canonical_form_problems(data, out)
+        if departures:
+            raise VerificationError("output departs from the writer's layout: " + "; ".join(departures))
         try:
             check = open_image(data)
         except StripError as exc:
