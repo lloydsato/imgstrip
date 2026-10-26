@@ -307,6 +307,8 @@ def reference_png(data: bytes) -> RefPng:
                 raise OracleError("tRNS has the wrong size")
             raw_samples = samples.astype(np.uint16)
             hit = (raw_samples == np.array(key, dtype=np.uint16)).all(axis=2)
+            if not hit.any():
+                raise OracleError("tRNS colour key matches no pixel")
             frame = frame.copy()
             frame[hit, 3] = 0
             frame = normalise(frame)

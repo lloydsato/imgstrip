@@ -57,6 +57,10 @@ class Report:
         return self.error is None and not self.findings
 
     def add(self, category: str, label: str, detail: str = "") -> None:
+        # A label can embed text taken from the file; the sandbox's validator accepts at most 400 characters, so
+        # bound it here and the in-process and sandboxed paths agree for every input.
+        if len(label) > 300:
+            label = label[:299] + "…"
         finding = Finding(category, label, detail)
         if finding not in self.findings:
             self.findings.append(finding)
@@ -133,6 +137,77 @@ def inspect_bytes(data: bytes) -> Report:
     except (struct.error, IndexError, ValueError, OverflowError) as exc:
         report.error = f"malformed {fmt}: truncated or inconsistent structure ({exc})"
     return report
+
+
+# Chunk sizes of the IDAT stream that imgstrip's two PNG writers produce: Pillow cuts the stream into 64 KiB chunks
+# and ``codecs.encode_png`` into 1 MiB ones.  Every chunk but the last has that size; the last is not empty.
+_PNG_IDAT_SIZES = (1 << 16, 1 << 20)
+
+
+def canonical_form_problems(data: bytes, fmt: str) -> list[str]:
+    """Ways in which an *output* departs from the exact layout imgstrip's writers choose.
+
+    ``inspect_bytes`` reports what a file holds that a viewer does not show.  Some structures are legal, invisible and
+    different between encoders (the sizes into which a PNG's pixel stream is cut, the identifiers a JPEG gives its
+    components, which GIF version it declares).  A cleaned file has no reason to vary in any of them, so a value
+    that is not the writer's own is either an encoder defect or a message; the verifier refuses it.  These rules
+    are not applied to inputs, where every other encoder's choices are normal.
+    """
+    try:
+        if fmt == "PNG":
+            return _png_canonical(data)
+        if fmt == "JPEG":
+            return _jpeg_canonical(data)
+        if fmt == "GIF":
+            return _gif_canonical(data)
+    except (struct.error, IndexError, ValueError):
+        return ["the layout could not be read"]
+    return []
+
+
+def _png_canonical(d: bytes) -> list[str]:
+    sizes, pos = [], 8
+    while pos + 12 <= len(d):
+        length, ctype = struct.unpack_from(">I4s", d, pos)
+        if ctype == b"IDAT":
+            sizes.append(length)
+        pos += 12 + length
+    if len(sizes) <= 1:
+        return []
+    if not any(all(s == step for s in sizes[:-1]) and 0 < sizes[-1] <= step for step in _PNG_IDAT_SIZES):
+        return [f"the pixel stream is cut into IDAT chunks of {sorted(set(sizes))[:4]} bytes, not a writer's fixed size"]
+    return []
+
+
+def _jpeg_canonical(d: bytes) -> list[str]:
+    ids = None
+    pos, n = 2, len(d)
+    while pos + 4 <= n:
+        if d[pos] != 0xFF:
+            pos += 1
+            continue
+        marker = d[pos + 1]
+        if marker in (0xFF, 0x00, 0x01) or 0xD0 <= marker <= 0xD8:
+            pos += 1 if marker == 0xFF else 2
+            continue
+        if marker == 0xD9:
+            break
+        (length,) = struct.unpack_from(">H", d, pos + 2)
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF) and ids is None:
+            count = d[pos + 9]
+            ids = [d[pos + 10 + 3 * i] for i in range(count)]
+        if marker == 0xDA:
+            break
+        pos += 2 + length
+    # Pillow's CMYK and RGB writers use the Adobe names ('C','M','Y','K' and 'R','G','B'); every other file is 1..n.
+    allowed = [list(range(1, len(ids) + 1)), [67, 77, 89, 75], [82, 71, 66]] if ids is not None else []
+    if ids is not None and ids not in allowed:
+        return [f"the components are numbered {ids}, not 1..{len(ids)}"]
+    return []
+
+
+def _gif_canonical(d: bytes) -> list[str]:
+    return [] if d[:6] == b"GIF89a" else [f"the signature is {d[:6]!r}, not GIF89a"]
 
 
 # --------------------------------------------------------------------------
@@ -428,6 +503,9 @@ class _JpegTables:
             r.add(HIDDEN, f"Unused {name} table", f"{which} at offset {offset}: no decoder reads it")
 
 
+_RST = re.compile(rb"\xff[\xd0-\xd7]")
+
+
 def _inspect_jpeg(d: bytes, r: Report) -> None:
     n = len(d)
     pos = 2
@@ -436,6 +514,8 @@ def _inspect_jpeg(d: bytes, r: Report) -> None:
     sequential = False
     tables = _JpegTables()
     fill = fill_at = 0  # 0xFF fill bytes before markers (decoders skip them), and where the first one is
+    restart_interval = 0  # the last DRI value, and whether any restart marker ever appears in the scans
+    restarts_seen = False
     while True:
         if pos >= n:
             raise _Malformed("missing end-of-image marker")
@@ -480,19 +560,28 @@ def _inspect_jpeg(d: bytes, r: Report) -> None:
             icc_chunks.append((payload[12], payload[14:]))
             continue
         _classify_jpeg_segment(marker, payload, r)
+        if marker == 0xDD and len(payload) == 2:
+            restart_interval = int.from_bytes(payload, "big")
         if marker == 0xDA:
             scans += 1
             tables.scan(payload)
             # A sequential scan always covers coefficients 0..63 in one pass; decoders ignore these bytes.
             if sequential and payload[-3:] != b"\x00\x3f\x00":
                 r.add(HIDDEN, "Non-standard scan parameters", payload[-3:].hex())
+            entropy_start = pos
             pos, inside = _skip_entropy(d, pos)
+            if restart_interval and _RST.search(d, entropy_start, pos):
+                restarts_seen = True
             if inside:
                 fill_at = fill_at if fill else inside[1]
                 fill += inside[0]
     if scans == 0:
         raise _Malformed("no image scan")
     tables.report(r)
+    if restart_interval and not restarts_seen:
+        # A restart interval that is longer than the scan, or that no scan reaches, has no effect on any decoder: 16
+        # bits that the picture does not show.
+        r.add(HIDDEN, "Restart interval that no restart marker uses", str(restart_interval))
     if fill:
         r.add(HIDDEN, "Fill bytes before markers", f"{fill} extra 0xFF byte(s), the first at offset {fill_at}")
     if icc_chunks:
@@ -761,8 +850,16 @@ def _inspect_png(d: bytes, r: Report) -> None:
         elif ctype == b"IDAT":
             if idat_done:
                 r.add(STRUCTURE, "Non-contiguous IDAT chunks")
+            if length == 0:  # a chunk boundary carries no pixels; an empty one is only a place to put a choice
+                r.add(HIDDEN, "Empty IDAT chunk")
             idat.append(body)
         elif ctype in _PNG_STRUCTURAL:
+            if ctype == b"PLTE" and ihdr is not None and ihdr[3] != 3:
+                # In a greyscale image the chunk is forbidden; in a truecolour one it only suggests a palette to
+                # viewers with a limited display, and none renders it: up to 768 bytes nobody sees.
+                r.add(HIDDEN, "Suggested palette in an image that does not use one", f"{length} bytes")
+            elif ctype == b"tRNS" and ihdr is not None:
+                _png_trns_findings(body, ihdr[2], ihdr[3], r)
             if ctype == b"acTL":
                 actl = True
                 (frames,) = struct.unpack_from(">I", body, 0)
@@ -817,6 +914,18 @@ def _inspect_png(d: bytes, r: Report) -> None:
     _check_trailing(d, pos, r, "IEND")
 
 
+def _png_trns_findings(body: bytes, depth: int, color_type: int, r: Report) -> None:
+    """Bytes of a ``tRNS`` chunk that no decoder can show: bits above the sample depth in a colour key, and an
+    alpha table that makes every entry opaque (it says what the absence of the chunk says).  Whether a colour key
+    matches a pixel needs the pixels; the independent reader checks that (``oracles.reference_png``)."""
+    if color_type in (0, 2):
+        want = 2 if color_type == 0 else 6
+        if len(body) == want and any(v >> depth for v in struct.unpack(f">{want // 2}H", body)):
+            r.add(HIDDEN, "Colour key with bits above the sample depth", f"{want} bytes")
+    elif color_type == 3 and body and all(b == 255 for b in body):
+        r.add(HIDDEN, "Transparency table in which every entry is opaque", f"{len(body)} bytes")
+
+
 def _png_text(ctype: bytes, body: bytes, r: Report) -> None:
     keyword, _, rest = body.partition(b"\x00")
     key = keyword.decode("latin-1", "replace")
@@ -833,7 +942,7 @@ def _png_text(ctype: bytes, body: bytes, r: Report) -> None:
             _tkey, _, rest = rest.partition(b"\x00")
             text = _inflate_limited(rest) if flag else rest
     except (zlib.error, IndexError):
-        r.add(METADATA, f"Text chunk '{key}'", "corrupt")
+        r.add(METADATA, f"Text chunk '{_printable(key.encode(), 30)}'", "corrupt")
         return
     if key == "XML:com.adobe.xmp":
         r.add(METADATA, "XMP", _xmp_detail(text))
@@ -845,7 +954,7 @@ def _png_text(ctype: bytes, body: bytes, r: Report) -> None:
         elif kind in ("icc", "icm") and blob is not None:
             _icc_finding(blob, r)
         else:
-            r.add(METADATA, f"Embedded {kind.upper()} profile", f"{len(text)} bytes")
+            r.add(METADATA, f"Embedded {_printable(kind.upper().encode(), 30)} profile", f"{len(text)} bytes")
     else:
         r.add(METADATA, f"Text '{_printable(key.encode(), 30)}'", f"'{_printable(text)}'")
 
@@ -965,6 +1074,8 @@ def _inspect_gif(d: bytes, r: Report) -> None:
         global_table = d[pos : pos + size]
         pos += size
     frames = 0
+    delay = 0  # the longest frame delay, and whether a loop count was given: both only matter with a second frame
+    loop_seen = False
     transparent = None
     # Frames share the global colour table, so it is judged once, against every frame that draws with it.
     global_used = global_shown = 0
@@ -1015,6 +1126,7 @@ def _inspect_gif(d: bytes, r: Report) -> None:
                     packed_gce = d[pos + 1]
                     if packed_gce & 0xE0:  # three bits the format reserves
                         r.add(HIDDEN, "Non-zero reserved bits in a GIF graphic control extension")
+                    delay = max(delay, int.from_bytes(d[pos + 2 : pos + 4], "little"))
                     if packed_gce & 1:
                         transparent = d[pos + 4]
                     elif d[pos + 4]:  # the index only means something when the transparency flag is on
@@ -1024,6 +1136,8 @@ def _inspect_gif(d: bytes, r: Report) -> None:
             elif label == 0x01:
                 r.add(METADATA, "Plain-text extension", f"'{_printable(data[12:])}'")
             elif label == 0xFF:
+                if d[pos + 1 : pos + 12] in (b"NETSCAPE2.0", b"ANIMEXTS1.0"):
+                    loop_seen = True
                 _gif_app_extension(d, pos, data, r)
             else:
                 r.add(STRUCTURE, f"Unknown extension 0x{label:02X}", f"{len(data)} bytes")
@@ -1033,6 +1147,11 @@ def _inspect_gif(d: bytes, r: Report) -> None:
     r.info["frames"] = frames
     if frames == 0:
         raise _Malformed("no image data")
+    if frames == 1:
+        if delay:
+            r.add(HIDDEN, "Frame delay on a GIF with a single frame", f"{delay} centiseconds")
+        if loop_seen:
+            r.add(HIDDEN, "Loop count on a GIF with a single frame")
     if global_table and global_known:
         _gif_palette(global_table, global_used, global_shown, r)
     if outside:
@@ -1997,6 +2116,7 @@ def _moov(d: bytes, start: int, end: int, r: Report) -> None:
 __all__ = [
     "Finding",
     "Report",
+    "canonical_form_problems",
     "inspect_bytes",
     "sniff_format",
     "png_raw_size",
