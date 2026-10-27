@@ -119,6 +119,7 @@ def test_self_test_variants_cover_each_fixture(fx):
         variants = selftest._variants(name, formats)
         labels = [label for label, _ in variants]
         assert labels[:4] == ["default", "scrub-lsb", "scrub-prnu", "icc=sanitize"]
+        assert labels[4:6] == ["scrub-alpha", "scrub-alpha+lsb"]
         assert labels[-2:] == ["to png", "to jpeg"]
         assert ("jpeg-lossless" in labels) == (name.endswith(".jpg") and "mpo" not in name)
         assert all(isinstance(opts, Options) for _, opts in variants)

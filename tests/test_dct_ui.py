@@ -31,7 +31,7 @@ SCRIPT = textwrap.dedent(
       const out = { runs: {} };
 
       async function run(name, switches, url) {
-        const page = await browser.newPage({ viewport: { width: 760, height: 1100 } });
+        const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
         page.on('pageerror', (e) => errors.push(name + ' pageerror: ' + e.message));
         page.on('console', (m) => { if (m.type() === 'error') errors.push(name + ' console: ' + m.text()); });
         await page.goto(url);
@@ -42,7 +42,7 @@ SCRIPT = textwrap.dedent(
           for (const n of ['scrub_dct', 'jpeg_canonical', 'jpeg_lossless', 'scrub_lsb']) {
             out.switches[n] = await page.$eval(`input[name=${n}]`, (e) => e.checked);
           }
-          out.hints = await text(page, 'label.switch:has(input[name=scrub_dct]) .hint, label.switch:has(input[name=jpeg_canonical]) .hint');
+          out.hints = await text(page, '.switch-row:has(input[name=scrub_dct]) .hint, .switch-row:has(input[name=jpeg_canonical]) .hint');
           if (shot) await page.screenshot({ path: shot, fullPage: true });
         }
         for (const s of switches) await page.click(`label.switch:has(input[name=${s}])`);
@@ -53,7 +53,10 @@ SCRIPT = textwrap.dedent(
         await page.waitForTimeout(500);
         await page.click('.file-head');
         await page.waitForTimeout(300);
-        const r = { status: (await text(page, '.file .status'))[0], detail: (await text(page, '.detail-body'))[0] };
+        const r = {
+          status: await page.$eval('.file .file-side', (e) => e.innerText.replace(/\s+/g, ' ').trim()),
+          detail: await page.$eval('#detailContent', (e) => e.innerText.replace(/\s+/g, ' ').trim()),
+        };
         r.href = await page.$eval('a[download]', (a) => a.getAttribute('href'));
         out.runs[name] = r;
         await page.close();
@@ -112,7 +115,7 @@ def test_the_page_offers_the_switches_off_and_reports_what_they_did(tmp_path):
         scrub = got["runs"]["scrub"]
         assert "Hidden data in the JPEG coefficients: scrubbed" in scrub["detail"]
         assert "dB from the original" in scrub["detail"] and "not proof that nothing is hidden" in scrub["detail"]
-        assert "JPEG coefficients: scrubbed" in scrub["status"]
+        assert scrub["status"].startswith("Verified")
         res, body = scrub_app.request("GET", scrub["href"])
         assert res.status == 200 and abs(E.read_back(body, "jsteg", bits) - 0.5) < 0.08
 

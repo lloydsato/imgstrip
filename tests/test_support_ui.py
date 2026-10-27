@@ -40,9 +40,9 @@ SCRIPT = textwrap.dedent(
         for (const n of names) {
           const input = document.querySelector(`[name=${n}]`);
           if (!input) continue;
-          const root = input.closest(input.tagName === 'SELECT' ? '.field' : '.switch');
+          const root = input.closest(input.tagName === 'SELECT' ? '.field' : '.switch-row');
           const note = root.querySelector('.support');
-          const label = input.tagName === 'SELECT' ? root.querySelector('label') : root.querySelector('.switch-text > span');
+          const label = input.tagName === 'SELECT' ? root.querySelector('label') : root.querySelector('.switch-title');
           res[n] = {
             disabled: input.disabled,
             checked: input.type === 'checkbox' ? input.checked : input.value,
@@ -65,8 +65,9 @@ SCRIPT = textwrap.dedent(
       const rows = (page) => page.$$eval('.file', (els) => els.map((e) => ({
         state: e.dataset.state,
         name: e.querySelector('.file-name').textContent,
-        sub: e.querySelector('.file-sub').textContent,
-        status: e.querySelector('.status').textContent.replace(/\s+/g, ' ').trim(),
+        sub: e.querySelector('.file-meta').textContent,
+        note: e.querySelector('.file-more-note').textContent.replace(/\s+/g, ' ').trim(),
+        status: e.querySelector('.file-side').innerText.replace(/\s+/g, ' ').trim(),  // what is shown, not the hidden Download link
       })));
 
       async function open(name, url, { route, scheme = 'light', viewport = { width: 900, height: 1500 }, switches = [], format = '' } = {}) {
@@ -103,9 +104,10 @@ SCRIPT = textwrap.dedent(
         await page.waitForTimeout(150);
       };
       const detail = async (page, i = 0) => {
+        // The row you pick fills the detail pane (a full-screen sheet on a narrow screen).
         await page.click(`.file:nth-child(${i + 1}) .file-head`);
         await page.waitForTimeout(250);
-        return page.$eval(`.file:nth-child(${i + 1}) .detail-body`, (e) => e.textContent.replace(/\s+/g, ' ').trim());
+        return page.$eval('#detailContent', (e) => e.textContent.replace(/\s+/g, ' ').trim());
       };
       let n = 0;
       const next = () => urls[n++];
@@ -260,7 +262,8 @@ SCRIPT = textwrap.dedent(
         const page = await open('remove', next(), { switches: ['scrub_dct'] });
         await add(page, 'plain.png', 'photo.jpg');
         out.removeBoth = await snap(page);
-        await page.click('.file:nth-child(1) .btn-icon[title=Remove]');
+        await page.click('.file:nth-child(1) .file-head');
+        await page.click('#detailContent [data-key=remove]');
         await page.waitForTimeout(200);
         out.removeOne = await snap(page);
         await page.close();
@@ -345,7 +348,8 @@ def test_a_png_greys_out_what_has_nothing_to_act_on_without_warnings(run):
     for name in ("jpeg_lossless", "scrub_dct", "jpeg_canonical", "quality", "icc", "auto_orient"):
         assert _greyed(p[name], "na"), name
         assert not p[name]["triangle"], name
-        assert p[name]["note"] and p[name]["describedby"] == f"support-{name}", name
+        # the note is read out after the switch's own hint, never instead of it
+        assert p[name]["note"] and f"support-{name}" in p[name]["describedby"].split(), name
     assert "JPEG files only" in p["jpeg_lossless"]["note"]
     assert "lossless" in p["quality"]["note"]
     # what does apply stays usable
@@ -423,7 +427,7 @@ def test_one_bit_images_cannot_be_lsb_scrubbed(run):
     o = run["onebit"]["scrub_lsb"]
     assert _greyed(o, "unsupported") and o["triangle"] and "1-bit" in o["note"]
     assert [r["state"] for r in run["onebitRows"]] == ["clean"]
-    assert "scrub not applied" not in run["onebitRows"][0]["status"]  # it was never asked, so it is not reported as missed
+    assert "scrub not applied" not in run["onebitRows"][0]["status"].lower()  # it was never asked, so it is not reported as missed
 
 
 def test_formats_an_image_cannot_be_saved_as_are_marked_and_the_choice_is_warned_about(run):
@@ -437,8 +441,9 @@ def test_formats_an_image_cannot_be_saved_as_are_marked_and_the_choice_is_warned
 
 def test_images_over_a_limit_are_blocked_and_never_uploaded(run):
     pixels, size = run["big"]
-    assert pixels["state"] == "unsupported" and "megapixel limit" in pixels["sub"]
-    assert size["state"] == "unsupported" and "3.9 KB limit" in size["sub"]
+    assert pixels["state"] == "unsupported" and "megapixel limit" in pixels["note"]
+    assert size["state"] == "unsupported" and "3.9 KB limit" in size["note"]
+    assert pixels["status"] == size["status"] == "Not supported"
     assert "can't be cleaned" in run["bigDetailPixels"] and "can't be cleaned" in run["bigDetailBytes"]
     # the over-size file was neither inspected, previewed nor cleaned; the other was only inspected and previewed
     assert run["bigRequests"] <= 3

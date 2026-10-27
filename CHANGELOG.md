@@ -3,6 +3,93 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
+## [2.0.0]
+
+A new look for the web app, an explanation beside every switch, and file fingerprints. This is a major version because
+the web app's whole interface is new (layout, where Deep scan and Remove live, colours). The engine, the command line,
+the library and the web API's existing fields are unchanged: with the same options, 2.0.0 writes the same bytes as
+1.2.8.
+
+### Added
+
+- **An (i) button beside every switch** in the web app (all twelve of them, the one in the bottom bar and the one in
+  the signing panel included). It opens a short explanation in plain words and closes with Escape, a click elsewhere or
+  by moving on. It is a button, so it works from the keyboard, it is read out when it opens, it never flips the switch
+  beside it, and the bubble is kept on the screen at any width.
+- **SHA-256 and MD5 of every file, before and after cleaning.** Each row shows the shortened hashes of the file as
+  received, and once it is cleaned a *Before* and an *After* line, each with a copy button. The detail pane shows them in
+  full, in groups of eight characters, and copying gives the plain hex. SHA-256 is the proof; MD5 is there only to match
+  older records, and the page says so. The server hashes the exact bytes: `/api/inspect` returns `fingerprints`, and
+  `/api/clean` returns `before` and `after` (each with `sha256`, `md5` and `bytes`) beside the existing `sha256` and
+  `md5` of the cleaned file.
+- **Compare with a hash you already have.** Paste a SHA-256 or MD5 (spaces, capitals and a `SHA-256:` label are fine) into
+  a file's detail and it says whether it is the hash of the file as added or of the cleaned one, or that there is no
+  match. An MD5 match carries a reminder that MD5 can be forged.
+- **Hash list.** One button downloads `imgstrip-hashes.csv` with every file's name, state and before and after SHA-256
+  and MD5. It is built in the page and sent nowhere; file names that a spreadsheet would run as a formula are neutralised.
+
+### Changed
+
+- **The web app is rebuilt as two panes**: the list of files on the left (thumbnail, name, format, size, what it gives
+  away, hashes, status), and what the chosen file gives away on the right (plain-language summary, identifying metadata,
+  hidden data, colour profile, the pixels, file fingerprints). Below 900 pixels the page is one column and the detail
+  opens as a full-screen sheet that holds the keyboard, hides the page behind it, and closes with Escape or *Back to
+  list*. It was tested from 320 to 1920 pixels wide, in light and dark, with touch targets of at least 44 pixels.
+- *Deep scan* moved from the Options tray to the bottom bar, beside the Clean button. Verified results are teal rather
+  than green. A file is removed from the list from its detail (*Remove from list*). *Add* appears only on narrow screens,
+  where the drop zone is far from the list. Scanning shows an indeterminate bar, not a percentage, because the work has
+  no way of knowing how far along it is.
+
+### Tests
+
+`tests/test_redesign_ui.py` (new) drives a real browser through the (i) buttons, the hashes (checked against `hashlib`
+and against the bytes the download link serves), the compare box, the hash list, the selection and the phone sheet, and
+twelve screen sizes in light and dark for sideways scrolling, the bubble staying on screen, touch targets and text
+contrast. The other browser tests were moved to the new layout, and `tests/test_web.py` checks the hashes the server
+sends.
+
+## [1.2.8]
+
+### Added
+
+- **`--scrub-alpha` (and `--alpha-tolerance N`): clean data hidden in the transparency channel.** `--scrub-lsb`
+  deliberately keeps alpha 0 and 255 exactly, so a message written as 255-versus-254 over the solid parts of a
+  picture, or 0-versus-1 over its clear parts, passed through it (in whole or in large part), and `--check --deep` does
+  not look at alpha at all. The new option is **off by default**, and with it off nothing changes. When on:
+  - alpha within the tolerance of fully opaque is set to exactly opaque, and alpha within it of fully clear to exactly
+    clear, with the colour under it dropped as under any clear pixel;
+  - the lowest bit of every alpha level in between is randomised (the remaining levels pair up as even and odd, so a
+    value never falls back into the snapped part);
+  - colour is never touched where the pixel still shows; the two scrubs are independent and can be combined;
+  - the tolerance is 5 levels of 255 by default, 1 to 32 with `--alpha-tolerance` (an even value is rounded up to the
+    next odd one, and the report says which was used); it is a usage error without `--scrub-alpha`;
+  - 8-bit and 16-bit alpha, grey-with-alpha, RGBA, palette images with per-entry transparency (widened to RGBA so the
+    scrub is per pixel), GIF, and every frame of an animation are covered; a picture whose alpha becomes all 255 is
+    stored without an alpha channel; images with no transparency channel, and every JPEG mode, report
+    "nothing to clean";
+  - it runs after the camera-fingerprint warp (which resamples alpha into new in-between values) and before the LSB
+    scrub; a transparent picture saved as JPEG is flattened after it, so a message in alpha cannot reach the JPEG's
+    pixels either.
+
+  Reported as `"alpha"` in `--json` and the web API (`state`, `headline`, `summary`, `caveat`, `tolerance`, `pixels`), as
+  a "transparency" line on the command line, and in the web app's result panel; `Result.alpha_scrub`,
+  `Result.alpha_pixels` and `Result.alpha_tolerance` for library users, `Options(scrub_alpha=True,
+  alpha_tolerance=5)` to ask. The web app has a "Clean transparency channel" switch, greyed out for an image that has
+  no transparency channel (the image facts the server sends now include `alpha`). The self-test matrix runs the new
+  option on every fixture. Tests: `tests/test_scrub_alpha.py`.
+
+  **What it does not cover** (documented in `docs/REFERENCE.md`): a message written with a difference larger than the
+  tolerance survives (raise `--alpha-tolerance`, or flatten the picture); colour hidden under partly transparent
+  pixels is still visible colour and is the business of `--scrub-lsb`; and there is still no detector for alpha in
+  `--check --deep`.
+
+### Changed
+
+- **Content Credentials: a new operation, `alpha-scrubbed`,** is recorded (at detail `full`) when the alpha scrub
+  changed at least one alpha value, and makes the pixel-integrity claim "altered", like the other deliberate scrubs.
+  The set of operation names is closed, so a credential that lists it is not recognised as well-formed by a verifier
+  from before 1.2.8; leave `--scrub-alpha` out when signing images that older tools must verify.
+
 ## [1.2.7]
 
 ### Fixed
@@ -187,6 +274,8 @@ of it that followed (items 1 to 14 below). Each entry names the finding or item 
 Released before this changelog was started; see the `v1.2.4` tag and its GitHub release. This is the version the
 preprint describes.
 
+[2.0.0]: https://github.com/lloydsato/imgstrip/compare/v1.2.8...v2.0.0
+[1.2.8]: https://github.com/lloydsato/imgstrip/compare/v1.2.7...v1.2.8
 [1.2.7]: https://github.com/lloydsato/imgstrip/compare/v1.2.6...v1.2.7
 [1.2.6]: https://github.com/lloydsato/imgstrip/compare/v1.2.5...v1.2.6
 [1.2.5]: https://github.com/lloydsato/imgstrip/compare/v1.2.4...v1.2.5

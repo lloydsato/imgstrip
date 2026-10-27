@@ -156,6 +156,8 @@ def _variants(name: str, formats: list[str]) -> list[tuple[str, Options]]:
         ("scrub-lsb", Options(scrub_lsb=True)),
         ("scrub-prnu", Options(scrub_prnu=True)),
         ("icc=sanitize", Options(icc="sanitize")),
+        ("scrub-alpha", Options(scrub_alpha=True)),
+        ("scrub-alpha+lsb", Options(scrub_alpha=True, scrub_lsb=True, alpha_tolerance=11)),
     ]
     if name.endswith(".jpg") and "mpo" not in name:
         variants.append(("jpeg-lossless", Options(jpeg_lossless=True)))

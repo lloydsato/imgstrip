@@ -41,12 +41,27 @@ SCRIPT = textwrap.dedent(
     (async () => {
       const [url, holiday, memo, small] = process.argv.slice(2);
       const browser = await chromium.launch({ executablePath: process.env.CHROMIUM, args: ['--no-sandbox'] });
-      const page = await browser.newPage({ viewport: { width: 760, height: 1100 } });
+      // wide enough for the two-pane layout: picking a row fills the detail pane beside the list
+      const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
       const errors = [];
       page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
       page.on('console', (m) => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
       // page.$$eval is Playwright's DOM query (it runs a function in the page), not JavaScript eval()
       const text = (sel) => page.$$eval(sel, (els) => els.map((e) => e.textContent.replace(/\s+/g, ' ').trim()));
+      // what a row shows on its right (its headline), and the line under its name
+      const side = () => page.$$eval('.file .file-side', (els) => els.map((e) => e.innerText.replace(/\s+/g, ' ').trim()));
+      const notes = () => text('.file .file-more-note');
+      // the detail pane for each row in turn
+      const details = async () => {
+        const out = [];
+        const n = (await page.$$('.file-head')).length;
+        for (let i = 0; i < n; i++) {
+          await page.click(`.file:nth-child(${i + 1}) .file-head`);
+          await page.waitForTimeout(250);
+          out.push(await page.$eval('#detailContent', (e) => e.innerText.replace(/\s+/g, ' ').trim()));
+        }
+        return out;
+      };
       const states = (n) => page.waitForFunction((k) => document.querySelectorAll(`.file[data-state="${k.s}"]`).length === k.n, { s: n[0], n: n[1] }, { timeout: 30000 });
       const out = {};
 
@@ -57,34 +72,35 @@ SCRIPT = textwrap.dedent(
       // Without Deep scan the pixels are not scanned, and the row says so
       await page.setInputFiles('#picker', [small]);
       await states(['scanned', 1]);
-      out.shallow = (await text('.file .status'))[0];
+      out.shallow = { side: (await side())[0], note: (await notes())[0] };
 
       // Deep scan: one clean photo, one with a payload
       await page.click('label.switch:has(input[name=deep])');
       await page.setInputFiles('#picker', [holiday, memo]);
       await states(['scanned', 3]);
       await page.waitForTimeout(500);
-      for (const head of await page.$$('.file-head')) await head.click();
-      await page.waitForTimeout(300);
-      out.scanned = await text('.file .status');
-      out.scanDetail = await text('.detail-body');
+      out.scanned = await side();
+      out.scannedNotes = await notes();
+      out.scanDetail = await details();
       out.summary = (await text('#summary'))[0];
 
       // Clean: the clean photo gets its seal, the payload is kept and marked
       await page.click('#primary');
       await states(['clean', 3]);
       await page.waitForTimeout(500);
-      out.cleaned = await text('.file .status');
-      out.cleanDetail = await text('.detail-body');
+      out.cleaned = await side();
+      out.cleanedNotes = await notes();
+      out.cleanDetail = await details();
       out.footer = (await text('#summary'))[0];
 
       // Scrub: both are scrubbed, and the page says what that does and does not cover
       await page.click('label.switch:has(input[name=scrub_lsb])');
       await page.click('#primary');
-      await page.waitForFunction(() => /scrub/i.test(document.querySelector('.file[data-state="clean"] .detail-body')?.textContent || ''), null, { timeout: 30000 });
+      // the pane shows the last row picked (the payload): wait until it has been re-cleaned and says so
+      await page.waitForFunction(() => !document.querySelector('.file[data-state="cleaning"]') && document.querySelector('#primary').dataset.mode !== 'busy' && /pixels: scrubbed/.test(document.querySelector('#detailContent').textContent), null, { timeout: 30000 });
       await page.waitForTimeout(800);
-      out.scrubbed = await text('.file .status');
-      out.scrubDetail = await text('.detail-body');
+      out.scrubbed = await side();
+      out.scrubDetail = await details();
       out.footerAfter = (await text('#summary'))[0];
       out.errors = errors;
       console.log(JSON.stringify(out));
@@ -112,23 +128,29 @@ def test_the_page_tells_the_four_states_apart(app, tmp_path):
     assert proc.returncode == 0, proc.stderr
     got = json.loads(proc.stdout.strip().splitlines()[-1])
 
-    assert got["shallow"] == "No metadata · pixels not scanned"
+    assert got["shallow"]["side"] == "No metadata found"
+    assert "pixels were not scanned" in got["shallow"]["note"], "no Deep scan: the row says the pixels were not looked at"
     small, holiday, memo = got["scanned"]
-    assert "not detected in pixels" in holiday and "Payload in pixels" in memo
+    assert holiday == "No metadata found" and memo.startswith("Payload in pixels")
+    assert "Not detected in the pixels" in got["scannedNotes"][1]
     holiday_detail, memo_detail = got["scanDetail"][1], got["scanDetail"][2]
-    assert "Hidden data in the pixels: not detected" in holiday_detail
+    assert "In the pixels Nothing detected" in holiday_detail
     assert "not proof that nothing is hidden" in holiday_detail
-    assert "Hidden data in the pixels: detected (likely)" in memo_detail and "can be a false alarm" in memo_detail
-    for text in got["scanDetail"] + got["scanned"] + [got["summary"]]:
-        assert "Nothing found" not in text and "Nothing revealing" not in text
+    assert "In the pixels Payload found" in memo_detail and "can be a false alarm" in memo_detail
+    # "Nothing found" is only ever said with its caveat: either the pixels were scanned and nothing was *detected*, or
+    # they were not scanned at all
+    for text in got["scanDetail"] + got["scanned"] + got["scannedNotes"] + [got["shallow"]["note"], got["summary"]]:
+        assert "Nothing found" not in text or "ot detected" in text or "not scanned" in text, text
+        assert "Nothing revealing" not in text
 
     cleaned = got["cleaned"]
-    assert cleaned[1].startswith("Clean") and "Hidden data in pixels: not detected" in cleaned[1]
+    assert cleaned[1].startswith("Verified") and "Both checks passed" in got["cleanedNotes"][1]
+    assert "Hidden data in the pixels: not detected" in got["cleanDetail"][1]
     assert cleaned[2].startswith("Payload kept"), "a flagged payload that nothing scrubbed earns no seal"
     assert "1 kept a pixel payload" in got["footer"]
     assert "detected (likely)" in got["cleanDetail"][2]
 
-    assert all(s.startswith("Clean") and "Hidden data in pixels: scrubbed" in s for s in got["scrubbed"])
+    assert all(s.startswith("Verified") for s in got["scrubbed"])
     scrub_detail = got["scrubDetail"][2]
     assert "Hidden data in the pixels: scrubbed" in scrub_detail and "original was flagged" in scrub_detail
     assert "does not cover other ways of hiding data" in scrub_detail
@@ -150,7 +172,7 @@ UNAPPLIED_SCRIPT = textwrap.dedent(
     (async () => {
       const [url, mask] = process.argv.slice(2);
       const browser = await chromium.launch({ executablePath: process.env.CHROMIUM, args: ['--no-sandbox'] });
-      const page = await browser.newPage({ viewport: { width: 760, height: 1100 } });
+      const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
       const errors = [];
       page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
       const text = (sel) => page.$$eval(sel, (els) => els.map((e) => e.textContent.replace(/\s+/g, ' ').trim()));
@@ -172,12 +194,13 @@ UNAPPLIED_SCRIPT = textwrap.dedent(
       await page.click('#primary');
       await page.waitForSelector('.file[data-state="clean"]');
       await page.waitForTimeout(600);
-      for (const head of await page.$$('.file-head')) await head.click();
+      await page.click('.file-head');
       await page.waitForTimeout(300);
       const out = {
-        status: await text('.file .status'),
-        detail: await text('.detail-body'),
-        seals: await page.$$eval('.file .status .seal', (els) => els.length),
+        status: await page.$$eval('.file .file-side', (els) => els.map((e) => e.innerText.replace(/\s+/g, ' ').trim())),
+        detail: [await page.$eval('#detailContent', (e) => e.innerText.replace(/\s+/g, ' ').trim())],
+        seals: await page.$$eval('.file .file-side .seal', (els) => els.length),
+        detailSeals: await page.$$eval('#detailContent .seal', (els) => els.length),
         announce: (await text('#announce'))[0],
         errors,
       };
@@ -203,8 +226,8 @@ def test_a_scrub_that_could_not_be_applied_earns_no_seal(app, tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     got = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert got["status"][0].startswith("Clean · scrub not applied")
-    assert got["seals"] == 0, "no seal when the scrub that was asked for did not happen"
+    assert got["status"][0].startswith("Scrub not applied")
+    assert got["seals"] == 0 and got["detailSeals"] == 0, "no seal when the scrub that was asked for did not happen"
     assert "neither scanned nor destroyed" in got["detail"][0]
     assert "cleaned and verified" in got["announce"] and "1 image cleaned of metadata only" in got["announce"]
     assert got["errors"] == []

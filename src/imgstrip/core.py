@@ -149,6 +149,11 @@ class Options:
     icc: str = "convert"  # convert | sanitize | drop
     auto_orient: bool = True  # bake EXIF orientation into the pixels
     scrub_lsb: bool = False  # randomise least-significant bits (anti-steganography)
+    # Close the transparency (alpha) channel as a hiding place: alpha within ``alpha_tolerance`` levels of fully
+    # opaque is set to exactly opaque, alpha within it of fully clear to exactly clear (colour dropped), and the lowest
+    # bit of what is left is randomised.  Off by default; independent of scrub_lsb, which leaves alpha 0 and 255 alone.
+    scrub_alpha: bool = False
+    alpha_tolerance: int = stego.ALPHA_TOLERANCE_DEFAULT  # 1..32 levels of 255; an even value is rounded up to odd
     # JPEG only, off by default: "canonical" rebuilds the compressed data from its DCT coefficients in one canonical
     # form (pixels unchanged); "full" also destroys payloads stored in coefficient parities (True means "full").
     scrub_dct: str | bool = "off"
@@ -202,6 +207,12 @@ class Result:
     # "not_applied" when it was requested but could not be done (bit-exact JPEG, 1-bit or float
     # images).  Reports and credentials must use this, never the option.
     lsb_scrub: str = stego.SCRUB_OFF
+    # What the engine did about --scrub-alpha (stego.ALPHA_*): "off" when it was not requested, "no_alpha" when the image
+    # has no transparency channel to clean.  alpha_pixels counts the pixels whose alpha it changed, and alpha_tolerance
+    # is the tolerance it really used (an even one is rounded up to odd).  Reports and credentials must use these.
+    alpha_scrub: str = stego.ALPHA_OFF
+    alpha_pixels: int = 0
+    alpha_tolerance: int | None = None
     # What the engine did about --scrub-dct (stego.DCT_*), and the measured PSNR (dB) of the result against the input
     # when coefficients were scrubbed.
     dct_scrub: str = stego.DCT_OFF
@@ -805,6 +816,10 @@ class _Job:
         self.exact = True
         self.prnu_applied = False
         self.lsb_scrub = stego.SCRUB_OFF if not options.scrub_lsb else stego.SCRUB_NOT_APPLIED
+        # "no_alpha" until a frame with a transparency channel has been cleaned (a JPEG never has one).
+        self.alpha_scrub = stego.ALPHA_OFF if not options.scrub_alpha else stego.ALPHA_NO_ALPHA
+        self.alpha_pixels = 0
+        self.alpha_tolerance: int | None = None
         self.chroma_subsampled = False  # the lossy output stores colour at a lower resolution than luma
         self.kept: dict = {}  # see Result.kept
         self.verified_by = ["structure", "Pillow"]
@@ -963,6 +978,8 @@ class _Job:
         self._scrub_transparent(frames)  # again, because the decode stage may have run in another process
         if self.opts.scrub_prnu:
             self._scrub_prnu(frames)
+        if self.opts.scrub_alpha:  # after the warp, which resamples alpha into new in-between values
+            self._scrub_alpha(frames)
         if self.opts.scrub_lsb:  # last, so the final low bits are random whatever the warp did
             self._scrub_lsb(frames)
         data, expected, exact = self._encode(frames, out, loop, src)
@@ -991,6 +1008,9 @@ class _Job:
             verified_exact=exact,
             prnu_applied=self.prnu_applied,
             lsb_scrub=self.lsb_scrub,
+            alpha_scrub=self.alpha_scrub,
+            alpha_pixels=self.alpha_pixels,
+            alpha_tolerance=self.alpha_tolerance,
             verified_by=self.verified_by,
             kept=kept,
         )
@@ -1432,6 +1452,76 @@ class _Job:
             out[..., -1] = np.where(keep_alpha, alpha, out[..., -1])
             out[alpha == 0] = arr[alpha == 0]
         return out
+
+    def _scrub_alpha(self, frames: list[Frame]) -> None:
+        """Close the transparency channel as a hiding place (``Options.scrub_alpha``).
+
+        The LSB scrub keeps alpha 0 and 255 exactly (they are what a viewer shows as "gone" and "solid"), which leaves
+        a channel: a message written as 255-versus-254 or 0-versus-1 over a picture's solid or clear areas survives it.
+        Here alpha within the tolerance of fully opaque becomes exactly opaque, alpha within it of fully clear becomes
+        exactly clear (and its colour is dropped, as under any clear pixel), and the lowest bit of every partly
+        transparent pixel is randomised.  Colour is not touched, so this is separate from the colour-sample scrub.
+        Palette frames with transparency are widened to RGBA first, since a palette entry's alpha is shared by every
+        pixel that uses it and could not be randomised per pixel.
+        """
+        tol = stego.effective_alpha_tolerance(self.opts.alpha_tolerance)
+        rng = np.random.default_rng(int.from_bytes(os.urandom(16), "big"))
+        touched = changed = 0
+        for f in frames:
+            if f.array is not None:
+                if f.array.shape[2] not in (2, 4):
+                    continue
+                touched += 1
+                out, n = self._clean_alpha(f.array, rng, tol * 257, 0xFFFF)
+                if n:
+                    f.array, changed = out, changed + n
+                continue
+            if f.image.mode == "P" and f.alpha is not None:
+                f.image = _from_array(_palette_to_rgba(f), "RGBA")
+                f.alpha = None
+            img = f.image
+            if img.mode not in ("LA", "RGBA"):
+                continue
+            touched += 1
+            for top, bottom in _strips(img.height, img.width * 4):
+                out, n = self._clean_alpha(_rows(img, top, bottom), rng, tol, 0xFF)
+                if n:
+                    changed += n
+                    img.paste(_from_array(out, img.mode), (0, top))  # the frame owns its image: fix it in place
+        if not touched:
+            return  # stays "no_alpha": nothing to clean, and the reports say so
+        self.alpha_scrub = stego.ALPHA_APPLIED
+        self.alpha_tolerance = tol
+        self.alpha_pixels = changed
+        if changed:
+            self.exact = False
+            self.actions.append(
+                f"cleaned the transparency channel of {changed} pixel{'s' if changed != 1 else ''} "
+                f"(within {tol} levels of clear or opaque set exactly, low bit of the rest randomised; anti-steganography)"
+            )
+
+    @staticmethod
+    def _clean_alpha(arr: np.ndarray, rng, tol: int, full: int) -> tuple[np.ndarray, int]:
+        """(``arr`` with its alpha channel (the last) cleaned, how many pixels' alpha changed).
+
+        ``tol`` is odd (see stego.effective_alpha_tolerance), so the levels tol+1 .. full-tol-1 that are left pair up
+        as (even, odd) and randomising the lowest bit keeps every value inside that range.
+        """
+        dtype = arr.dtype
+        alpha = arr[..., -1]
+        clear = alpha <= tol
+        solid = alpha >= full - tol
+        partial = ~(clear | solid)
+        bits = rng.integers(0, 2, size=alpha.shape, dtype=dtype)
+        randomised = (alpha & ~dtype.type(1)) | bits
+        new = np.where(partial, randomised, np.where(solid, full, 0)).astype(dtype)
+        changed = int(np.count_nonzero(new != alpha))
+        if not changed:
+            return arr, 0
+        out = arr.copy()
+        out[..., -1] = new
+        out[clear, :-1] = 0  # no colour hides under a clear pixel (alpha 0 pixels were already cleared this way)
+        return out, changed
 
     # -- encoding -----------------------------------------------------------
 
@@ -2197,6 +2287,8 @@ class _Job:
             input_report=self.before,
             verified_exact=mode != "full",
             lsb_scrub=self.lsb_scrub,
+            alpha_scrub=self.alpha_scrub,
+            alpha_tolerance=self.alpha_tolerance,
             dct_scrub={"off": stego.DCT_OFF, "canonical": stego.DCT_CANONICAL, "full": stego.DCT_SCRUBBED}[mode],
             dct_psnr=measured,
             verified_by=self.verified_by,
@@ -2272,6 +2364,11 @@ def strip_image(data: bytes, options: Options | None = None) -> Result:
     if not data:
         raise StripError("file is empty")
     options = options or Options()
+    if options.scrub_alpha:  # a tolerance that cannot be honoured must not quietly become a different one
+        try:
+            stego.check_alpha_tolerance(options.alpha_tolerance)
+        except ValueError as exc:
+            raise StripError(str(exc)) from None
     from . import sandbox
 
     if sandbox.enabled(options.sandbox):

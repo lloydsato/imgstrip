@@ -38,21 +38,21 @@ process.stdout.write(JSON.stringify(out));
 
 DEFAULT_PREFS = {
     "format": "", "quality": "", "icc": "convert", "deep": False, "jpeg_lossless": False, "scrub_lsb": False,
-    "scrub_dct": False, "jpeg_canonical": False, "scrub_prnu": False, "auto_orient": True, "optimize": False,
-    "random_name": False, "c2pa": False,
+    "scrub_alpha": False, "scrub_dct": False, "jpeg_canonical": False, "scrub_prnu": False, "auto_orient": True,
+    "optimize": False, "random_name": False, "c2pa": False,
 }
 # The value that turns each option "on" for the comparison with it off.
 ON = {
-    "quality": "60", "icc": "drop", "deep": True, "jpeg_lossless": True, "scrub_lsb": True, "scrub_dct": True,
-    "jpeg_canonical": True, "scrub_prnu": True, "auto_orient": True, "optimize": True, "random_name": True, "c2pa": True,
+    "quality": "60", "icc": "drop", "deep": True, "jpeg_lossless": True, "scrub_lsb": True, "scrub_alpha": True,
+    "scrub_dct": True, "jpeg_canonical": True, "scrub_prnu": True, "auto_orient": True, "optimize": True, "random_name": True, "c2pa": True,
 }
 OFF = {
-    "quality": "", "icc": "convert", "deep": False, "jpeg_lossless": False, "scrub_lsb": False, "scrub_dct": False,
-    "jpeg_canonical": False, "scrub_prnu": False, "auto_orient": False, "optimize": False, "random_name": False,
+    "quality": "", "icc": "convert", "deep": False, "jpeg_lossless": False, "scrub_lsb": False, "scrub_alpha": False,
+    "scrub_dct": False, "jpeg_canonical": False, "scrub_prnu": False, "auto_orient": False, "optimize": False, "random_name": False,
     "c2pa": False,
 }
-RANDOMISING = ("scrub_lsb", "scrub_dct", "scrub_prnu")
-ENGINE_OPTIONS = ("quality", "icc", "jpeg_lossless", "scrub_lsb", "scrub_dct", "jpeg_canonical", "scrub_prnu",
+RANDOMISING = ("scrub_lsb", "scrub_alpha", "scrub_dct", "scrub_prnu")
+ENGINE_OPTIONS = ("quality", "icc", "jpeg_lossless", "scrub_lsb", "scrub_alpha", "scrub_dct", "jpeg_canonical", "scrub_prnu",
                   "auto_orient", "optimize")
 
 
@@ -186,6 +186,7 @@ def _options(prefs, **over):
         icc=p["icc"],
         auto_orient=p["auto_orient"],
         scrub_lsb=p["scrub_lsb"],
+        scrub_alpha=p["scrub_alpha"],
         scrub_dct="full" if p["scrub_dct"] else "canonical" if p["jpeg_canonical"] else "off",
         scrub_prnu=p["scrub_prnu"],
         optimize=p["optimize"],
@@ -210,6 +211,8 @@ JPEG_MODES = [
     {"jpeg_canonical": True},
     {"jpeg_lossless": True, "scrub_prnu": True},
     {"scrub_dct": True, "scrub_lsb": True},
+    {"jpeg_lossless": True, "scrub_alpha": True},
+    {"scrub_dct": True, "scrub_alpha": True},
 ]
 
 
@@ -258,6 +261,8 @@ def test_every_greyed_out_option_really_changes_nothing_or_is_refused(images, en
                 continue  # the picture fails with or without the option, for another reason
             if option == "scrub_lsb":
                 assert with_opt.lsb_scrub not in ("applied", "partial"), ctx
+            elif option == "scrub_alpha":
+                assert with_opt.alpha_scrub != "applied", ctx
             elif option == "scrub_prnu":
                 assert not with_opt.prnu_applied, ctx
             elif not any(neutral[r] for r in RANDOMISING):  # the random scrubs make two runs differ by design
@@ -592,6 +597,7 @@ def test_inspect_reports_the_facts_of_an_image(server, images):
     assert facts == {
         "format": "JPEG", "default_output": "JPEG", "size": [96, 80], "megapixels": 0.01,
         "bytes": len(images["jpeg-rotated"]), "mode": "RGB", "frames": 1, "orientation": 6, "profile": False,
+        "alpha": False,
     }
     assert _inspect(server, images["jpeg-profile"])["facts"]["profile"] is True
     animated = _inspect(server, images["gif-animated"])["facts"]

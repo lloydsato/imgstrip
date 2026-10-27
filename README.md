@@ -5,7 +5,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-1.2.7-2fbf8f?style=flat-square)](https://pypi.org/project/imgstrip/)
+[![Version](https://img.shields.io/badge/version-2.0.0-2fbf8f?style=flat-square)](https://pypi.org/project/imgstrip/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://pypi.org/project/imgstrip/)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-blue?style=flat-square)](https://github.com/lloydsato/imgstrip/blob/main/LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/lloydsato/imgstrip/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/lloydsato/imgstrip/actions/workflows/ci.yml)
@@ -98,7 +98,7 @@ Check which version you have:
 
 ```console
 $ imgstrip --version
-imgstrip 1.2.7
+imgstrip 2.0.0
 ```
 
 Want to be sure the install works? Run `imgstrip --self-test`. It builds 21 booby-trapped test images, cleans them in every mode, and has independent image readers confirm the results.
@@ -147,6 +147,7 @@ The defaults already remove metadata, hidden containers and appended data. The s
 | A JPEG losing any quality at all | `--jpeg-lossless` | Keeps the compressed picture data as it was, so use it for pictures you trust |
 | Data hidden in a JPEG's table layouts, padding or markers | `--jpeg-canonical` | Same pixels, rebuilt in one canonical form. DCT steganography survives |
 | Messages hidden in the low bits of pixels (LSB) | `--scrub-lsb`<br>(look first with `--deep`) | Changes each value by at most 1/255. Invisible |
+| Messages hidden in the transparency (alpha) layer of a PNG, WebP, GIF or TIFF | `--scrub-alpha`<br>(add `--scrub-lsb` for the colours too) | Pixels within 5/255 of solid or clear become exactly solid or clear. `--scrub-lsb` leaves alpha 0 and 255 alone, so it does not cover this |
 | Messages hidden in a JPEG's DCT coefficients (JSteg, F5, steghide, J-UNIWARD...) | `--scrub-dct` | Costs picture quality. The report says how much |
 | A photo being linked to your specific camera (sensor fingerprint) | `--scrub-prnu` | Moves parts of the picture by a few pixels. Strong reduction, never proof |
 | Colours that must stay exact | `--icc sanitize` | Embeds a rebuilt, anonymous colour profile |
@@ -213,13 +214,13 @@ The engine is the same one the command line and the web app use, so it makes the
 imgstrip-web
 ```
 
-Drop photos onto the window and each one shows what it gives away. Click **Clean**, then download the results one by one, as a ZIP, or save them straight to a folder.
+Drop photos onto the window and each one shows what it gives away, with its SHA-256 and MD5. Pick a photo to see the details beside the list. Click **Clean**, and every row then shows the hashes before and after; download the results one by one, as a ZIP, or save them straight to a folder. A hash list (CSV) and a box to compare a hash you already have are in the same place.
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/lloydsato/imgstrip/main/docs/screenshots/web-app.png" alt="The imgstrip web app after four photos were dropped on it. One row is open and lists what that photo reveals: GPS location, camera model, time taken, body serial number, lens and editing software. A button at the bottom reads Clean 4 images." width="560">
+  <img src="https://raw.githubusercontent.com/lloydsato/imgstrip/main/docs/screenshots/web-app.png" alt="The imgstrip web app after four photos were dropped on it. The list on the left shows each photo with what it gives away and its SHA-256 and MD5. The pane on the right is open on the first photo and says it shows where it was taken, which camera took it and when. A button at the bottom reads Clean 4 images." width="760">
 </div>
 
-Open **Options** for the same switches as the command line: *Deep scan*, *Keep JPEG data bit-exact*, *Scrub least-significant bits*, *Disrupt camera fingerprint*, *Sign with Content Credentials*, plus the output format, quality and colour profile.
+Open **Options** for the same switches as the command line (*Deep scan* sits next to the Clean button), and press the (i) beside any of them for an explanation in plain words: *Deep scan*, *Keep JPEG data bit-exact*, *Scrub least-significant bits*, *Clean transparency channel*, *Disrupt camera fingerprint*, *Sign with Content Credentials*, plus the output format, quality and colour profile.
 
 Options that do not apply to the images you added are greyed out, and ones that cannot be done for them are greyed out with a yellow warning triangle and the reason.
 

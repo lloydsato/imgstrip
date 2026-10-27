@@ -202,6 +202,18 @@ def findings_payload(findings: list[Finding]) -> list[dict]:
     return [{"category": f.category, "label": f.label, "detail": f.detail} for f in findings]
 
 
+def fingerprints(data: bytes) -> dict[str, str]:
+    """SHA-256 and MD5 of a file's exact bytes, as lowercase hex.
+
+    SHA-256 is the proof.  MD5 is only here so a file can be matched against older records and tools that still list
+    it (it is not collision-resistant, and ``usedforsecurity=False`` says so to FIPS-restricted Pythons).
+    """
+    return {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "md5": hashlib.md5(data, usedforsecurity=False).hexdigest(),
+    }
+
+
 # --------------------------------------------------------------------------
 # Session state
 # --------------------------------------------------------------------------
@@ -487,6 +499,12 @@ def parse_options(raw: dict) -> Options:
             raise ApiError(400, f"{name} must be true or false")
         return value
 
+    alpha_tolerance = raw.get("alpha_tolerance", stego.ALPHA_TOLERANCE_DEFAULT)
+    try:
+        stego.check_alpha_tolerance(alpha_tolerance)
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from None
+
     return Options(
         format=fmt,
         quality=quality,
@@ -494,6 +512,8 @@ def parse_options(raw: dict) -> Options:
         icc=icc,
         auto_orient=flag("auto_orient", True),
         scrub_lsb=flag("scrub_lsb", False),
+        scrub_alpha=flag("scrub_alpha", False),
+        alpha_tolerance=alpha_tolerance,
         scrub_dct="full" if flag("scrub_dct", False) else "canonical" if flag("jpeg_canonical", False) else "off",
         scrub_prnu=flag("scrub_prnu", False),
         optimize=flag("optimize", False),
@@ -649,6 +669,18 @@ def _probe_here(data: bytes) -> tuple[str | None, tuple[int, int] | None]:
         return None, None
 
 
+def _may_have_alpha(im) -> bool:
+    """Whether the image has, or may have, a transparency channel: an alpha mode, palette transparency or a colour key.
+
+    Animations count as having one: a later frame may be transparent where the first is not.
+    """
+    if im.mode in ("RGBA", "LA", "PA", "RGBa", "La"):
+        return True
+    if "transparency" in im.info:
+        return True
+    return (getattr(im, "n_frames", 1) or 1) > 1
+
+
 def image_facts_here(data: bytes) -> dict | None:
     from ..core import OUTPUT_FORMATS, _orientation, _pillow_guard, canonical_format, open_image
 
@@ -669,6 +701,8 @@ def image_facts_here(data: bytes) -> dict | None:
                 "frames": int(frames),
                 "orientation": _orientation(im, []),
                 "profile": profile,
+                # Can the picture carry a transparency channel?  (A colour key in a palette-less image counts too.)
+                "alpha": _may_have_alpha(im),
             }
     except Exception:  # noqa: BLE001 - anything unreadable is simply "no facts": every option stays available
         return None
@@ -729,6 +763,7 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
         "pixels_scanned": pixels_scanned,
         "size": list(size) if size else None,
         "bytes": len(data),
+        "fingerprints": fingerprints(data),  # the file as received, before anything is cleaned
         "deep": deep,
         "clean": not findings and report.error is None,
         "error": report.error,
@@ -850,6 +885,7 @@ def clean_payload(
     source = stego.Verdict(scan_state) if scrubbed and scan_state in (stego.DETECTED, stego.NOT_DETECTED) else None
     verdict = stego.for_output(source, result.lsb_scrub, copied=result.verified_exact)
     rid = session.put(final, name, _MIME.get(result.output_format, "application/octet-stream"))
+    after = fingerprints(final)
     return {
         "id": rid,
         "filename": name,
@@ -866,10 +902,14 @@ def clean_payload(
         "lsb_scrub": result.lsb_scrub,  # "not_applied": asked for, but this image could not be scrubbed
         "steganography": verdict.as_dict(),
         "dct": stego.dct_report(result.dct_scrub, result.dct_psnr),  # JPEG coefficients: null unless asked for
+        "alpha": stego.alpha_report(result.alpha_scrub, result.alpha_tolerance, result.alpha_pixels),  # null unless asked
         "prnu": result.prnu_applied,
         "bytes_in": len(data),
         "bytes_out": len(final),
-        "sha256": hashlib.sha256(final).hexdigest(),
+        "sha256": after["sha256"],  # the cleaned file (what the seal is engraved from)
+        "md5": after["md5"],
+        "before": {**fingerprints(data), "bytes": len(data)},  # the file exactly as it was received
+        "after": {**after, "bytes": len(final)},  # the file exactly as it is offered for download
         "removed": findings_payload(result.removed),
         "actions": result.actions,
         "warnings": list(result.warnings) + extra_warnings,

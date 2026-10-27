@@ -70,7 +70,7 @@ SCRIPT = textwrap.dedent(
         if (root.scrollWidth > root.clientWidth + 1) bad.push(`page scrolls sideways: ${root.scrollWidth} > ${root.clientWidth}`);
         const win = document.querySelector('#window').getBoundingClientRect();
         for (const el of document.querySelectorAll('#window *')) {
-          const hiddenParent = el.closest('[hidden], .sr-only, .sprite, .seal-tip');
+          const hiddenParent = el.closest('[hidden], .sr-only, .sprite');
           if (hiddenParent) continue;
           const inner = el.closest('.reveal-inner');
           if (inner && getComputedStyle(inner).visibility === 'hidden') continue;
@@ -82,6 +82,11 @@ SCRIPT = textwrap.dedent(
         }
         return bad.slice(0, 8);
       });
+      // Narrow screens scroll the page; wide ones scroll the list pane inside the app.
+      const scrollList = (page, y) => page.evaluate((to) => {
+        const pane = document.querySelector('#listPane');
+        if (getComputedStyle(pane).overflowY === 'auto') pane.scrollTop = to; else window.scrollTo(0, to);
+      }, y);
       const box = (page, sel) => page.$eval(sel, (e) => { const r = e.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, height: r.height, left: r.left, right: r.right }; });
 
       // A. a long, mixed list with warnings, at every width
@@ -100,13 +105,13 @@ SCRIPT = textwrap.dedent(
         // the action bar and the list top stay on screen wherever the page is scrolled
         r.foot = {};
         for (const [label, y] of [['top', 0], ['middle', 1500], ['bottom', 999999]]) {
-          await page.evaluate((to) => window.scrollTo(0, to), y);
+          await scrollList(page, y);
           await page.waitForTimeout(150);
           const f = await box(page, '#foot');
           const t = await box(page, '.list-top');
           r.foot[label] = { footTop: f.top, footBottom: f.bottom, listTop: t.top, vh: height };
         }
-        await page.evaluate(() => window.scrollTo(0, 0));
+        await scrollList(page, 0);
 
         // open the review tray
         await page.click('#reviewToggle');
@@ -136,7 +141,7 @@ SCRIPT = textwrap.dedent(
         }
 
         // a chip takes you to its file, open and in view
-        await page.evaluate(() => window.scrollTo(0, 0));
+        await scrollList(page, 0);
         const chip = await page.$('.review-group .chip:not(.chip-more)');
         r.chipName = await chip.getAttribute('title');
         await chip.click();
@@ -145,14 +150,15 @@ SCRIPT = textwrap.dedent(
         await page.waitForFunction(() => {
           const now = performance.now();
           const w = window.__scrollWatch || (window.__scrollWatch = { y: -1, since: now });
-          if (w.y !== window.scrollY) { w.y = window.scrollY; w.since = now; }
+          const y = window.scrollY + document.querySelector('#listPane').scrollTop;
+          if (w.y !== y) { w.y = y; w.since = now; }
           return now - w.since > 300;
         }, null, { timeout: 15000, polling: 50 });
         r.chipTarget = await page.evaluate((name) => {
           const row = Array.from(document.querySelectorAll('.file')).find((f) => f.querySelector('.file-name').textContent === name);
           if (!row) return null;
           const rect = row.querySelector('.file-head').getBoundingClientRect();
-          return { open: row.dataset.open, focused: document.activeElement === row.querySelector('.file-head'), top: rect.top, bottom: rect.bottom, vh: innerHeight };
+          return { selected: row.dataset.selected, focused: document.activeElement === row.querySelector('.file-head'), top: rect.top, bottom: rect.bottom, vh: innerHeight };
         }, r.chipName);
         out.sizes[width] = r;
         if (width === 375) await page.screenshot({ path: `${shotDir}/many-375.png` });
@@ -182,8 +188,10 @@ SCRIPT = textwrap.dedent(
         out.noWarnings = { hidden: await page.$eval('#review', (e) => e.hidden) };
         await add(page, ['junk.bin', 'raw.cr2']);
         out.withBad = { hidden: await page.$eval('#review', (e) => e.hidden), title: (await page.textContent('#reviewTitle')).replace(/\s+/g, ' ').trim(), groups: await page.$$eval('.review-group h3 > span:first-child', (e) => e.map((x) => x.textContent)) };
-        await page.click('.file:nth-child(2) .btn-icon[title=Remove]');
-        await page.click('.file:nth-child(2) .btn-icon[title=Remove]');
+        for (let i = 0; i < 2; i++) {
+          await page.click('.file:nth-child(2) .file-head');
+          await page.click('#detailContent button[data-key=remove]');
+        }
         await page.waitForTimeout(200);
         out.removedBad = { hidden: await page.$eval('#review', (e) => e.hidden), rows: await page.$$eval('.file', (e) => e.length) };
         await add(page, ['junk.bin']);
@@ -236,7 +244,8 @@ SCRIPT = textwrap.dedent(
           mode: await page.$eval('#primary', (e) => e.dataset.mode),
           label: (await page.textContent('#primary')).trim(),
           states: await page.$$eval('.file', (e) => e.map((x) => x.dataset.state)),
-          subs: await page.$$eval('.file-sub', (e) => e.slice(0, 1).map((x) => x.textContent)),
+          subs: await page.$$eval('.file-meta', (e) => e.slice(0, 1).map((x) => x.textContent)),
+          pairs: await page.$$eval('.file:first-child .fp-tag', (e) => e.map((x) => x.textContent)),
         };
         await page.click('#saveToggle');
         await page.fill('#folder', 'relative/' + 'very-long-folder-name-'.repeat(12));
@@ -340,7 +349,7 @@ def test_plus_more_shows_every_name_then_folds_back(run, width):
 @pytest.mark.parametrize("width", WIDTHS)
 def test_a_chip_takes_you_to_its_file(run, width):
     t = run["sizes"][width]["chipTarget"]
-    assert t and t["open"] == "true" and t["focused"], t
+    assert t and t["selected"] == "true" and t["focused"], t
     assert t["top"] >= -1 and t["bottom"] <= t["vh"] + 1, t
 
 
@@ -377,7 +386,8 @@ def test_reduced_motion_stops_the_transitions(run):
 def test_a_cleaned_batch_and_a_long_error_stay_inside_the_action_bar(run):
     c = run["cleaned"]
     assert c["states"] == ["clean"] * 6 and c["mode"] == "download" and c["label"] == "Download all (.zip)"
-    assert "→" in c["subs"][0], c["subs"]  # before and after sizes
+    assert c["subs"][0].startswith("JPEG · ") and c["subs"][0].endswith("KB"), c["subs"]
+    assert c["pairs"] == ["Before", "After"], c["pairs"]  # a cleaned row shows the hashes before and after
     n = run["note"]
     assert n["breaks"] == []
     assert n["foot"]["bottom"] <= n["vh"] + 1 and n["foot"]["height"] <= 0.55 * n["vh"] + 2, n

@@ -14,9 +14,8 @@
 </head>
 <body>
 <svg class="sprite" aria-hidden="true" focusable="false">
-  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9.5" rx="2.2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></symbol>
-  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7.5h9M18 7.5h2M4 16.5h3M11 16.5h9"/><circle cx="15.5" cy="7.5" r="2.25"/><circle cx="8.5" cy="16.5" r="2.25"/></symbol>
   <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6"/></symbol>
   <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4.5v10.5M7.5 11l4.5 4.5 4.5-4.5M5.5 19.5h13"/></symbol>
   <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></symbol>
@@ -30,195 +29,239 @@
   <symbol id="i-image" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9.5" cy="10" r="1.5"/><path d="M5 17.5l4.5-4.5 3 3 2.5-2.5 4 4"/></symbol>
 </svg>
 
-<main class="stage">
-  <section class="window" id="window" aria-labelledby="appname">
-    <header class="bar">
-      <div class="brand">
-        <span class="mark" id="mark" aria-hidden="true"></span>
-        <h1 class="wordmark" id="appname">imgstrip</h1>
-      </div>
-      <div class="bar-end">
-        <span class="local" title="imgstrip runs on this computer. Images are never uploaded anywhere.">
-          <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-lock"/></svg><span class="local-text">Local only</span>
-        </span>
-        <button class="btn btn-quiet" id="optionsToggle" type="button" aria-expanded="false" aria-controls="options">
-          <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-sliders"/></svg><span>Options</span>
-        </button>
-      </div>
-    </header>
-
-    <div class="reveal" id="options" data-open="false">
-      <div class="reveal-inner">
-        <form class="options" id="optionsForm" autocomplete="off">
-          <div class="field">
-            <label for="opt-format">Save as</label>
-            <span class="select"><select id="opt-format" name="format">
-              <option value="">Same as original</option>
-            </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
-          </div>
-          <div class="field">
-            <label for="opt-quality">Quality <span class="hint">for lossy formats</span></label>
-            <span class="select"><select id="opt-quality" name="quality">
-              <option value="">Default</option>
-              <option value="100">100</option>
-              <option value="95">95</option>
-              <option value="90">90</option>
-              <option value="85">85</option>
-              <option value="80">80</option>
-              <option value="75">75</option>
-              <option value="70">70</option>
-              <option value="60">60</option>
-            </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
-          </div>
-          <div class="field">
-            <label for="opt-icc">Colour profile</label>
-            <span class="select"><select id="opt-icc" name="icc">
-              <option value="convert">Convert colours to sRGB</option>
-              <option value="sanitize">Keep colours, embed a rebuilt anonymous profile</option>
-              <option value="drop">Drop the profile</option>
-            </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
-          </div>
-          <div class="switches">
-            <div class="switch-group" role="group" aria-labelledby="grp-privacy">
-              <h3 class="group-label" id="grp-privacy">Privacy</h3>
-              <label class="switch">
-                <input type="checkbox" role="switch" name="scrub_lsb">
-                <span class="switch-track" aria-hidden="true"></span>
-                <span class="switch-text"><span>Scrub least-significant bits</span><span class="hint">Destroys LSB steganography. Changes pixels by at most 1. Other ways of hiding data are not covered.</span></span>
-              </label>
-              <label class="switch">
-                <input type="checkbox" role="switch" name="scrub_prnu">
-                <span class="switch-track" aria-hidden="true"></span>
-                <span class="switch-text"><span>Disrupt camera fingerprint</span><span class="hint">Scrambles the sensor noise that can link a photo to one camera. Shifts parts of the picture by a few pixels.</span></span>
-              </label>
-              <label class="switch">
-                <input type="checkbox" role="switch" name="random_name">
-                <span class="switch-track" aria-hidden="true"></span>
-                <span class="switch-text"><span>Random file names</span><span class="hint">Names like IMG_20240517_133700 can reveal when and where a photo was taken. Off by default.</span></span>
-              </label>
-              <label class="switch" id="c2paSwitch">
-                <input type="checkbox" role="switch" name="c2pa" aria-controls="credentials">
-                <span class="switch-track" aria-hidden="true"></span>
-                <span class="switch-text"><span>Sign with Content Credentials</span><span class="hint" id="c2paHint">Adds a signed note (C2PA) that you removed the metadata, and whether the picture is unchanged. Optional.</span></span>
-              </label>
-            </div>
-            <div class="switch-group" role="group" aria-labelledby="grp-jpeg">
-              <h3 class="group-label" id="grp-jpeg">JPEG files</h3>
-              <label class="switch">
-                <input type="checkbox" role="switch" name="jpeg_lossless">
-                <span class="switch-track" aria-hidden="true"></span>
-                <span class="switch-text"><span>Keep JPEG data bit-exact</span><span class="hint">No re-encoding. Keeps anything hidden in the compressed image data, and can't rotate pixels.</span></span>
-              </label>
-              <label class="switch">
-                <input type="checkbox" role="switch" name="scrub_dct">
-                <span class="switch-track" aria-hidden="true"></span>
-                <span class="switch-text"><span>Scrub JPEG coefficients</span><span class="hint">JPEG only. Destroys parity payloads hidden in the DCT data (JSteg, F5, steghide) and greatly weakens ±1 ones (J-UNIWARD). Costs picture quality, so the result shows how much. Off by default.</span></span>
-              </label>
-              <label class="switch">
-                <input type="checkbox" role="switch" name="jpeg_canonical">
-                <span class="switch-track" aria-hidden="true"></span>
-                <span class="switch-text"><span>Rebuild JPEG data canonically</span><span class="hint">JPEG only. Removes data hidden in table layouts, padding and markers. The picture stays pixel-identical, but hidden coefficient data is kept.</span></span>
-              </label>
-            </div>
-            <div class="switch-group" role="group" aria-labelledby="grp-output">
-              <h3 class="group-label" id="grp-output">Scan and output</h3>
-              <label class="switch">
-                <input type="checkbox" role="switch" name="deep">
-                <span class="switch-track" aria-hidden="true"></span>
-                <span class="switch-text"><span>Deep scan</span><span class="hint">Also search the pixels for steganography and hidden colour. Slower. It can find a payload, never prove there is none.</span></span>
-              </label>
-              <label class="switch">
-                <input type="checkbox" role="switch" name="auto_orient" checked>
-                <span class="switch-track" aria-hidden="true"></span>
-                <span class="switch-text"><span>Apply orientation</span><span class="hint">Rotate the pixels so the photo stays upright without its tag.</span></span>
-              </label>
-              <label class="switch">
-                <input type="checkbox" role="switch" name="optimize">
-                <span class="switch-track" aria-hidden="true"></span>
-                <span class="switch-text"><span>Smaller PNGs</span><span class="hint">Try extra compression. Slower.</span></span>
-              </label>
-            </div>
-          </div>
-        </form>
-        <section class="reveal" id="credentials" data-open="false" aria-labelledby="credTitle">
-          <div class="reveal-inner">
-            <div class="cred">
-              <h3 class="cred-title" id="credTitle">Content Credentials <span class="hint">C2PA</span></h3>
-              <p class="cred-lede">Each cleaned image is signed with your certificate. The credential says you removed its metadata and whether the pixels are unchanged. It does not vouch for who took the picture or that it is genuine. Nothing here leaves this computer, and your key is kept in memory only.</p>
-              <div class="cred-identity" id="credIdentity"></div>
-              <form class="cred-load" id="identityForm" autocomplete="off" hidden>
-                <div class="field">
-                  <label for="cred-cert">Certificate <span class="hint">PEM chain or a .p12 bundle</span></label>
-                  <input type="file" id="cred-cert" accept=".pem,.crt,.cer,.p12,.pfx">
-                </div>
-                <div class="field">
-                  <label for="cred-key">Private key <span class="hint">if not in the certificate file</span></label>
-                  <input type="file" id="cred-key" accept=".pem,.key">
-                </div>
-                <div class="field">
-                  <label for="cred-pass">Passphrase <span class="hint">if the key is protected</span></label>
-                  <input type="password" id="cred-pass" autocomplete="off" spellcheck="false" autocapitalize="off">
-                </div>
-                <div class="field">
-                  <label for="cred-anchors">Trust anchors <span class="hint">optional CA certificates to treat as trusted</span></label>
-                  <input type="file" id="cred-anchors" accept=".pem,.crt,.cer">
-                </div>
-                <p class="note is-error cred-error" id="identityError" role="alert" hidden></p>
-                <div class="cred-actions">
-                  <button class="btn btn-plate btn-small" id="identityLoad" type="submit">Load identity</button>
-                  <button class="btn btn-quiet btn-small" id="identityCancel" type="button">Cancel</button>
-                </div>
-              </form>
-              <div class="cred-settings" id="credSettings">
-                <div class="field">
-                  <label for="cred-date">Date recorded</label>
-                  <span class="select"><select id="cred-date">
-                    <option value="day">Day only (safer)</option>
-                    <option value="minute">Day and minute</option>
-                  </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
-                </div>
-                <div class="field">
-                  <label for="cred-detail">Detail</label>
-                  <span class="select"><select id="cred-detail">
-                    <option value="minimal">Minimal</option>
-                    <option value="full">Also list what was done to the pixels</option>
-                  </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
-                </div>
-                <label class="switch cred-commit">
-                  <input type="checkbox" role="switch" id="cred-commit">
-                  <span class="switch-track" aria-hidden="true"></span>
-                  <span class="switch-text"><span>Make it auditable later</span><span class="hint">Seals a fingerprint of the original into the credential. Only the receipt you keep can open it, and it is lost when you stop imgstrip unless you download it.</span></span>
-                </label>
-              </div>
-              <div class="cred-hints" id="credHints"></div>
-              <div class="cred-receipts" id="credReceipts" hidden>
-                <p class="note"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg><span id="receiptText"></span></p>
-                <button class="btn btn-secondary btn-small" id="receiptDownload" type="button"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-download"/></svg><span>Download receipts</span></button>
-              </div>
-            </div>
-          </div>
-        </section>
-      </div>
+<main class="app" id="window" aria-labelledby="appname">
+  <header class="bar">
+    <div class="brand">
+      <h1 class="wordmark" id="appname">imgstrip</h1>
+      <p class="tagline">Leaves only the picture.</p>
     </div>
+    <div class="bar-end">
+      <span class="local" title="imgstrip runs on this computer. Images are never uploaded anywhere.">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="local-text"><span class="local-long">Runs on this computer only</span><span class="local-short">Local only</span></span>
+        <span class="local-addr" id="localAddr"></span>
+      </span>
+      <button class="btn btn-outline" id="optionsToggle" type="button" aria-expanded="false" aria-controls="options">Options</button>
+    </div>
+  </header>
 
-    <div class="body" id="body">
-      <div class="well" id="well">
-        <span class="well-mark" id="wellMark" aria-hidden="true"></span>
-        <h2 class="well-title">Drop images to scan</h2>
-        <p class="well-sub">See what each file gives away. Nothing changes until you clean, and nothing leaves this computer.</p>
-        <button class="btn btn-plate" id="choose" type="button">Choose images</button>
-        <ol class="steps" aria-label="How it works">
-          <li><span class="steps-n" aria-hidden="true">1</span><span><strong>Scan</strong> shows what each file reveals</span></li>
-          <li><span class="steps-n" aria-hidden="true">2</span><span><strong>Clean</strong> rebuilds it from its pixels</span></li>
-          <li><span class="steps-n" aria-hidden="true">3</span><span><strong>Verify</strong> checks the result twice</span></li>
-        </ol>
+  <div class="reveal" id="options" data-open="false">
+    <div class="reveal-inner">
+      <form class="options" id="optionsForm" autocomplete="off">
+        <div class="field">
+          <label for="opt-format">Save as</label>
+          <span class="select"><select id="opt-format" name="format">
+            <option value="">Same as original</option>
+          </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
+        </div>
+        <div class="field">
+          <label for="opt-quality">Quality <span class="hint">for lossy formats</span></label>
+          <span class="select"><select id="opt-quality" name="quality">
+            <option value="">Default</option>
+            <option value="100">100</option>
+            <option value="95">95</option>
+            <option value="90">90</option>
+            <option value="85">85</option>
+            <option value="80">80</option>
+            <option value="75">75</option>
+            <option value="70">70</option>
+            <option value="60">60</option>
+          </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
+        </div>
+        <div class="field">
+          <label for="opt-icc">Colour profile</label>
+          <span class="select"><select id="opt-icc" name="icc">
+            <option value="convert">Convert colours to sRGB</option>
+            <option value="sanitize">Keep colours, embed a rebuilt anonymous profile</option>
+            <option value="drop">Drop the profile</option>
+          </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
+        </div>
+        <div class="switches">
+          <div class="switch-group" role="group" aria-labelledby="grp-privacy">
+            <h3 class="group-label" id="grp-privacy">Privacy</h3>
+            <div class="switch-row">
+              <label class="switch">
+                <input type="checkbox" role="switch" name="scrub_lsb" id="opt-scrub_lsb" aria-labelledby="sw-scrub_lsb" aria-describedby="hint-scrub_lsb">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-title" id="sw-scrub_lsb">Scrub least-significant bits</span>
+              </label>
+              <button class="info" type="button" data-info="scrub_lsb" aria-expanded="false" aria-label="What does “Scrub least-significant bits” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+              <label class="hint" for="opt-scrub_lsb" id="hint-scrub_lsb">Destroys LSB steganography. Changes pixels by at most 1. Other ways of hiding data are not covered.</label>
+            </div>
+            <div class="switch-row">
+              <label class="switch">
+                <input type="checkbox" role="switch" name="scrub_alpha" id="opt-scrub_alpha" aria-labelledby="sw-scrub_alpha" aria-describedby="hint-scrub_alpha">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-title" id="sw-scrub_alpha">Clean transparency channel</span>
+              </label>
+              <button class="info" type="button" data-info="scrub_alpha" aria-expanded="false" aria-label="What does “Clean transparency channel” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+              <label class="hint" for="opt-scrub_alpha" id="hint-scrub_alpha">Destroys data hidden in the see-through (alpha) layer, which the bit scrub leaves alone. Nearly-solid and nearly-clear pixels become exactly solid or clear.</label>
+            </div>
+            <div class="switch-row">
+              <label class="switch">
+                <input type="checkbox" role="switch" name="scrub_prnu" id="opt-scrub_prnu" aria-labelledby="sw-scrub_prnu" aria-describedby="hint-scrub_prnu">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-title" id="sw-scrub_prnu">Disrupt camera fingerprint</span>
+              </label>
+              <button class="info" type="button" data-info="scrub_prnu" aria-expanded="false" aria-label="What does “Disrupt camera fingerprint” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+              <label class="hint" for="opt-scrub_prnu" id="hint-scrub_prnu">Scrambles the sensor noise that can link a photo to one camera. Shifts parts of the picture by a few pixels.</label>
+            </div>
+            <div class="switch-row">
+              <label class="switch">
+                <input type="checkbox" role="switch" name="random_name" id="opt-random_name" aria-labelledby="sw-random_name" aria-describedby="hint-random_name">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-title" id="sw-random_name">Random file names</span>
+              </label>
+              <button class="info" type="button" data-info="random_name" aria-expanded="false" aria-label="What does “Random file names” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+              <label class="hint" for="opt-random_name" id="hint-random_name">Names like IMG_20240517_133700 can reveal when and where a photo was taken. Off by default.</label>
+            </div>
+            <div class="switch-row">
+              <label class="switch" id="c2paSwitch">
+                <input type="checkbox" role="switch" name="c2pa" aria-controls="credentials" id="opt-c2pa" aria-labelledby="sw-c2pa" aria-describedby="c2paHint">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-title" id="sw-c2pa">Sign with Content Credentials</span>
+              </label>
+              <button class="info" type="button" data-info="c2pa" aria-expanded="false" aria-label="What does “Sign with Content Credentials” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+              <label class="hint" for="opt-c2pa" id="c2paHint">Adds a signed note (C2PA) that you removed the metadata, and whether the picture is unchanged. Optional.</label>
+            </div>
+          </div>
+          <div class="switch-group" role="group" aria-labelledby="grp-jpeg">
+            <h3 class="group-label" id="grp-jpeg">JPEG files</h3>
+            <div class="switch-row">
+              <label class="switch">
+                <input type="checkbox" role="switch" name="jpeg_lossless" id="opt-jpeg_lossless" aria-labelledby="sw-jpeg_lossless" aria-describedby="hint-jpeg_lossless">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-title" id="sw-jpeg_lossless">Keep JPEG data bit-exact</span>
+              </label>
+              <button class="info" type="button" data-info="jpeg_lossless" aria-expanded="false" aria-label="What does “Keep JPEG data bit-exact” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+              <label class="hint" for="opt-jpeg_lossless" id="hint-jpeg_lossless">No re-encoding. Keeps anything hidden in the compressed image data, and can't rotate pixels.</label>
+            </div>
+            <div class="switch-row">
+              <label class="switch">
+                <input type="checkbox" role="switch" name="scrub_dct" id="opt-scrub_dct" aria-labelledby="sw-scrub_dct" aria-describedby="hint-scrub_dct">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-title" id="sw-scrub_dct">Scrub JPEG coefficients</span>
+              </label>
+              <button class="info" type="button" data-info="scrub_dct" aria-expanded="false" aria-label="What does “Scrub JPEG coefficients” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+              <label class="hint" for="opt-scrub_dct" id="hint-scrub_dct">JPEG only. Destroys parity payloads hidden in the DCT data (JSteg, F5, steghide) and greatly weakens ±1 ones (J-UNIWARD). Costs picture quality, so the result shows how much. Off by default.</label>
+            </div>
+            <div class="switch-row">
+              <label class="switch">
+                <input type="checkbox" role="switch" name="jpeg_canonical" id="opt-jpeg_canonical" aria-labelledby="sw-jpeg_canonical" aria-describedby="hint-jpeg_canonical">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-title" id="sw-jpeg_canonical">Rebuild JPEG data canonically</span>
+              </label>
+              <button class="info" type="button" data-info="jpeg_canonical" aria-expanded="false" aria-label="What does “Rebuild JPEG data canonically” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+              <label class="hint" for="opt-jpeg_canonical" id="hint-jpeg_canonical">JPEG only. Removes data hidden in table layouts, padding and markers. The picture stays pixel-identical, but hidden coefficient data is kept.</label>
+            </div>
+          </div>
+          <div class="switch-group" role="group" aria-labelledby="grp-output">
+            <h3 class="group-label" id="grp-output">Output</h3>
+            <div class="switch-row">
+              <label class="switch">
+                <input type="checkbox" role="switch" name="auto_orient" checked id="opt-auto_orient" aria-labelledby="sw-auto_orient" aria-describedby="hint-auto_orient">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-title" id="sw-auto_orient">Apply orientation</span>
+              </label>
+              <button class="info" type="button" data-info="auto_orient" aria-expanded="false" aria-label="What does “Apply orientation” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+              <label class="hint" for="opt-auto_orient" id="hint-auto_orient">Rotate the pixels so the photo stays upright without its tag.</label>
+            </div>
+            <div class="switch-row">
+              <label class="switch">
+                <input type="checkbox" role="switch" name="optimize" id="opt-optimize" aria-labelledby="sw-optimize" aria-describedby="hint-optimize">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-title" id="sw-optimize">Smaller PNGs</span>
+              </label>
+              <button class="info" type="button" data-info="optimize" aria-expanded="false" aria-label="What does “Smaller PNGs” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+              <label class="hint" for="opt-optimize" id="hint-optimize">Try extra compression. Slower.</label>
+            </div>
+          </div>
+        </div>
+      </form>
+      <section class="reveal" id="credentials" data-open="false" aria-labelledby="credTitle">
+        <div class="reveal-inner">
+          <div class="cred">
+            <h3 class="cred-title" id="credTitle">Content Credentials <span class="hint">C2PA</span></h3>
+            <p class="cred-lede">Each cleaned image is signed with your certificate. The credential says you removed its metadata and whether the pixels are unchanged. It does not vouch for who took the picture or that it is genuine. Nothing here leaves this computer, and your key is kept in memory only.</p>
+            <div class="cred-identity" id="credIdentity"></div>
+            <form class="cred-load" id="identityForm" autocomplete="off" hidden>
+              <div class="field">
+                <label for="cred-cert">Certificate <span class="hint">PEM chain or a .p12 bundle</span></label>
+                <input type="file" id="cred-cert" accept=".pem,.crt,.cer,.p12,.pfx">
+              </div>
+              <div class="field">
+                <label for="cred-key">Private key <span class="hint">if not in the certificate file</span></label>
+                <input type="file" id="cred-key" accept=".pem,.key">
+              </div>
+              <div class="field">
+                <label for="cred-pass">Passphrase <span class="hint">if the key is protected</span></label>
+                <input type="password" id="cred-pass" autocomplete="off" spellcheck="false" autocapitalize="off">
+              </div>
+              <div class="field">
+                <label for="cred-anchors">Trust anchors <span class="hint">optional CA certificates to treat as trusted</span></label>
+                <input type="file" id="cred-anchors" accept=".pem,.crt,.cer">
+              </div>
+              <p class="note is-error cred-error" id="identityError" role="alert" hidden></p>
+              <div class="cred-actions">
+                <button class="btn btn-plate btn-small" id="identityLoad" type="submit">Load identity</button>
+                <button class="btn btn-quiet btn-small" id="identityCancel" type="button">Cancel</button>
+              </div>
+            </form>
+            <div class="cred-settings" id="credSettings">
+              <div class="field">
+                <label for="cred-date">Date recorded</label>
+                <span class="select"><select id="cred-date">
+                  <option value="day">Day only (safer)</option>
+                  <option value="minute">Day and minute</option>
+                </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
+              </div>
+              <div class="field">
+                <label for="cred-detail">Detail</label>
+                <span class="select"><select id="cred-detail">
+                  <option value="minimal">Minimal</option>
+                  <option value="full">Also list what was done to the pixels</option>
+                </select><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-chevron"/></svg></span>
+              </div>
+              <div class="switch-row cred-commit">
+                <label class="switch">
+                  <input type="checkbox" role="switch" id="cred-commit" aria-labelledby="sw-cred-commit" aria-describedby="hint-cred-commit">
+                  <span class="switch-track" aria-hidden="true"></span>
+                  <span class="switch-title" id="sw-cred-commit">Make it auditable later</span>
+                </label>
+                <button class="info" type="button" data-info="c2pa_commit" aria-expanded="false" aria-label="What does “Make it auditable later” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+                <label class="hint" for="cred-commit" id="hint-cred-commit">Seals a fingerprint of the original into the credential. Only the receipt you keep can open it, and it is lost when you stop imgstrip unless you download it.</label>
+              </div>
+            </div>
+            <div class="cred-hints" id="credHints"></div>
+            <div class="cred-receipts" id="credReceipts" hidden>
+              <p class="note"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg><span id="receiptText"></span></p>
+              <button class="btn btn-secondary btn-small" id="receiptDownload" type="button"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-download"/></svg><span>Download receipts</span></button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="workspace" id="body" data-empty="true">
+    <section class="pane pane-list" id="listPane" aria-label="Images">
+      <div class="drop" id="well">
+        <div class="drop-text">
+          <h2 class="drop-title">Drop images here</h2>
+          <p class="drop-sub">Or choose them, or paste. Each file is scanned straight away. Nothing is changed until you press Clean.</p>
+        </div>
+        <button class="btn btn-secondary" id="choose" type="button">Choose images</button>
       </div>
-      <p class="well-formats" id="formats">JPEG, PNG, HEIC, WebP, AVIF, TIFF, GIF, BMP and more. You can also paste.</p>
+      <p class="well-formats" id="formats">JPEG, PNG, HEIC, WebP, AVIF, TIFF, GIF, BMP and more. Nothing leaves this computer.</p>
+      <ol class="steps" id="steps" aria-label="How it works">
+        <li><span class="steps-n" aria-hidden="true">1</span><span><strong>Scan</strong> shows what each file gives away, with its SHA-256 and MD5 as received.</span></li>
+        <li><span class="steps-n" aria-hidden="true">2</span><span><strong>Clean</strong> rebuilds each file from its pixels alone.</span></li>
+        <li><span class="steps-n" aria-hidden="true">3</span><span><strong>Verify</strong> checks the result twice, and shows the new file's hashes beside the old ones.</span></li>
+      </ol>
 
-      <div class="well" id="gate" hidden>
-        <span class="well-mark" id="gateMark" aria-hidden="true"></span>
-        <h2 class="well-title" id="gateTitle"></h2>
-        <p class="well-sub" id="gateText"></p>
+      <div class="gate" id="gate" hidden>
+        <h2 class="gate-title" id="gateTitle"></h2>
+        <p class="gate-text" id="gateText"></p>
       </div>
 
       <div class="list" id="list" hidden>
@@ -228,7 +271,9 @@
             <div class="list-tools">
               <button class="btn btn-quiet" id="add" type="button"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"/></svg><span>Add</span></button>
               <button class="btn btn-quiet" id="clear" type="button"><span>Clear</span></button>
+              <button class="btn btn-quiet" id="hashList" type="button" hidden title="Download a spreadsheet (CSV) with every file's SHA-256 and MD5, before and after cleaning"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-download"/></svg><span>Hash list</span></button>
             </div>
+            <p class="list-found" id="listFound"></p>
           </div>
           <section class="review" id="review" data-open="false" hidden aria-label="Warnings">
             <button class="review-toggle" id="reviewToggle" type="button" aria-expanded="false" aria-controls="reviewPanel">
@@ -243,10 +288,40 @@
         </div>
         <ul class="files" id="files"></ul>
       </div>
-    </div>
+
+      <div class="colophon">
+        <span>imgstrip {{VERSION}}</span>
+        <span aria-hidden="true">·</span>
+        <button class="link" id="limitsToggle" type="button" aria-expanded="false" aria-controls="limits">What cleaning can't do</button>
+      </div>
+      <div class="reveal limits-wrap" id="limits" data-open="false">
+        <div class="reveal-inner">
+          <ul class="limits">
+            <li><strong>The picture itself stays.</strong> Faces, reflections, street signs and landmarks can still identify people and places. imgstrip never alters what the image shows.</li>
+            <li><strong>Robust watermarks can survive.</strong> Marks built to outlast re-encoding (Digimarc, SynthID and similar) live in the pixels. imgstrip removes C2PA manifests, not content watermarks.</li>
+            <li><strong>File names can leak.</strong> Names like IMG_20240517_133700 carry a date. Cleaned files keep the original name plus <code>.clean</code>; rename them before sharing if that matters.</li>
+            <li><strong>Data hidden in the pixels can survive.</strong> Lossless cleaning keeps every pixel value, so a steganography payload stored in them stays unless <em>Scrub least-significant bits</em> is on. <em>Deep scan</em> looks for one first, but a scan that finds nothing is not proof that nothing is hidden, and scrubbing covers LSB payloads only.</li>
+            <li><strong>The camera's sensor fingerprint stays.</strong> Every sensor leaves a faint noise pattern in the pixels, and anyone holding other photos from the same camera can match it. Cleaning keeps it. <em>Disrupt camera fingerprint</em> scrambles it and defeats the standard matching test, but absence can't be proven.</li>
+            <li><strong>Lossy formats are re-encoded.</strong> JPEG, WebP, AVIF and HEIF lose a little quality. <em>Keep JPEG data bit-exact</em> avoids that for JPEGs, but keeps any data hidden in the JPEG coefficients.</li>
+            <li><strong>Content Credentials vouch for processing only.</strong> If you sign, the credential says what you did to the file, not who took the picture or that it is real. It carries no trusted timestamp (imgstrip never goes online), so viewers treat it as invalid once your certificate expires, and shows "Unverified" unless the certificate's issuer is on the C2PA Trust List.</li>
+            <li><strong>Originals stay as they are.</strong> imgstrip never modifies or deletes them; securely erasing old copies is up to you.</li>
+            <li><strong>A matching hash is a match, not a promise.</strong> SHA-256 shows two files are byte for byte the same. MD5 is listed only so you can match older records; it can be forged, so never rely on it as proof.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
 
     <footer class="foot" id="foot" hidden>
       <div class="foot-row">
+        <div class="switch-row foot-deep">
+          <label class="switch">
+            <input type="checkbox" role="switch" name="deep" form="optionsForm" id="opt-deep" aria-labelledby="sw-deep" aria-describedby="hint-deep">
+            <span class="switch-track" aria-hidden="true"></span>
+            <span class="switch-title" id="sw-deep">Deep scan</span>
+          </label>
+          <button class="info" type="button" data-info="deep" aria-expanded="false" aria-label="What does “Deep scan” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+          <label class="hint" for="opt-deep" id="hint-deep">Also search the pixels for hidden data</label>
+        </div>
         <p class="foot-summary" id="summary"></p>
         <div class="foot-actions">
           <button class="btn btn-secondary" id="saveToggle" type="button" aria-expanded="false" aria-controls="save"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-folder"/></svg><span>Save to folder</span></button>
@@ -268,29 +343,17 @@
       </div>
       <p class="foot-note" id="footNote" hidden></p>
     </footer>
-  </section>
 
-  <div class="colophon">
-    <span>imgstrip {{VERSION}}</span>
-    <span aria-hidden="true">·</span>
-    <button class="link" id="limitsToggle" type="button" aria-expanded="false" aria-controls="limits">What cleaning can't do</button>
-  </div>
-  <div class="reveal limits-wrap" id="limits" data-open="false">
-    <div class="reveal-inner">
-      <ul class="limits">
-        <li><strong>The picture itself stays.</strong> Faces, reflections, street signs and landmarks can still identify people and places. imgstrip never alters what the image shows.</li>
-        <li><strong>Robust watermarks can survive.</strong> Marks built to outlast re-encoding (Digimarc, SynthID and similar) live in the pixels. imgstrip removes C2PA manifests, not content watermarks.</li>
-        <li><strong>File names can leak.</strong> Names like IMG_20240517_133700 carry a date. Cleaned files keep the original name plus <code>.clean</code>; rename them before sharing if that matters.</li>
-        <li><strong>Data hidden in the pixels can survive.</strong> Lossless cleaning keeps every pixel value, so a steganography payload stored in them stays unless <em>Scrub least-significant bits</em> is on. <em>Deep scan</em> looks for one first, but a scan that finds nothing is not proof that nothing is hidden, and scrubbing covers LSB payloads only.</li>
-        <li><strong>The camera's sensor fingerprint stays.</strong> Every sensor leaves a faint noise pattern in the pixels, and anyone holding other photos from the same camera can match it. Cleaning keeps it. <em>Disrupt camera fingerprint</em> scrambles it and defeats the standard matching test, but absence can't be proven.</li>
-        <li><strong>Lossy formats are re-encoded.</strong> JPEG, WebP, AVIF and HEIF lose a little quality. <em>Keep JPEG data bit-exact</em> avoids that for JPEGs, but keeps any data hidden in the JPEG coefficients.</li>
-        <li><strong>Content Credentials vouch for processing only.</strong> If you sign, the credential says what you did to the file, not who took the picture or that it is real. It carries no trusted timestamp (imgstrip never goes online), so viewers treat it as invalid once your certificate expires, and shows "Unverified" unless the certificate's issuer is on the C2PA Trust List.</li>
-        <li><strong>Originals stay as they are.</strong> imgstrip never modifies or deletes them; securely erasing old copies is up to you.</li>
-      </ul>
-    </div>
+    <aside class="pane pane-detail" id="detail" aria-label="Details" data-sheet="closed">
+      <div class="sheet-bar">
+        <button class="btn btn-quiet" id="sheetBack" type="button"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-back"/></svg><span>Back to list</span></button>
+      </div>
+      <div class="detail" id="detailContent" tabindex="-1"></div>
+    </aside>
   </div>
 
   <div class="drop-veil" id="veil" aria-hidden="true"><p>Drop to scan</p></div>
+  <div class="info-tip" id="infoTip" role="status"></div>
   <input type="file" id="picker" multiple accept="image/*,.heic,.heif,.avif,.tif,.tiff,.psd,.tga,.qoi,.jp2,.j2k,.dds,.icns,.pcx,.sgi,.ppm,.pgm,.pbm,.pnm" hidden>
   <p class="sr-only" id="announce" aria-live="polite"></p>
   <p class="sr-only" id="reviewLive" aria-live="polite"></p>

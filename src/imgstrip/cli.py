@@ -145,6 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  imgstrip -i *.png                  replace files in place (atomically)\n"
             "  imgstrip --check --deep img.png    report metadata and run steganalysis\n"
             "  imgstrip --scrub-lsb img.png       also destroy LSB steganography\n"
+            "  imgstrip --scrub-alpha logo.png    also clean data hidden in the transparency channel\n"
             "  imgstrip --scrub-dct photo.jpg     also destroy JPEG DCT steganography (JSteg, F5, ...)\n"
             "  cat a.heic | imgstrip - --format jpeg > a.jpg\n"
             "\nexit status: 0 success/clean, 1 errors, 2 usage, 3 --check found data"
@@ -196,6 +197,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--scrub-lsb",
         action="store_true",
         help="randomise least-significant bits to destroy LSB steganography (changes pixels by at most 1)",
+    )
+    proc.add_argument(
+        "--scrub-alpha",
+        action="store_true",
+        help="clean data hidden in the transparency (alpha) channel, which --scrub-lsb leaves alone where alpha is exactly "
+        "clear or opaque: alpha within --alpha-tolerance levels of fully opaque becomes exactly opaque, alpha near fully "
+        "clear becomes exactly clear, and the lowest bit of the rest is randomised. Colour is not touched; off unless given",
+    )
+    proc.add_argument(
+        "--alpha-tolerance",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"with --scrub-alpha: how many levels (of 255) from fully opaque or clear still count as such, "
+        f"{stego.ALPHA_TOLERANCE_MIN} to {stego.ALPHA_TOLERANCE_MAX} (default {stego.ALPHA_TOLERANCE_DEFAULT}; an even number "
+        "is rounded up to the next odd one). Larger values close wider hiding places but change faint pixels more",
     )
     proc.add_argument(
         "--scrub-dct",
@@ -338,6 +355,8 @@ def options_from_args(args) -> Options:
         icc=args.icc,
         auto_orient=not args.no_auto_orient,
         scrub_lsb=args.scrub_lsb,
+        scrub_alpha=args.scrub_alpha,
+        alpha_tolerance=stego.ALPHA_TOLERANCE_DEFAULT if args.alpha_tolerance is None else args.alpha_tolerance,
         scrub_dct="full" if args.scrub_dct else "canonical" if args.jpeg_canonical else "off",
         dct_min_psnr=args.dct_min_psnr,
         scrub_prnu=args.scrub_prnu,
@@ -646,6 +665,9 @@ def strip_one(task: Task, options: Options, args, single: bool) -> Outcome:
     dct_state = stego.dct_report(result.dct_scrub, result.dct_psnr)
     if dct_state:
         payload["dct"] = dct_state
+    alpha_state = stego.alpha_report(result.alpha_scrub, result.alpha_tolerance, result.alpha_pixels)
+    if alpha_state:
+        payload["alpha"] = alpha_state
     if verdict.payload_kept:
         payload["warnings"].append(
             "a pixel payload was detected and is still in the cleaned file: run again with --scrub-lsb to destroy it"
@@ -1125,6 +1147,9 @@ class Reporter:
         if pl.get("dct"):
             d = pl["dct"]
             print(f"           jpeg coefficients: {d['headline']}: {d['summary']}. {d['caveat']}", file=p)
+        if pl.get("alpha"):
+            al = pl["alpha"]
+            print(f"           transparency: {al['headline']}: {al['summary']}. {al['caveat']}", file=p)
         for w in pl["warnings"]:
             print(f"           warning: {w}", file=p)
         cred = pl.get("credentials")
@@ -1217,6 +1242,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--deep applies to --check and to cleaning, not to --c2pa-verify")
     if args.quality is not None and not 1 <= args.quality <= 100:
         parser.error("--quality must be between 1 and 100")
+    if args.alpha_tolerance is not None:
+        if not args.scrub_alpha:
+            parser.error("--alpha-tolerance only applies together with --scrub-alpha")
+        if not stego.ALPHA_TOLERANCE_MIN <= args.alpha_tolerance <= stego.ALPHA_TOLERANCE_MAX:
+            parser.error(f"--alpha-tolerance must be between {stego.ALPHA_TOLERANCE_MIN} and {stego.ALPHA_TOLERANCE_MAX}")
     if args.jobs is not None and args.jobs < 1:
         parser.error("--jobs must be at least 1")
     if args.paths.count(STDIO) > 1:

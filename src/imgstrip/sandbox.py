@@ -957,6 +957,7 @@ _FACTS = {
     "frames": int,
     "orientation": int,
     "profile": bool,
+    "alpha": bool,
 }
 
 

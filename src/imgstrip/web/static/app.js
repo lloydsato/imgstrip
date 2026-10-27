@@ -12,14 +12,9 @@
     structure: 'Structure',
   };
   const CATEGORY_ORDER = ['metadata', 'hidden', 'color', 'structure'];
-  const REVEAL_NOUN = {
-    location: 'location', camera: 'camera', lens: 'lens', time: 'time taken', serial: 'serial number',
-    person: 'a name', software: 'software', preview: 'a hidden image', trailer: 'appended data',
-    comment: 'a comment', gps: 'GPS tags',
-  };
   const OPTION_DEFAULTS = {
     format: '', quality: '', icc: 'convert',
-    deep: false, jpeg_lossless: false, scrub_lsb: false, scrub_dct: false, jpeg_canonical: false, scrub_prnu: false, auto_orient: true, optimize: false, random_name: false,
+    deep: false, jpeg_lossless: false, scrub_lsb: false, scrub_alpha: false, scrub_dct: false, jpeg_canonical: false, scrub_prnu: false, auto_orient: true, optimize: false, random_name: false,
     c2pa: false, c2pa_date: 'day', c2pa_detail: 'minimal', c2pa_commit: false,
   };
   // Never carried from one launch to the next: signing needs an identity loaded in this very run,
@@ -33,11 +28,27 @@
   const S = window.ImgstripSupport;
   // What each option is called in the panel, for the notes that say it cannot be applied to an image.
   const OPTION_LABEL = {
-    deep: 'Deep scan', jpeg_lossless: 'Keep JPEG data bit-exact', scrub_lsb: 'Scrub least-significant bits',
+    deep: 'Deep scan', jpeg_lossless: 'Keep JPEG data bit-exact', scrub_lsb: 'Scrub least-significant bits', scrub_alpha: 'Clean transparency channel',
     scrub_dct: 'Scrub JPEG coefficients', jpeg_canonical: 'Rebuild JPEG data canonically', scrub_prnu: 'Disrupt camera fingerprint',
     c2pa: 'Sign with Content Credentials', quality: 'Quality', icc: 'Colour profile', auto_orient: 'Apply orientation',
-    optimize: 'Smaller PNGs', random_name: 'Random file names',
+    optimize: 'Smaller PNGs', random_name: 'Random file names', c2pa_commit: 'Make it auditable later',
   };
+  // What each switch does, in plain words, for its (i) button. Written for someone who has never heard of the jargon.
+  const INFO = {
+    deep: 'Looks inside the picture itself for a secret message, not only at the labels stuck to the file. It takes a little longer. If it finds nothing, that is not proof that nothing is hidden.',
+    scrub_lsb: 'Some people hide a secret message by changing the tiniest bit of every colour dot in a picture. This switch shuffles those tiny bits, which destroys such a message. The picture looks the same to your eyes. It only covers this one way of hiding things.',
+    scrub_alpha: 'Some pictures have see-through parts, and a message can be hidden in how see-through each dot is. This switch turns almost-clear dots fully clear and almost-solid dots fully solid, which wipes that message. Pictures with no see-through parts are left alone.',
+    scrub_prnu: 'Every camera sensor leaves a faint pattern in its photos, a bit like a fingerprint. This switch nudges parts of the picture by a few dots to blur that pattern, so the photo is harder to tie to one camera. It changes the picture very slightly, and nobody can prove it worked.',
+    random_name: 'File names like IMG_20240517_133700 can tell people when a photo was taken. This gives each cleaned file a random name instead.',
+    c2pa: 'Adds a signed note to the cleaned file. The note says you removed the hidden information and whether the picture itself is unchanged. It does not say who took the photo or that it is real. You need your own certificate to sign.',
+    c2pa_commit: 'Locks a secret fingerprint of the original photo inside the note, so that later you can prove which original a cleaned photo came from. Only the receipt you download can open it, and it is lost when you close imgstrip unless you save it.',
+    jpeg_lossless: 'Keeps the JPEG’s picture data exactly as it is and only strips the labels around it. Nothing is re-saved, so quality stays the same. But anything hidden inside the picture data stays too, and the picture can’t be turned upright.',
+    scrub_dct: 'For JPEG photos. Slightly changes the numbers JPEG uses to store the picture, which destroys most messages hidden there. The photo may lose a little quality, and the result tells you how much.',
+    jpeg_canonical: 'For JPEG photos. Writes the file again in one standard, tidy way, which removes anything tucked into odd corners, padding or spare bits. The picture stays exactly the same. Messages hidden in the picture’s own numbers are not removed.',
+    auto_orient: 'Some photos are stored sideways and rely on a small note to be shown upright. Cleaning removes that note, so this turns the picture itself upright first. It is best left on.',
+    optimize: 'Tries harder to make PNG files smaller. It takes longer, and the picture is not changed.',
+  };
+  const NARROW = window.matchMedia('(max-width: 899.98px)');
   const OPTIONS_KEY = 'imgstrip.options.v1';
   const TOKEN_KEY = 'imgstrip.token';
   const FOLDER_KEY = 'imgstrip.folder';
@@ -67,15 +78,20 @@
     receipts: 0,
     loadingIdentity: false,
     review: { open: false, expanded: new Set(), signature: '', announced: '' },
+    selected: null, // the item whose details are shown
+    sheet: false, // narrow screens: the detail is open as a full-screen sheet
   };
 
   const els = {
     window: $('#window'), well: $('#well'), list: $('#list'), files: $('#files'), listCount: $('#listCount'),
+    listFound: $('#listFound'), workspace: $('#body'), listPane: $('#listPane'), formats: $('#formats'), steps: $('#steps'),
+    detail: $('#detail'), detailContent: $('#detailContent'), sheetBack: $('#sheetBack'), infoTip: $('#infoTip'),
+    localAddr: $('#localAddr'),
     foot: $('#foot'), summary: $('#summary'), primary: $('#primary'), downloadSome: $('#downloadSome'),
     saveToggle: $('#saveToggle'), save: $('#save'), saveForm: $('#saveForm'), saveSubmit: $('#saveSubmit'),
     folder: $('#folder'), footNote: $('#footNote'), picker: $('#picker'), options: $('#options'),
     optionsToggle: $('#optionsToggle'), optionsForm: $('#optionsForm'), limits: $('#limits'),
-    limitsToggle: $('#limitsToggle'), clear: $('#clear'), choose: $('#choose'), announce: $('#announce'),
+    limitsToggle: $('#limitsToggle'), clear: $('#clear'), hashList: $('#hashList'), choose: $('#choose'), announce: $('#announce'),
     gate: $('#gate'), gateTitle: $('#gateTitle'), gateText: $('#gateText'),
     credentials: $('#credentials'), credIdentity: $('#credIdentity'), identityForm: $('#identityForm'),
     identityError: $('#identityError'), identityLoad: $('#identityLoad'), credCert: $('#cred-cert'),
@@ -190,6 +206,7 @@
       icc: o.icc,
       jpeg_lossless: !!o.jpeg_lossless,
       scrub_lsb: !!o.scrub_lsb,
+      scrub_alpha: !!o.scrub_alpha,
       scrub_dct: !!o.scrub_dct,
       jpeg_canonical: !!o.jpeg_canonical,
       scrub_prnu: !!o.scrub_prnu,
@@ -335,9 +352,11 @@
     els.gateText.textContent = text;
     els.gate.hidden = false;
     els.well.hidden = true;
-    $('#formats').hidden = true;
+    els.formats.hidden = true;
+    els.steps.hidden = true;
     els.list.hidden = true;
     els.foot.hidden = true;
+    els.workspace.dataset.empty = 'true';
     els.optionsToggle.hidden = true;
     setOpen(els.options, els.optionsToggle, false);
     els.gateTitle.tabIndex = -1;
@@ -432,6 +451,7 @@
       loadThumb(item);
       scan(item);
     }
+    if (!state.selected) selectItem(added[0]);
     render();
     announce(`Scanning ${plural(added.length, 'image')}.`);
   }
@@ -554,9 +574,15 @@
     if (item.thumbUrl) URL.revokeObjectURL(item.thumbUrl);
     item.el.remove();
     disarmClear();
+    const next = state.items[index] || state.items[index - 1] || null;
+    if (state.selected === item) {
+      state.selected = next;
+      if (next) renderSelection(next);
+      renderDetail();
+    }
+    setSheet(false);
     render();
-    const next = state.items[index] || state.items[index - 1];
-    if (next) next.ui.head.focus();
+    if (next) next.ui.head.focus({ preventScroll: true });
     else els.choose.focus();
     announce(`Removed ${item.name}. ${plural(state.items.length, 'image')} left.`);
   }
@@ -566,6 +592,9 @@
     state.run = null;
     for (const item of state.items) if (item.thumbUrl) URL.revokeObjectURL(item.thumbUrl);
     state.items = [];
+    state.selected = null;
+    setSheet(false);
+    refill(els.detailContent, []);
     els.files.replaceChildren();
     api('/api/reset', { json: {} }).catch(() => {});
     hideNote();
@@ -605,30 +634,71 @@
 
   // ---------------------------------------------------------------- rendering: rows
 
+  // Rebuild a container's children without dropping keyboard focus: the focused control is found again by its data-key.
+  function refill(container, nodes) {
+    const active = document.activeElement;
+    const key = active && container.contains(active) ? active.dataset.key : null;
+    container.replaceChildren(...nodes);
+    if (key) {
+      const again = container.querySelector(`[data-key="${CSS.escape(key)}"]`);
+      if (again) again.focus({ preventScroll: true });
+    }
+  }
+
   function mountItem(item) {
-    const detailId = `detail-${item.id}`;
     const ui = {};
     ui.thumb = h('span', { class: 'thumb' }, icon('image'));
     ui.name = h('span', { class: 'file-name' });
-    ui.sub = h('span', { class: 'file-sub' });
-    ui.status = h('span', { class: 'status' });
     ui.head = h('button', {
-      class: 'file-head', type: 'button', 'aria-expanded': 'false', 'aria-controls': detailId,
-      onclick: () => { item.open = !item.open; renderItem(item); },
-    }, ui.thumb, h('span', { class: 'file-main' }, ui.name, ui.sub), ui.status, icon('chevron', 'icon chev'));
-    ui.download = h('a', { class: 'btn btn-icon is-off', tabindex: '-1', 'aria-hidden': 'true' }, icon('download'));
-    ui.remove = h('button', { class: 'btn btn-icon', type: 'button', title: 'Remove', onclick: () => removeItem(item) }, icon('x'));
-    ui.body = h('div', { class: 'detail-body' });
-    ui.detail = h('div', { class: 'reveal', id: detailId, 'data-open': 'false' }, h('div', { class: 'reveal-inner' }, ui.body));
+      class: 'file-head', type: 'button', 'aria-controls': 'detail',
+      onclick: () => selectItem(item, { open: true }),
+      onkeydown: (e) => rowKey(e, item),
+    }, ui.name);
+    ui.meta = h('p', { class: 'file-meta' });
+    ui.note = h('div', { class: 'file-more-note' });
+    ui.fps = h('div', { class: 'fps' });
+    ui.more = h('div', { class: 'file-more' }, ui.note, ui.fps);
+    ui.seal = h('span', { class: 'st-seal' });
+    ui.main = h('span', { class: 'st-main' });
+    ui.sub = h('span', { class: 'st-sub' });
+    ui.progress = h('span', { class: 'progress', role: 'progressbar', 'aria-label': 'Working', hidden: true });
+    ui.download = h('a', { class: 'st-link is-off', tabindex: '-1', 'aria-hidden': 'true' }, 'Download');
+    ui.side = h('div', { class: 'file-side' }, ui.seal, h('div', { class: 'st-text' }, ui.main, ui.sub, ui.progress, ui.download));
     item.ui = ui;
-    item.el = h('li', { class: 'file', 'data-state': item.state, 'data-open': 'false' },
-      h('div', { class: 'file-row' }, ui.head, h('div', { class: 'file-actions' }, ui.download, ui.remove)), ui.detail);
+    item.el = h('li', { class: 'file', 'data-state': item.state, 'data-selected': 'false' },
+      h('div', { class: 'file-row' }, ui.thumb, h('div', { class: 'file-id' }, h('h3', { class: 'file-title' }, ui.head), ui.meta), ui.side, ui.more));
     els.files.append(item.el);
     renderItem(item);
   }
 
-  function revealSummary(r) {
-    if (r.reveals.length) return `Reveals ${r.reveals.slice(0, 4).map((x) => REVEAL_NOUN[x.key] || x.label.toLowerCase()).join(', ')}`;
+  // Arrow keys step through the rows, so a long list is not a long run of Tab presses.
+  function rowKey(e, item) {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const at = state.items.indexOf(item);
+    const next = state.items[at + (e.key === 'ArrowDown' ? 1 : -1)];
+    if (!next) return;
+    e.preventDefault();
+    next.ui.head.focus();
+  }
+
+  // The plain phrase for each kind of thing a file can give away: a short one for the row, and the half-sentence the
+  // detail's lede is built from. `shows` things are read off the picture's labels, `carries` ones are hidden inside the file.
+  const REVEAL_TAG = {
+    location: 'Where it was taken', camera: 'Camera', lens: 'Camera', time: 'When it was taken', gps: 'Where it was taken',
+    serial: 'Camera serial number', person: "A person's name", software: 'Editing software', comment: 'A comment',
+    preview: 'Hidden preview image', trailer: 'Extra data after the image',
+  };
+  const REVEAL_LEDE = {
+    location: ['shows', 'where it was taken'], gps: ['shows', 'where it was taken'],
+    camera: ['shows', 'which camera took it'], lens: ['shows', 'which camera took it'], time: ['shows', 'when'],
+    serial: ['shows', "the camera's serial number"], person: ['shows', "a person's name"],
+    software: ['shows', 'what software was used'], comment: ['shows', 'a written comment'],
+    preview: ['carries', 'a hidden preview image'], trailer: ['carries', 'extra data tacked on after the picture'],
+  };
+  const uniq = (list) => [...new Set(list)];
+
+  // What a file without readable labels still holds, as short nouns ("EXIF data", "a colour profile").
+  function findingNouns(r) {
     const nouns = [];
     for (const f of r.findings) {
       const noun = f.category === 'color' ? 'a colour profile'
@@ -638,86 +708,114 @@
               : f.label.charAt(0).toLowerCase() + f.label.slice(1).replace(/ \(.*\)$/, '');
       if (!nouns.includes(noun)) nouns.push(noun);
     }
-    return `Contains ${nouns.slice(0, 3).join(', ')}`;
+    return nouns;
   }
 
-  function itemSub(item) {
+  // The short phrases shown under a row's name: [{text, kind}], at most three and a count of the rest.
+  function rowTags(r) {
+    const tags = [];
+    if (hasStego(r)) tags.push({ text: 'Hidden data in the pixels', kind: 'leak' });
+    if (r.reveals.length) {
+      const keys = r.reveals.map((x) => x.key);
+      const both = keys.includes('camera') && keys.includes('time');
+      for (const x of r.reveals) {
+        const text = both && (x.key === 'camera' || x.key === 'lens' || x.key === 'time') ? 'Camera and time' : REVEAL_TAG[x.key] || capital(x.label.toLowerCase());
+        if (!tags.some((t) => t.text === text)) tags.push({ text, kind: 'leak' });
+      }
+    } else {
+      for (const noun of findingNouns(r)) tags.push({ text: capital(noun), kind: 'other' });
+    }
+    return tags;
+  }
+
+  function itemMeta(item) {
     const r = item.report;
     if (item.state === 'clean' && item.result) {
       const res = item.result;
-      return { text: `${formatName(res.output_format)} · ${res.size[0]}×${res.size[1]} · ${bytes(res.bytes_in)} → ${bytes(res.bytes_out)}${res.credentials ? ' · signed' : ''}` };
+      const frames = res.frames > 1 ? ` · ${res.frames} frames` : '';
+      return `${formatName(res.output_format)} · ${res.size[0]}×${res.size[1]}${frames} · ${bytes(res.bytes_out)}${res.credentials ? ' · signed' : ''}`;
     }
-    if (item.state === 'unsupported') {
-      if (item.blocked) return { text: item.blocked };
-      return { text: r.raw ? `Camera RAW (${r.raw}) isn't supported` : "Not an image imgstrip can read" };
-    }
-    if (r && findingCount(r) && item.state !== 'scanning') return { text: revealSummary(r), reveal: true };
     const parts = [];
     const fmt = r && (r.format || r.decodable);
     if (fmt) parts.push(formatName(fmt));
     else if (extOf(item.name)) parts.push(extOf(item.name));
     if (r && r.size) parts.push(`${r.size[0]}×${r.size[1]}`);
     parts.push(bytes(item.size));
-    return { text: parts.join(' · ') };
+    return parts.join(' · ');
   }
 
+  const joinNames = (names) => (names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0] || '');
+
+  // The line (or phrases) under the name: what the file gives away, or what cleaning did.
+  function itemNote(item) {
+    const r = item.report;
+    const text = (t, cls = '') => [h('p', { class: `file-text${cls}`, text: t })];
+    switch (item.state) {
+      case 'scanning': return text('Looking inside the file…');
+      case 'cleaning': return text('Rebuilding the file from its pixels…');
+      case 'scanfailed': case 'failed': return text(item.error || '', ' is-warn');
+      case 'unsupported': return text(item.blocked || (r && r.raw ? `Camera RAW (${r.raw}) isn't supported` : "Not an image imgstrip can read"));
+      case 'clean': {
+        const res = item.result;
+        if (refused(item)) return text('Cleaning again failed. This is the earlier clean file.', ' is-warn');
+        const labels = uniq(res.removed.map((f) => f.label.replace(/ \(.*\)$/, '')));
+        const removed = labels.length
+          ? `Removed ${labels.length > 3 ? `${labels.slice(0, 3).join(', ')} and ${labels.length - 3} more` : joinNames(labels)}.`
+          : 'Rebuilt from the pixels alone.';
+        if (keptPayload(item)) return text(`${removed} A likely payload is still in the pixels.`, ' is-warn');
+        if (unappliedScrub(item)) return text(`${removed} The pixel scrub could not be applied.`, ' is-warn');
+        return text(`${removed} Both checks passed.${res.key !== optionsKey(item) ? ' Cleaned with earlier options.' : ''}`);
+      }
+      default: {
+        if (!r) return [];
+        const tags = rowTags(r);
+        if (tags.length) {
+          const shown = tags.slice(0, 3);
+          const rest = tags.length - shown.length;
+          return [h('ul', { class: 'tags' },
+            shown.map((t) => h('li', { class: 'tag', 'data-kind': t.kind, text: t.text })),
+            rest > 0 ? h('li', { class: 'tag tag-more', text: `+${rest} more` }) : null)];
+        }
+        if (isDamaged(r)) return text('The file is damaged. Cleaning rebuilds it if its pixels can be read.', ' is-warn');
+        const v = scanVerdict(r);
+        return text(v && v.state === 'not_detected' ? 'Nothing found. Not detected in the pixels.' : 'Nothing found. The pixels were not scanned.');
+      }
+    }
+  }
+
+  // What the row's right-hand side says: a seal, a headline and a small line under it, or a working bar.
   function itemStatus(item) {
     const r = item.report;
+    const warn = (t, sub) => ({ icon: 'alert', main: t, sub });
     switch (item.state) {
-      case 'scanning': return [h('span', { text: 'Scanning…' })];
-      case 'cleaning': return [h('span', { text: 'Cleaning…' })];
-      case 'scanfailed': return [icon('alert'), h('span', { class: 'status-fail', text: 'Not scanned' })];
-      case 'failed': return [icon('alert'), h('span', { class: 'status-fail', text: 'Not cleaned' })];
-      case 'unsupported': return [h('span', { text: 'Not supported' })];
+      case 'scanning': return { main: 'Scanning…', busy: true };
+      case 'cleaning': return { main: 'Cleaning…', busy: true };
+      case 'scanfailed': return warn('Not scanned');
+      case 'failed': return warn('Not cleaned');
+      case 'unsupported': return { main: 'Not supported' };
       case 'clean': {
         const res = item.result;
         const stale = res.key !== optionsKey(item);
         const anim = item.justCleaned;
         item.justCleaned = false;
-        if (refused(item)) return [icon('alert'), h('span', { class: 'status-fail', text: 'Re-clean failed' })];
-        if (keptPayload(item)) {
-          return [
-            icon('alert'),
-            h('span', { class: 'status-fail', text: 'Payload kept' }),
-            h('span', { class: 'seal-tip', id: `tip-${item.id}`, role: 'tooltip' },
-              h('strong', { text: 'Metadata removed, payload kept' }),
-              h('span', { text: 'Structure verified, but a likely LSB payload is still in the pixels. Turn on Scrub least-significant bits and clean again.' })),
-          ];
-        }
-        if (unappliedScrub(item)) {
-          return [
-            icon('alert'),
-            h('span', { class: 'status-fail', text: 'Clean · scrub not applied' }),
-            h('span', { class: 'seal-tip', id: `tip-${item.id}`, role: 'tooltip' },
-              h('strong', { text: 'Metadata removed, pixels not scrubbed' }),
-              h('span', { text: 'Scrub least-significant bits could not be applied to this kind of image, so hidden data in its pixels was neither scanned nor destroyed.' })),
-          ];
-        }
-        return [
-          seal(res.sha256, { detail: false, animate: anim }),
-          h('span', { class: stale ? '' : 'status-ok', text: stale ? 'Clean, old options' : 'Clean' }),
-          h('span', { class: 'seal-tip', id: `tip-${item.id}`, role: 'tooltip' },
-            h('strong', { text: 'Verified clean' }),
-            h('span', { text: 'Structure verified · ' + (res.lossy ? 'pixels within tolerance' : 'pixels exact') }),
-            h('span', { text: `Hidden data in pixels: ${(stegoOf(item) || { headline: 'not scanned' }).headline}` }),
-            res.dct ? h('span', { text: `JPEG coefficients: ${res.dct.headline}${res.dct.psnr_db ? ` · about ${res.dct.psnr_db} dB from the original` : ''}` }) : null,
-            h('code', { text: `SHA-256 ${res.sha256.slice(0, 16)}…` })),
-        ];
+        if (refused(item)) return { ...warn('Re-clean failed'), download: true };
+        if (keptPayload(item)) return { ...warn('Payload kept'), download: true };
+        if (unappliedScrub(item)) return { ...warn('Scrub not applied'), download: true };
+        return { seal: seal(res.sha256, { detail: false, animate: anim }), main: stale ? 'Clean, old options' : 'Verified', download: true };
       }
       default: {
         const scrub = optionsFor(item).scrub_lsb;
-        if (hasStego(r) && !scrub) return [icon('alert'), h('span', { class: 'status-fail', text: 'Payload in pixels' })];
+        if (hasStego(r) && !scrub) return warn('Payload in pixels');
         const n = findingCount(r);
-        if (n) return [h('span', { class: 'status-count', text: `${n} to remove` })];
-        if (isDamaged(r)) return [icon('alert'), h('span', { class: 'status-fail', text: 'Damaged' })];
-        if (r && !r.format) return [h('span', { text: 'Not inspected' })];
-        const v = scanVerdict(r);
-        return [h('span', { text: v && v.state === 'not_detected' ? 'No metadata · not detected in pixels' : 'No metadata · pixels not scanned' })];
+        if (n) return { main: plural(n, 'item'), sub: 'found' };
+        if (isDamaged(r)) return warn('Damaged');
+        if (r && !r.format) return { main: 'Not inspected' };
+        return { main: 'No metadata', sub: 'found' };
       }
     }
   }
 
-  // What kind of thing the row's status is, so the pill can be coloured by meaning: busy, muted (neutral), leak (the
+  // What kind of thing the row's status is, so it can be coloured by meaning: busy, muted (neutral), leak (the
   // file gives something away), ok (verified clean) or warn (needs a look).
   function toneOf(item) {
     const r = item.report;
@@ -735,32 +833,86 @@
     }
   }
 
+  // ---- fingerprints: SHA-256 is the proof, MD5 is only there to match older records ----
+
+  const ALGOS = [['SHA-256', 'sha256'], ['MD5', 'md5']];
+  const shortHash = (hex) => (hex.length > 20 ? `${hex.slice(0, 8)}…${hex.slice(-8)}` : hex);
+  const groupHash = (hex) => (hex.match(/.{1,8}/g) || []).join(' ');
+
+  // The hashes a row shows: the file as received, and (once cleaned) the new file beside it.
+  function fingerprintsOf(item) {
+    if (item.state === 'clean' && item.result && item.result.before && item.result.after) {
+      return { before: item.result.before, after: item.result.after };
+    }
+    const fp = item.report && item.report.fingerprints;
+    return fp ? { before: fp, after: null } : null;
+  }
+
+  function fpLine(item, fp, which, tag) {
+    const when = which === 'after' ? 'after cleaning' : 'before cleaning';
+    return h('div', { class: `fps-line${tag ? ' is-tagged' : ''}` },
+      tag ? h('span', { class: 'fp-tag', text: tag }) : null,
+      ALGOS.map(([label, key]) => h('span', { class: 'fp' },
+        h('span', { class: 'fp-algo', text: label }),
+        h('code', { text: shortHash(fp[key]) }),
+        h('button', {
+          class: 'copy', type: 'button', 'data-key': `copy-${which}-${key}`,
+          'aria-label': `Copy ${label} of ${item.name}, ${when}`,
+          onclick: (e) => copyText(fp[key], e.currentTarget, `${label} ${when}`),
+        }, icon('copy')))));
+  }
+
+  function renderFps(item) {
+    const fps = fingerprintsOf(item);
+    const sig = fps ? `${item.name}|${fps.before.sha256}|${fps.after ? fps.after.sha256 : ''}` : '';
+    if (item.ui.fpsSig === sig) return;
+    item.ui.fpsSig = sig;
+    if (!fps) { refill(item.ui.fps, []); return; }
+    refill(item.ui.fps, fps.after
+      ? [fpLine(item, fps.before, 'before', 'Before'), fpLine(item, fps.after, 'after', 'After')]
+      : [fpLine(item, fps.before, 'before', '')]);
+  }
+
+  function renderSelection(item) {
+    if (!item.el) return;
+    const selected = state.selected === item;
+    item.el.dataset.selected = String(selected);
+    if (selected) item.ui.head.setAttribute('aria-current', 'true');
+    else item.ui.head.removeAttribute('aria-current');
+  }
+
   function renderItem(item) {
     const { el, ui } = item;
     if (!el) return;
     el.dataset.state = item.state;
-    el.dataset.open = String(item.open);
+    renderSelection(item);
     ui.name.textContent = item.name;
-    const sub = itemSub(item);
-    ui.sub.textContent = sub.text;
-    ui.sub.classList.toggle('is-reveal', !!sub.reveal);
-    ui.status.replaceChildren(...itemStatus(item));
-    ui.status.dataset.tone = toneOf(item);
-    ui.head.setAttribute('aria-expanded', String(item.open));
-    const statusText = Array.from(ui.status.childNodes).filter((n) => !n.classList || !n.classList.contains('seal-tip')).map((n) => n.textContent).join(' ').trim();
-    ui.head.setAttribute('aria-label', `${item.name}. ${statusText}. ${sub.text}`);
-    if (ui.status.querySelector('.seal-tip')) ui.head.setAttribute('aria-describedby', `tip-${item.id}`);
-    else ui.head.removeAttribute('aria-describedby');
+    const meta = itemMeta(item);
+    ui.meta.textContent = meta;
+    const tone = toneOf(item);
+    el.dataset.tone = tone;
+    ui.side.dataset.tone = tone;
 
-    // Persistent action buttons: only their state changes, so keyboard focus never falls off them.
+    const st = itemStatus(item);
+    ui.side.dataset.busy = String(!!st.busy);
+    ui.seal.replaceChildren(...(st.seal ? [st.seal] : []));
+    ui.main.replaceChildren(...(st.icon ? [icon(st.icon)] : []), st.main);
+    ui.sub.textContent = st.sub || '';
+    ui.progress.hidden = !st.busy;
+    el.setAttribute('aria-busy', String(!!st.busy));
+    refill(ui.note, itemNote(item));
+    renderFps(item);
+    ui.more.hidden = !ui.note.childNodes.length && !ui.fps.childNodes.length;
+    ui.head.setAttribute('aria-label', `${item.name}. ${st.main}${st.sub ? ` ${st.sub}` : ''}. ${meta}`);
+
+    // The download link persists: only its state changes, so keyboard focus never falls off it.
     const res = item.result;
     const dl = ui.download;
-    if (res && (item.state === 'clean' || item.state === 'cleaning')) {
+    if (res && st.download) {
       dl.classList.remove('is-off');
       dl.href = `/api/result/${res.id}`;
       dl.setAttribute('download', res.filename);
       dl.setAttribute('aria-label', `Download ${res.filename}`);
-      dl.title = `Download ${res.filename}`;
       dl.removeAttribute('tabindex');
       dl.removeAttribute('aria-hidden');
     } else if (!dl.classList.contains('is-off')) {
@@ -769,42 +921,299 @@
       dl.removeAttribute('href');
       dl.setAttribute('tabindex', '-1');
       dl.setAttribute('aria-hidden', 'true');
-      if (hadFocus) ui.remove.focus();
+      if (hadFocus) ui.head.focus();
     }
-    ui.remove.setAttribute('aria-label', `Remove ${item.name} from the list`);
-
-    ui.detail.dataset.open = String(item.open);
-    if (item.open) {
-      const active = document.activeElement;
-      const keep = active && ui.body.contains(active) ? active.dataset.key : null;
-      ui.body.replaceChildren(...detailContent(item));
-      if (keep) (ui.body.querySelector(`[data-key="${keep}"]`) || ui.head).focus();
-    }
+    if (state.selected === item) renderDetail();
   }
 
-  function groupList(findings, removed) {
+  // ---------------------------------------------------------------- selecting a file and the detail pane
+
+  // The pieces of the page a full-screen detail sheet covers: they are inert while it is open.
+  const behindSheet = () => [$('.bar'), els.options, els.listPane, els.foot];
+
+  function setSheet(open) {
+    const on = open && NARROW.matches;
+    state.sheet = on;
+    els.detail.dataset.sheet = on ? 'open' : 'closed';
+    if (on) { els.detail.setAttribute('role', 'dialog'); els.detail.setAttribute('aria-modal', 'true'); } else { els.detail.removeAttribute('role'); els.detail.removeAttribute('aria-modal'); }
+    document.body.classList.toggle('sheet-open', on);
+    for (const part of behindSheet()) part.inert = on;
+  }
+
+  function openSheet() {
+    setSheet(true);
+    if (!state.sheet) return;
+    const title = $('#detailTitle');
+    (title || els.detailContent).focus({ preventScroll: true });
+  }
+
+  function closeSheet() {
+    if (!state.sheet) return;
+    setSheet(false);
+    const item = state.selected;
+    if (item && item.ui) item.ui.head.focus({ preventScroll: true });
+  }
+
+  function selectItem(item, { open = false } = {}) {
+    const previous = state.selected;
+    state.selected = item;
+    if (previous && previous !== item) renderSelection(previous);
+    renderSelection(item);
+    renderDetail();
+    if (previous !== item) announce(`Showing details for ${item.name}.`);
+    if (open && NARROW.matches) openSheet();
+  }
+
+  function renderDetail() {
+    const item = state.selected;
+    refill(els.detailContent, item ? detailContent(item) : []);
+  }
+
+  // ---------------------------------------------------------------- the detail pane
+
+  // What a finding means, in plain words, for the ones whose name alone would not say.
+  const WHY = [
+    [/thumbnail/i, 'A small copy of the photo. It can show the uncropped original.'],
+    [/c2pa|jumbf/i, 'A signed note about where this picture came from. Cleaning removes it.'],
+    [/^data after|^appended|trailing/i, 'Extra bytes tacked on after the picture. They can hide a file or an older version of the image.'],
+    [/^unknown (chunk|segment|box|tag|marker)/i, 'A part of the file imgstrip does not recognise. It could hold anything.'],
+    [/^xmp/i, 'Extra notes added by editing and photo apps.'],
+    [/iptc|photoshop/i, 'Captions, credits and keywords added by photo software.'],
+    [/icc/i, 'Describes the screen the colours were made for. Some profiles carry a device or a user name.'],
+    [/modification time/i, 'When the file was last edited.'],
+    [/dpi|physical pixel/i, 'A print-size setting. It can hint at the device that made the file.'],
+  ];
+
+  // A finding's detail, split for display: a size or coordinates on the right, the rest as text underneath.
+  function describeFinding(f) {
+    const d = f.detail || '';
+    const out = { side: '', leak: false, text: '', why: '' };
+    const size = /^([\d,]+) bytes?(?:[;\s]+(.*))?$/.exec(d);
+    if (size) {
+      out.side = `${Number(size[1].replace(/,/g, '')).toLocaleString('en-US')} bytes`;
+      out.text = (size[2] || '').replace(/^\((.*)\)$/, '$1');
+    } else if (/^-?\d+(\.\d+)?, -?\d+(\.\d+)?$/.test(d)) {
+      out.side = d;
+      out.leak = true;
+      out.why = 'Not shown on a map. This app never goes online.';
+    } else {
+      out.text = d === f.label ? '' : d;
+    }
+    if (!out.why && !/^EXIF/i.test(f.label)) {
+      const hit = WHY.find(([re]) => re.test(f.label));
+      if (hit) out.why = hit[1];
+    }
+    return out;
+  }
+
+  function findingItem(f) {
+    const d = describeFinding(f);
+    return h('li', { class: 'd-item' },
+      h('div', { class: 'd-row' },
+        h('span', { class: 'd-label', text: f.label }),
+        d.side ? h('span', { class: `d-side${d.leak ? ' is-leak' : ''}`, text: d.side }) : null),
+      d.text ? h('p', { class: 'd-text', text: d.text }) : null,
+      d.why ? h('p', { class: 'd-text', text: d.why }) : null);
+  }
+
+  // A headed block with a count on the right. `count` is a string, or a node for richer states.
+  function detailSection(title, count, body, { cls = '', tone = '' } = {}) {
+    return h('section', { class: `d-sec${cls ? ` ${cls}` : ''}` },
+      h('header', { class: 'd-head' }, h('h3', { text: title }), count === null ? null : h('p', { class: `d-count${tone ? ` is-${tone}` : ''}` }, count)),
+      body);
+  }
+
+  // Findings by kind. A scanned file always lists the three usual kinds (saying "None found" when empty); a cleaned one
+  // lists only what was removed.
+  function findingSections(findings, { removed = false } = {}) {
     const groups = new Map();
     for (const f of findings) {
       if (!groups.has(f.category)) groups.set(f.category, []);
       groups.get(f.category).push(f);
     }
-    const order = [...CATEGORY_ORDER, ...[...groups.keys()].filter((k) => !CATEGORY_ORDER.includes(k))];
-    return order.filter((k) => groups.has(k)).map((k) => h('section', { class: 'group' },
-      h('h3', { class: 'group-title' }, `${removed ? 'Removed: ' : ''}${CATEGORY[k] || k}`,
-        h('span', { class: 'n' }, h('span', { class: 'sr-only', text: ', ' }), String(groups.get(k).length), h('span', { class: 'sr-only', text: groups.get(k).length === 1 ? ' item' : ' items' }))),
-      h('ul', { class: 'items' }, groups.get(k).map((f) => h('li', { class: 'item' },
-        h('span', { class: 'item-label', text: f.label }),
-        h('span', { class: 'item-detail', text: f.detail || '—' }))))));
+    const always = removed ? [] : ['metadata', 'hidden', 'color'];
+    const order = [...new Set([...CATEGORY_ORDER.filter((k) => always.includes(k) || groups.has(k)), ...groups.keys()])];
+    return order.map((k) => {
+      const list = groups.get(k) || [];
+      const count = list.length ? (removed ? `${list.length} removed` : plural(list.length, 'item')) : 'None found';
+      return detailSection(CATEGORY[k] || capital(k), count, list.length ? h('ul', { class: 'd-list' }, list.map(findingItem)) : null);
+    });
+  }
+
+  // The plain-language opening: what this file gives away, with the important phrases in bold.
+  function ledeFor(item) {
+    const r = item.report;
+    const bold = (t) => h('strong', { text: t });
+    const list = (parts) => parts.flatMap((p, i) => [i === 0 ? '' : i === parts.length - 1 ? ' and ' : ', ', bold(p)]);
+    const shows = uniq(r.reveals.map((x) => REVEAL_LEDE[x.key]).filter((p) => p && p[0] === 'shows').map((p) => p[1]));
+    const carries = uniq(r.reveals.map((x) => REVEAL_LEDE[x.key]).filter((p) => p && p[0] === 'carries').map((p) => p[1]));
+    const photo = r.reveals.some((x) => ['camera', 'lens', 'location', 'gps', 'time'].includes(x.key));
+    const noun = photo ? 'photo' : 'image';
+    if (shows.length) {
+      return h('p', { class: 'd-lede' }, `This ${noun} shows `, ...list(shows), '.', carries.length ? [' It also carries ', ...list(carries), '.'] : '');
+    }
+    if (carries.length) return h('p', { class: 'd-lede' }, `This ${noun} carries `, ...list(carries), '.');
+    if (r.findings.length) return h('p', { class: 'd-lede' }, 'This image holds ', ...list(findingNouns(r).slice(0, 4)), '.');
+    if (!r.format) return h('p', { class: 'd-lede', text: "imgstrip can't list what this kind of file holds, but cleaning rebuilds the image from its pixels alone." });
+    return h('p', { class: 'd-lede', text: "Nothing beside the picture was found in this file's structure." });
   }
 
   // The pixel-level verdict, in the server's words. Shown with its caveat every time, so a scan that found
   // nothing is never read as proof that nothing is hidden.
-  function stegoBlock(v) {
-    if (!v) return [];
-    const head = `Hidden data in the pixels: ${v.headline}. ${capital(v.summary)}.`;
-    return [h('section', { class: 'group' },
-      note(head, v.state === 'detected' ? 'warn' : ''),
-      v.state === 'not_scanned' ? null : note(v.caveat))];
+  function pixelSection(item, verdict) {
+    const v = verdict;
+    if (!v) return null;
+    const ring = (solid) => h('span', { class: `ring${solid ? ' is-solid' : ''}`, 'aria-hidden': 'true' });
+    const word = { not_scanned: 'Not scanned', detected: 'Payload found', not_detected: 'Nothing detected', scrubbed: 'Scrubbed' }[v.state] || capital(v.headline);
+    const tone = v.state === 'detected' ? 'leak' : 'strong';
+    const body = [];
+    const canScan = !item.report.deep && item.state === 'scanned' && supportOf(item).deep.state === 'ok';
+    if (v.state === 'not_scanned') {
+      body.push(h('p', { class: 'd-text', text: "Only the file's structure was read. Nothing was tested in the pixels, so this says nothing about them." }));
+      body.push(h('div', { class: 'd-tools' },
+        canScan ? h('button', {
+          class: 'btn btn-secondary btn-small', type: 'button', 'data-key': 'deep',
+          onclick: () => { item.deepOnce = true; scan(item); },
+        }, 'Scan the pixels too') : null,
+        h('p', { class: 'd-text', text: 'A scan that finds nothing is never proof that nothing is hidden.' })));
+    } else {
+      body.push(note(`${capital(v.headline)}. ${capital(v.summary)}.`, v.state === 'detected' ? 'warn' : ''));
+      body.push(note(v.caveat));
+    }
+    return detailSection('In the pixels', [ring(v.state === 'detected'), word], h('div', { class: 'd-body' }, ...body), { tone });
+  }
+
+  // File fingerprints. Scanned: the file as received. Cleaned: before and after, side by side.
+  function hashBlock(item, name, hex, key) {
+    return h('div', { class: 'hash-block' },
+      h('h4', { text: name }),
+      h('div', { class: 'hash-line' },
+        h('code', { class: 'hash-code', 'data-hash': key, text: groupHash(hex), oncopy: copyPlain }),
+        h('button', {
+          class: 'copy-box', type: 'button', 'data-key': `copy-${key}`,
+          'aria-label': `Copy ${name} of ${item.name}${key.startsWith('after') ? ', after cleaning' : key.startsWith('before') ? ', before cleaning' : ''}`,
+          onclick: (e) => copyText(hex, e.currentTarget, name),
+        }, icon('copy'))));
+  }
+
+  // What a pasted hash says about a file: a SHA-256 is 64 hex characters and an MD5 is 32, and only a whole one can
+  // match. `fps` is { before, after|null }.
+  const HASH_LABEL = /^(?:sha-?256|md5)\s*[:=]\s*/i;
+  function checkHash(raw, fps) {
+    const typed = String(raw || '').trim();
+    if (!typed) return { kind: 'empty', hint: '', text: '' };
+    const v = typed.replace(HASH_LABEL, '').replace(/\s+/g, '').toLowerCase();
+    if (!/^[0-9a-f]+$/.test(v)) return { kind: 'bad', hint: 'A hash only has the digits 0 to 9 and the letters a to f.', text: '' };
+    const algo = v.length === 64 ? ['SHA-256', 'sha256'] : v.length === 32 ? ['MD5', 'md5'] : null;
+    if (!algo) return { kind: 'short', hint: `A SHA-256 has 64 characters and an MD5 has 32. This has ${v.length}.`, text: '' };
+    const [label, key] = algo;
+    const hits = [];
+    if (fps.before[key] === v) hits.push(fps.after ? 'the file as you added it' : 'this file');
+    if (fps.after && fps.after[key] === v) hits.push('the cleaned file');
+    if (!hits.length) return { kind: 'none', hint: '', text: `No match. This is not the ${label} of ${fps.after ? 'this file, before or after cleaning' : 'this file'}.` };
+    return { kind: 'match', hint: '', text: `Match. This is the ${label} of ${hits.join(' and ')}.${key === 'md5' ? ' MD5 can be forged, so take this as a hint, not proof.' : ''}` };
+  }
+
+  // A box to paste a hash from an older record or a download page. Its text is kept on the item so a redraw does not lose it.
+  function hashCheckBlock(item, fps) {
+    const hint = h('p', { class: 'hash-hint', id: 'hashHint' });
+    const result = h('p', { class: 'hash-result', id: 'hashResult', role: 'status' });
+    const input = h('input', {
+      type: 'text', id: 'hashCheck', 'data-key': 'hash-check', spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off',
+      placeholder: 'Paste a SHA-256 or MD5', 'aria-describedby': 'hashHint',
+    });
+    const paint = () => {
+      const r = checkHash(item.hashCheck, fps);
+      hint.textContent = r.hint;
+      result.dataset.kind = r.kind;
+      result.replaceChildren(...(r.text ? [icon(r.kind === 'match' ? 'check' : 'alert'), h('span', { text: r.text })] : []));
+      if (r.kind === 'bad') input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid');
+    };
+    input.value = item.hashCheck || '';
+    input.addEventListener('input', () => { item.hashCheck = input.value; paint(); });
+    paint();
+    return h('div', { class: 'hash-check' }, h('label', { for: 'hashCheck', text: 'Compare with a hash you already have' }), input, hint, result);
+  }
+
+  function fingerprintSection(item) {
+    const fps = fingerprintsOf(item);
+    if (!fps) return null;
+    const blocks = (fp, which) => ALGOS.map(([label, key]) => hashBlock(item, label, fp[key], `${which}-${key}`));
+    if (!fps.after) {
+      return detailSection('File fingerprints', 'As received', [
+        ...blocks(fps.before, 'before'),
+        h('p', { class: 'hash-note', text: 'MD5 is here to match older records. Rely on SHA-256 as proof. After cleaning, the new file gets its own hashes.' }),
+        hashCheckBlock(item, fps),
+      ]);
+    }
+    const same = fps.before.sha256 === fps.after.sha256;
+    return detailSection('File fingerprints', 'Before and after', [
+      h('div', { class: 'hash-set', 'data-set': 'before' },
+        h('p', { class: 'hash-set-head' }, h('strong', { text: 'Before cleaning' }), h('span', { text: 'as received' })), ...blocks(fps.before, 'before')),
+      h('div', { class: 'hash-set', 'data-set': 'after' },
+        h('p', { class: 'hash-set-head' }, h('strong', { text: 'After cleaning' }), h('span', { text: 'the new file' })), ...blocks(fps.after, 'after')),
+      h('p', { class: 'hash-note', text: same
+        ? 'The two SHA-256 values match, so the new file is byte for byte the file you added: it had nothing to remove.'
+        : 'The values differ because the file was rebuilt. That is expected. The two checks above are what show the picture is right. MD5 is here to match older records; rely on SHA-256 as proof.' }),
+      hashCheckBlock(item, fps),
+    ]);
+  }
+
+  // ---- the hash list: every file's hashes as a spreadsheet (CSV), built here and never sent anywhere ----
+
+  // One CSV cell. A cell a spreadsheet would run as a formula (it starts with = + - @ or a control character) gets a
+  // leading apostrophe, and a cell with a comma, quote or line break is quoted.
+  function csvCell(value) {
+    let s = String(value === null || value === undefined ? '' : value);
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  function hashListCsv(items) {
+    const rows = [['file', 'state', 'before_sha256', 'before_md5', 'after_sha256', 'after_md5', 'saved_as']];
+    for (const item of items) {
+      const fps = fingerprintsOf(item);
+      if (!fps) continue;
+      const after = fps.after;
+      rows.push([item.name, after ? 'cleaned' : 'not cleaned', fps.before.sha256, fps.before.md5,
+        after ? after.sha256 : '', after ? after.md5 : '', after ? item.result.filename : '']);
+    }
+    // A byte-order mark so a spreadsheet reads non-English file names right; CRLF line ends are what CSV asks for.
+    return `﻿${rows.map((r) => r.map(csvCell).join(',')).join('\r\n')}\r\n`;
+  }
+
+  function downloadHashList() {
+    const have = state.items.filter((i) => fingerprintsOf(i));
+    if (!have.length) return;
+    const url = URL.createObjectURL(new Blob([hashListCsv(have)], { type: 'text/csv;charset=utf-8' }));
+    triggerDownload(url, 'imgstrip-hashes.csv');
+    window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+    announce(`Hash list for ${plural(have.length, 'file')} downloaded.`);
+  }
+
+  // A hash on screen is grouped with spaces for reading; copying it by hand gives the plain hex.
+  function copyPlain(e) {
+    const text = String(window.getSelection()).replace(/\s+/g, '');
+    if (!text || !e.clipboardData) return;
+    e.clipboardData.setData('text/plain', text);
+    e.preventDefault();
+  }
+
+  async function copyText(text, button, label = 'Hash') {
+    try {
+      await navigator.clipboard.writeText(text);
+      button.replaceChildren(icon('check'));
+      button.dataset.done = '';
+      announce(`${label} copied.`);
+      window.setTimeout(() => { button.replaceChildren(icon('copy')); delete button.dataset.done; }, 1400);
+    } catch {
+      announce('Could not copy. Select the hash to copy it instead.');
+    }
+  }
+
+  function note(text, kind = '') {
+    const glyph = kind === 'warn' || kind === 'error' ? 'alert' : kind === 'ok' ? 'check' : 'info';
+    return h('p', { class: `note${kind ? ` is-${kind}` : ''}` }, icon(glyph), h('span', { text }));
   }
 
   // What cleaning did about data hidden in a JPEG's DCT coefficients (only present when asked for), in the server's
@@ -812,14 +1221,12 @@
   function dctBlock(d) {
     if (!d) return [];
     const cost = d.psnr_db ? ` About ${d.psnr_db} dB from the original picture.` : '';
-    return [h('section', { class: 'group' },
-      note(`Hidden data in the JPEG coefficients: ${d.headline}. ${capital(d.summary)}.${cost}`),
-      note(d.caveat))];
+    return [note(`Hidden data in the JPEG coefficients: ${d.headline}. ${capital(d.summary)}.${cost}`), note(d.caveat)];
   }
 
-  function note(text, kind = '') {
-    const glyph = kind === 'warn' || kind === 'error' ? 'alert' : kind === 'ok' ? 'check' : 'info';
-    return h('p', { class: `note${kind ? ` is-${kind}` : ''}` }, icon(glyph), h('span', { text }));
+  function alphaBlock(a) {
+    if (!a) return [];
+    return [note(`Hidden data in the transparency channel: ${a.headline}. ${capital(a.summary)}.`), note(a.caveat)];
   }
 
   // What a signed file's credential says and how public viewers will read it.
@@ -876,89 +1283,41 @@
   }
   const signingAvailable = () => !!(state.info && state.info.credentials && state.info.credentials.available);
 
-  function detailContent(item) {
-    const r = item.report;
-    // Rows clip long names; the detail repeats the whole name only when the row cut it off.
-    const n = item.ui.name;
-    const clipped = n.scrollWidth > n.clientWidth + 1 || n.scrollHeight > n.clientHeight + 1;
-    const out = [h('p', { class: `detail-name${clipped ? ' is-clipped' : ''}`, text: item.name })];
-    const meta = [];
-    const fmt = r && (r.format || r.decodable);
-    if (fmt) meta.push(formatName(fmt));
-    if (r && r.size) meta.push(`${r.size[0]}×${r.size[1]}`);
-    meta.push(bytes(item.size));
-    if (r && r.pixels_scanned) meta.push('pixels scanned');
+  // The buttons that end the detail: Download (once cleaned) and Remove, so a single file can be dealt with from here.
+  function detailActions(item) {
+    const res = item.state === 'clean' && item.result;
+    return h('div', { class: 'd-foot' },
+      res ? h('a', { class: 'btn btn-secondary btn-small', href: `/api/result/${res.id}`, download: res.filename, 'data-key': 'download' }, icon('download'), h('span', { text: 'Download' })) : null,
+      h('button', { class: 'btn btn-quiet btn-small', type: 'button', 'data-key': 'remove', onclick: () => removeItem(item) }, icon('x'), h('span', { text: 'Remove from list' })));
+  }
 
-    if (item.state === 'clean' && item.result) {
-      const res = item.result;
-      const checks = h('div', { class: 'checks' },
-        h('p', { class: 'check' }, icon('check'), h('span', { text: 'Every segment, chunk and box of the new file is accounted for, and the places meant to be empty are empty.' })),
-        h('p', { class: 'check' }, icon('check'), h('span', {
-          text: res.lossy
-            ? `It decodes back to the written pixels within ${formatName(res.output_format)} re-encoding tolerance.`
-            : 'It decodes back to exactly the pixels that were written.',
-        })),
-        h('div', { class: 'hash' },
-          h('code', { text: `SHA-256 ${res.sha256}` }),
-          h('button', {
-            class: 'btn btn-icon', type: 'button', 'aria-label': 'Copy SHA-256', title: 'Copy SHA-256', 'data-key': 'copy',
-            onclick: (e) => copyText(res.sha256, e.currentTarget),
-          }, icon('copy'))));
-      const kept = keptPayload(item);
-      if (kept) {
-        out.push(note('A steganography payload was detected in this file\'s pixels and is still there, because nothing scrubbed it. Turn on Scrub least-significant bits in Options and clean again to destroy it.', 'warn'));
-        out.push(h('div', { class: 'verified is-partial' }, checks));
-      } else if (unappliedScrub(item)) {
-        out.push(note('Scrub least-significant bits was turned on, but it could not be applied to this kind of image, so hidden data in its pixels was neither scanned nor destroyed.', 'warn'));
-        out.push(h('div', { class: 'verified is-partial' }, checks));
-      } else {
-        const animate = !item.sealDrawn;
-        item.sealDrawn = true;
-        out.push(h('div', { class: 'verified' }, seal(res.sha256, { detail: true, animate }), checks));
-      }
-      if (res.credentials) out.push(credentialBlock(res, optionsFor(item)));
-      const frames = res.frames > 1 ? ` · ${res.frames} frames` : '';
-      out.push(h('p', { class: 'meta-line', text: `${formatName(res.input_format)} ${bytes(res.bytes_in)} → ${formatName(res.output_format)} ${bytes(res.bytes_out)} · ${res.size[0]}×${res.size[1]}${frames} · saved as ${res.filename}` }));
-      out.push(...stegoBlock(stegoOf(item)));
-      out.push(...dctBlock(res.dct));
-      if (res.key !== optionsKey(item)) out.push(note('Cleaned with earlier options. Clean again to apply the current ones.', 'warn'));
-      if (refused(item)) out.push(note(`Cleaning again with the current options failed: ${item.error} This is the earlier clean file.`, 'error'));
-      if (res.prnu) {
-        out.push(note("The camera's sensor noise pattern was scrambled by a random warp of the pixels. Matching this photo to its camera should now fail, but unlike the checks above that cannot be proven."));
-      } else if (res.output_format !== 'GIF' && !res.warnings.some((w) => w.includes('sensor-fingerprint'))) {
-        out.push(note("The pixels still carry the camera's sensor noise pattern, which can link this photo to one camera. Turn on Disrupt camera fingerprint in Options to scramble it."));
-      }
-      out.push(...skippedOptions(item));
-      if (res.removed.length) out.push(...groupList(res.removed, true));
-      else if (!kept) out.push(note('Nothing beside the picture was found in the file\'s structure. The file was still rebuilt from its pixels.', 'ok'));
-      if (res.actions.length) {
-        out.push(h('section', { class: 'group' }, h('h3', { class: 'group-title', text: 'Changed' }),
-          h('ul', { class: 'actions-list' }, res.actions.map((a) => h('li', { text: capital(a) })))));
-      }
-      for (const w of res.warnings) out.push(note(w, 'warn'));
+  function detailContent(item) {
+    const out = [h('h2', { class: 'd-title', id: 'detailTitle', tabindex: '-1', 'data-key': 'title', text: item.name })];
+    const r = item.report;
+
+    if (item.state === 'clean' && item.result) return out.concat(cleanDetail(item));
+
+    if (item.state === 'scanning') {
+      out.push(h('p', { class: 'd-lede', text: 'Reading this file. What it gives away will appear here when the scan finishes.' }));
+      out.push(detailActions(item));
       return out;
     }
-
-    out.push(h('p', { class: 'meta-line', text: meta.join(' · ') }));
     if (item.state === 'failed' || item.state === 'scanfailed') out.push(note(item.error, 'error'));
     if (item.state === 'unsupported' && item.blocked) {
       out.push(note(`${item.blocked} It can't be cleaned.`, 'error'));
-      return out;
-    }
-    if (!r) return out;
-    if (item.state === 'unsupported') {
-      out.push(note(r.raw
+    } else if (item.state === 'unsupported') {
+      out.push(note(r && r.raw
         ? `Camera RAW files (${r.raw}) aren't supported. Export the photo to TIFF, PNG or JPEG first.`
         : "This file isn't an image imgstrip can read, so it can't be cleaned.", 'error'));
+    }
+    if (!r || item.state === 'unsupported') {
+      const fp = fingerprintSection(item);
+      if (fp) out.push(fp);
+      out.push(detailActions(item));
       return out;
     }
-    if (r.reveals.length) {
-      out.push(h('dl', { class: 'reveals' }, r.reveals.map((x) => [
-        h('dt', { text: x.label }),
-        h('dd', { class: x.key === 'location' || x.key === 'serial' ? 'mono' : null, text: x.value }),
-      ])));
-    }
-    if (r.credential && r.credential.present) out.push(foundCredential(r.credential));
+
+    out.push(ledeFor(item));
     const verdict = scanVerdict(r);
     if (hasStego(r) && !optionsFor(item).scrub_lsb) {
       const lsb = supportOf(item).scrub_lsb;
@@ -966,36 +1325,72 @@
         ? `Cleaning removes everything else, but keeps this payload: Scrub least-significant bits can't be used on this image. ${lsb.reason}`
         : 'Cleaning removes everything else, but keeps this payload unless Scrub least-significant bits is on in Options.', 'warn'));
     }
-    if (r.findings.length) out.push(...groupList(r.findings, false));
     if (isDamaged(r)) out.push(note(`The file's structure is damaged (${r.error}). Cleaning rebuilds it from its pixels if they can still be decoded.`, 'warn'));
-    if (!r.format) out.push(note(`imgstrip can't list what a ${r.decodable} file holds, but cleaning rebuilds the image from its pixels alone.`));
-    else if (!r.findings.length && !r.error) {
-      out.push(note(verdict && verdict.state === 'not_detected'
-        ? 'Nothing beside the picture was found in the file\'s structure. Cleaning still rebuilds it from its pixels.'
-        : 'No metadata found. Cleaning still rebuilds the file from its pixels, but anything hidden in the pixel values can survive unless Scrub least-significant bits is on.'));
-    }
-    if (verdict && verdict.state !== 'not_scanned') out.push(...stegoBlock(verdict));
     for (const n of r.notes) out.push(note(n, 'warn'));
     // Options the image cannot take are left out of its clean, and this says so rather than dropping them quietly.
     out.push(...skippedOptions(item));
-    if (!r.deep && item.state === 'scanned' && supportOf(item).deep.state === 'ok') {
-      out.push(h('div', { class: 'detail-tools' }, h('button', {
-        class: 'btn btn-secondary btn-small', type: 'button', 'data-key': 'deep',
-        onclick: () => { item.deepOnce = true; scan(item); },
-      }, h('span', { text: 'Scan the pixels too' }))));
-    }
+    if (r.format) out.push(...findingSections(r.findings));
+    if (r.credential && r.credential.present) out.push(foundCredential(r.credential));
+    const pixels = pixelSection(item, verdict);
+    if (pixels) out.push(pixels);
+    const fp = fingerprintSection(item);
+    if (fp) out.push(fp);
+    out.push(detailActions(item));
     return out;
   }
 
-  async function copyText(text, button) {
-    try {
-      await navigator.clipboard.writeText(text);
-      button.replaceChildren(icon('check'));
-      announce('SHA-256 copied.');
-      window.setTimeout(() => button.replaceChildren(icon('copy')), 1400);
-    } catch {
-      announce('Could not copy. Select the hash to copy it instead.');
+  function cleanDetail(item) {
+    const res = item.result;
+    const o = optionsFor(item);
+    const out = [];
+    const kept = keptPayload(item);
+    const bold = (t) => h('strong', { text: t });
+    out.push(h('p', { class: 'd-lede' }, res.removed.length
+      ? ['This copy was rebuilt from the pixels alone. ', bold(`${plural(res.removed.length, 'item')} removed`), '.']
+      : ['This copy was rebuilt from the pixels alone. Nothing beside the picture was found to remove.']));
+    if (kept) out.push(note('A steganography payload was detected in this file\'s pixels and is still there, because nothing scrubbed it. Turn on Scrub least-significant bits in Options and clean again to destroy it.', 'warn'));
+    else if (unappliedScrub(item)) out.push(note('Scrub least-significant bits was turned on, but it could not be applied to this kind of image, so hidden data in its pixels was neither scanned nor destroyed.', 'warn'));
+    if (res.key !== optionsKey(item)) out.push(note('Cleaned with earlier options. Clean again to apply the current ones.', 'warn'));
+    if (refused(item)) out.push(note(`Cleaning again with the current options failed: ${item.error} This is the earlier clean file.`, 'error'));
+
+    const checks = h('div', { class: 'checks' },
+      h('p', { class: 'check' }, icon('check'), h('span', { text: 'Every segment, chunk and box of the new file is accounted for, and the places meant to be empty are empty.' })),
+      h('p', { class: 'check' }, icon('check'), h('span', {
+        text: res.lossy
+          ? `It decodes back to the written pixels within ${formatName(res.output_format)} re-encoding tolerance.`
+          : 'It decodes back to exactly the pixels that were written.',
+      })));
+    if (kept || unappliedScrub(item)) {
+      out.push(h('div', { class: 'verified is-partial' }, checks));
+    } else {
+      const animate = !item.sealDrawn;
+      item.sealDrawn = true;
+      out.push(h('div', { class: 'verified' }, seal(res.sha256, { detail: true, animate }), checks));
     }
+
+    if (res.credentials) out.push(credentialBlock(res, o));
+    const frames = res.frames > 1 ? ` · ${res.frames} frames` : '';
+    out.push(h('p', { class: 'd-meta', text: `${formatName(res.input_format)} ${bytes(res.bytes_in)} → ${formatName(res.output_format)} ${bytes(res.bytes_out)} · ${res.size[0]}×${res.size[1]}${frames} · saved as ${res.filename}` }));
+    const stego = stegoOf(item);
+    if (stego) out.push(note(`Hidden data in the pixels: ${stego.headline}. ${capital(stego.summary)}.`, stego.state === 'detected' ? 'warn' : ''), ...(stego.state === 'not_scanned' ? [] : [note(stego.caveat)]));
+    out.push(...dctBlock(res.dct));
+    out.push(...alphaBlock(res.alpha));
+    if (res.prnu) {
+      out.push(note("The camera's sensor noise pattern was scrambled by a random warp of the pixels. Matching this photo to its camera should now fail, but unlike the checks above that cannot be proven."));
+    } else if (res.output_format !== 'GIF' && !res.warnings.some((w) => w.includes('sensor-fingerprint'))) {
+      out.push(note("The pixels still carry the camera's sensor noise pattern, which can link this photo to one camera. Turn on Disrupt camera fingerprint in Options to scramble it."));
+    }
+    out.push(...skippedOptions(item));
+    if (res.removed.length) out.push(...findingSections(res.removed, { removed: true }));
+    else if (!kept) out.push(note('Nothing beside the picture was found in the file\'s structure. The file was still rebuilt from its pixels.', 'ok'));
+    if (res.actions.length) {
+      out.push(detailSection('Changed', null, h('ul', { class: 'actions-list' }, res.actions.map((a) => h('li', { text: capital(a) })))));
+    }
+    for (const w of res.warnings) out.push(note(w, 'warn'));
+    const fp = fingerprintSection(item);
+    if (fp) out.push(fp);
+    out.push(detailActions(item));
+    return out;
   }
 
   // ---------------------------------------------------------------- which options apply
@@ -1011,11 +1406,11 @@
     const input = els.optionsForm.elements.namedItem(name);
     if (!input) return null;
     const isField = input.tagName === 'SELECT';
-    const root = input.closest(isField ? '.field' : '.switch');
-    const host = isField ? root : $('.switch-text', root);
+    const root = input.closest(isField ? '.field' : '.switch-row');
     const note = h('span', { class: 'support', id: `support-${name}`, hidden: true });
-    host.append(note);
-    return (supportControls[name] = { input, root, note, isField });
+    root.append(note);
+    // A switch is already described by its hint; the support note is added to that, never in its place.
+    return (supportControls[name] = { input, root, note, isField, base: input.getAttribute('aria-describedby') || '' });
   }
 
   function listNames(items) {
@@ -1041,6 +1436,10 @@
 
   function paintNote(ctl, text, kind) {
     const { note, input } = ctl;
+    const describedBy = (extra) => {
+      const ids = [ctl.base, extra].filter(Boolean).join(' ');
+      if (ids) input.setAttribute('aria-describedby', ids); else input.removeAttribute('aria-describedby');
+    };
     note.replaceChildren();
     note.removeAttribute('title');
     note.className = 'support';
@@ -1050,9 +1449,9 @@
       note.classList.add(kind === 'warn' ? 'is-warn' : 'is-na');
       note.append(h('span', { text }));
       note.title = text;
-      input.setAttribute('aria-describedby', note.id);
+      describedBy(note.id);
     } else {
-      input.removeAttribute('aria-describedby');
+      describedBy('');
     }
   }
 
@@ -1078,7 +1477,7 @@
     const select = $('#opt-format');
     const root = select.closest('.field');
     if (!supportControls.format) {
-      supportControls.format = { note: h('span', { class: 'support', id: 'support-format', hidden: true }), input: select };
+      supportControls.format = { note: h('span', { class: 'support', id: 'support-format', hidden: true }), input: select, base: '' };
       root.append(supportControls.format.note);
     }
     const ctl = supportControls.format;
@@ -1172,8 +1571,7 @@
   }
 
   function revealItem(item) {
-    item.open = true;
-    renderItem(item);
+    selectItem(item);
     item.el.scrollIntoView({ block: 'center', behavior: reduceMotion.matches ? 'auto' : 'smooth' });
     item.ui.head.focus({ preventScroll: true });
     item.el.dataset.flash = '';
@@ -1249,8 +1647,10 @@
     const items = state.items;
     const any = items.length > 0;
     if (any) renderReview(); else if (!els.review.hidden) renderReview();
-    els.well.hidden = any;
-    $('#formats').hidden = any;
+    // The drop zone stays at the top of the list; the steps and the file-type note are only for the empty page.
+    els.workspace.dataset.empty = String(!any);
+    els.formats.hidden = any;
+    els.steps.hidden = any;
     els.list.hidden = !any;
     els.foot.hidden = !any;
     if (!any) return;
@@ -1265,13 +1665,23 @@
     const removed = clean.reduce((n, i) => n + i.result.removed.length, 0);
 
     els.listCount.textContent = plural(items.length, 'image');
+    els.hashList.hidden = !items.some((i) => fingerprintsOf(i));
+    const filesWithFindings = items.filter((i) => i.state !== 'clean' && i.state !== 'unsupported' && findingCount(i.report)).length;
+    if (clean.length) {
+      els.listFound.textContent = `${plural(removed, 'item')} removed, in ${plural(clean.length, 'file')}${found ? ` · ${plural(found, 'item')} still to remove` : ''}`;
+    } else if (found) {
+      els.listFound.textContent = `${plural(found, 'item')} found${scanning ? ' so far' : ''}, in ${plural(filesWithFindings, 'file')}`;
+    } else {
+      els.listFound.textContent = scanning ? 'Nothing found so far' : 'No metadata found';
+    }
 
+    // The bar says plainly that nothing has changed yet, until something has.
     const s = [];
     if (state.run) s.push(h('span', { text: `Cleaning ${Math.min(state.run.done + 1, state.run.total)} of ${state.run.total}…` }));
-    else if (scanning) s.push(h('span', { text: `Scanning ${plural(scanning, 'image')}…` }));
+    else if (scanning) s.push(h('span', { text: `Nothing is changed yet. ${scanning === 1 ? '1 file is' : `${scanning} files are`} still being scanned.` }));
     else if (!clean.length) {
-      s.push(found ? h('span', { class: 'is-reveal', text: plural(found, 'revealing item') }) : h('span', { text: 'No metadata found' }));
-      s.push(` in ${plural(items.length, 'image')}`);
+      s.push('Nothing is changed yet.');
+      if (todo.length) s.push(` ${plural(todo.length, 'image')} ${todo.length === 1 ? 'is' : 'are'} ready to clean.`);
     } else {
       if (clean.length > payloads) s.push(h('span', { class: 'is-clean', text: `${clean.length - payloads} clean` }));
       if (payloads) s.push(h('span', { class: 'is-fail', text: `${clean.length > payloads ? ' · ' : ''}${payloads} kept a pixel payload` }));
@@ -1426,9 +1836,10 @@
       else field.value = v;
       if (field.tagName === 'SELECT' && field.value !== String(v)) { field.value = OPTION_DEFAULTS[k]; state.options[k] = OPTION_DEFAULTS[k]; }
     }
-    form.addEventListener('change', (e) => {
+    // A switch can sit outside the form and still belong to it (Deep scan, in the action bar), so listen on the page.
+    document.addEventListener('change', (e) => {
       const f = e.target;
-      if (!f.name) return;
+      if (!f.name || f.form !== form) return;
       const beforeKey = keysSignature();
       const beforeDeep = state.options.deep;
       state.options[f.name] = f.type === 'checkbox' ? f.checked : f.value;
@@ -1612,7 +2023,7 @@
     const o = state.options;
     const hints = [];
     if (!o.jpeg_lossless && !o.jpeg_canonical && !o.scrub_dct) hints.push('JPEG files are re-encoded, so their credential will say the picture is "equivalent", not "identical". Turn on Keep JPEG data bit-exact to be able to say "identical".');
-    if (o.scrub_lsb || o.scrub_prnu || o.scrub_dct) hints.push('Scrubbing is on, so the credential will say the pixels were deliberately altered to protect the source.');
+    if (o.scrub_lsb || o.scrub_alpha || o.scrub_prnu || o.scrub_dct) hints.push('Scrubbing is on, so the credential will say the pixels were deliberately altered to protect the source.');
     if (o.c2pa_commit) hints.push('The receipt holds the secret that proves which original a signed image came from. Anyone who gets it and the original can prove that link: keep it offline and as private as the original.');
     els.credHints.replaceChildren(...hints.map((t) => note(t)));
   }
@@ -1667,19 +2078,62 @@
     syncCredentials();
   }
 
-  // ---------------------------------------------------------------- brand marks
+  // ---------------------------------------------------------------- the (i) buttons
 
-  function drawMarks() {
-    const fixed = 'b3f19a07c2d4e58a61f0c3b7d9e2a4f6c8b1d3e5f7a9c0b2d4e6f8a1c3e5b7d9';
-    $('#mark').append(sealSVG(fixed, { detail: false, check: false }));
-    $('#wellMark').append(sealSVG(fixed, { detail: true, check: false }));
-    $('#gateMark').append(sealSVG(fixed, { detail: true, check: false }));
+  // Every switch has an (i) button beside it. Pressing it opens a small bubble with the explanation, read out by screen
+  // readers through the live region that holds it. Escape, a press elsewhere, or moving on closes it.
+  let tipFor = null;
+
+  function closeTip({ restore = false } = {}) {
+    if (!tipFor) return;
+    const button = tipFor;
+    tipFor = null;
+    button.setAttribute('aria-expanded', 'false');
+    els.infoTip.replaceChildren();
+    if (restore) button.focus();
+  }
+
+  function placeTip(button, bubble) {
+    const r = button.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const b = bubble.getBoundingClientRect();
+    const edge = 12;
+    const left = Math.min(Math.max(edge, r.left + r.width / 2 - b.width / 2), Math.max(edge, vw - b.width - edge));
+    let top = r.bottom + 8;
+    if (top + b.height > vh - edge) top = r.top - 8 - b.height >= edge ? r.top - 8 - b.height : Math.max(edge, vh - b.height - edge);
+    bubble.style.left = `${left}px`;
+    bubble.style.top = `${top}px`;
+  }
+
+  function openTip(button) {
+    if (tipFor === button) { closeTip(); return; }
+    closeTip();
+    const name = button.dataset.info;
+    if (!INFO[name]) return;
+    tipFor = button;
+    button.setAttribute('aria-expanded', 'true');
+    const bubble = h('div', { class: 'info-bubble' }, h('strong', { text: OPTION_LABEL[name] || name }), h('span', { text: INFO[name] }));
+    els.infoTip.replaceChildren(bubble);
+    placeTip(button, bubble);
   }
 
   // ---------------------------------------------------------------- events
 
   function bind() {
     els.choose.addEventListener('click', () => els.picker.click());
+    els.sheetBack.addEventListener('click', closeSheet);
+    NARROW.addEventListener('change', () => { if (state.sheet) setSheet(false); });
+    document.addEventListener('click', (e) => {
+      const button = e.target.closest && e.target.closest('.info[data-info]');
+      if (button) openTip(button);
+    });
+    document.addEventListener('pointerdown', (e) => {
+      if (tipFor && !(e.target.closest && (e.target.closest('.info-bubble') || e.target.closest('.info[data-info]')))) closeTip();
+    });
+    document.addEventListener('focusin', (e) => { if (tipFor && e.target !== tipFor) closeTip(); });
+    document.addEventListener('scroll', () => closeTip(), true);
+    window.addEventListener('resize', () => closeTip());
     $('#add').addEventListener('click', () => els.picker.click());
     els.picker.addEventListener('change', () => { addFiles(els.picker.files); els.picker.value = ''; });
 
@@ -1703,6 +2157,7 @@
       else if (mode === 'download') downloadClean();
     });
     els.downloadSome.addEventListener('click', () => { if (!isBusy(els.downloadSome)) downloadClean(); });
+    els.hashList.addEventListener('click', downloadHashList);
     els.saveToggle.addEventListener('click', () => {
       const open = els.save.dataset.open !== 'true';
       setOpen(els.save, els.saveToggle, open);
@@ -1717,17 +2172,11 @@
 
     // A link pasted into this tab only changes the fragment: reload so it is redeemed.
     window.addEventListener('hashchange', () => { if (/[#&]k=/.test(window.location.hash)) window.location.reload(); });
-    // The seal tooltip hides on Escape until focus or the pointer moves on.
-    document.addEventListener('focusin', () => document.body.classList.remove('tips-off'));
-    els.files.addEventListener('mouseout', (e) => { if (e.target.closest && e.target.closest('.status')) document.body.classList.remove('tips-off'); });
-
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
       const active = document.activeElement;
-      if (!document.body.classList.contains('tips-off') && document.querySelector('.seal-tip')) {
-        document.body.classList.add('tips-off');
-        if (active && active.classList.contains('file-head')) return;
-      }
+      if (tipFor) { closeTip({ restore: true }); return; }
+      if (state.sheet) { closeSheet(); return; }
       if (clearArmed) { disarmClear(); return; }
       if (state.review.open && els.review.contains(active)) {
         setReviewOpen(false);
@@ -1778,8 +2227,8 @@
   }
 
   async function init() {
-    drawMarks();
     bind();
+    els.localAddr.textContent = window.location.host;
     state.lastFolder = session.get(FOLDER_KEY);
     if (!(await authenticate())) return;
     try {

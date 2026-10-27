@@ -24,13 +24,13 @@
   const ANIMATED_SOURCES = ['GIF', 'WEBP', 'AVIF'];  // formats whose frames are all kept when saved as PNG
 
   const OPTION_NAMES = [
-    'quality', 'icc', 'deep', 'jpeg_lossless', 'scrub_lsb', 'scrub_dct', 'jpeg_canonical', 'scrub_prnu',
+    'quality', 'icc', 'deep', 'jpeg_lossless', 'scrub_lsb', 'scrub_alpha', 'scrub_dct', 'jpeg_canonical', 'scrub_prnu',
     'random_name', 'c2pa', 'auto_orient', 'optimize',
   ];
   // What an option is worth when it cannot apply: the engine's own default, so that sending it changes nothing
   // (turning orientation off would make it warn that a tag was discarded, even when the image has none).
   const OFF = {
-    quality: '', icc: 'convert', deep: false, jpeg_lossless: false, scrub_lsb: false, scrub_dct: false,
+    quality: '', icc: 'convert', deep: false, jpeg_lossless: false, scrub_lsb: false, scrub_alpha: false, scrub_dct: false,
     jpeg_canonical: false, scrub_prnu: false, random_name: false, c2pa: false, auto_orient: true, optimize: false,
   };
 
@@ -133,6 +133,15 @@
       if (facts.frames <= 1 && NO_LSB_MODES.includes(facts.mode)) {
         return no(`${facts.mode === '1' ? '1-bit' : '32-bit'} images have no colour samples to scrub.`);
       }
+      return ok();
+    },
+
+    scrub_alpha(facts, prefs) {
+      if (!facts) return ok();
+      if (jpegStays(facts, prefs) && jpegDataOn(prefs)) {
+        return no(jpegDataBlocks(prefs, 'It has no effect while', 'clean transparency'));
+      }
+      if (facts.alpha === false) return na('This image has no transparency channel to clean.');
       return ok();
     },
 

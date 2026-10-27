@@ -70,7 +70,8 @@ SCRIPT = textwrap.dedent(
     (async () => {
       const [url, lockedChain, lockedKey, photo] = process.argv.slice(2);
       const browser = await chromium.launch({ executablePath: process.env.CHROMIUM, args: ['--no-sandbox'] });
-      const page = await browser.newPage({ viewport: { width: 760, height: 1000 } });
+      // wide enough for the two-pane layout, where the detail is a pane and not a sheet over the page
+      const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } });
       const errors = [];
       page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
       page.on('console', (m) => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
@@ -112,11 +113,11 @@ SCRIPT = textwrap.dedent(
       await page.waitForSelector('.file[data-state="clean"]', { timeout: 30000 });
       await page.click('.file-head');
       await page.waitForSelector('.credential');
-      out.signed = { sub: (await page.textContent('.file-sub')).trim(), block: (await page.textContent('.credential')).replace(/\s+/g, ' ') };
+      out.signed = { sub: (await page.textContent('.file-meta')).trim(), block: (await page.textContent('.credential')).replace(/\s+/g, ' ') };
 
       // Changing the identity or the settings marks the result as made with old options
       await page.selectOption('#cred-date', 'minute');
-      out.stale = (await page.textContent('.status')).replace(/\s+/g, ' ');
+      out.stale = (await page.textContent('.file-side')).replace(/\s+/g, ' ');
 
       // Reload: the toggle is off again, the server still holds the identity
       await page.reload();
@@ -129,7 +130,7 @@ SCRIPT = textwrap.dedent(
       out.storageAfter = await stored();
 
       // Remove it
-      await page.click('[data-key="remove"]');
+      await page.click('#credentials [data-key="remove"]');
       await page.waitForSelector('[data-key="load"]');
       out.removed = (await page.textContent('#credIdentity')).trim();
 

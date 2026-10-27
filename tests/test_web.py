@@ -229,6 +229,37 @@ def test_inspect_reports_and_summarises(app):
     assert report["reveals"][0]["key"] == "location"
 
 
+def test_inspect_gives_the_sha256_and_md5_of_the_file_as_received(app):
+    for data in (fixtures.jpeg_everything(), fixtures.png_lsb_stego()):
+        res, body = app.upload("/api/inspect", data, "x.bin")
+        fp = json.loads(body)["fingerprints"]
+        assert fp == {"sha256": hashlib.sha256(data).hexdigest(), "md5": hashlib.md5(data, usedforsecurity=False).hexdigest()}
+        assert re.fullmatch(r"[0-9a-f]{64}", fp["sha256"]) and re.fullmatch(r"[0-9a-f]{32}", fp["md5"])
+    # a file imgstrip cannot read as an image still gets its fingerprints, so it can be matched against a record
+    junk = b"not an image at all" * 10
+    res, body = app.upload("/api/inspect", junk, "x.jpg")
+    assert json.loads(body)["fingerprints"]["sha256"] == hashlib.sha256(junk).hexdigest()
+
+
+def test_clean_gives_before_and_after_hashes_of_the_real_bytes(app):
+    data = fixtures.jpeg_everything()
+    result = app.clean(data, "IMG_0001.JPG")
+    res, served = app.request("GET", f"/api/result/{result['id']}")
+    sha, md5 = hashlib.sha256, lambda b: hashlib.md5(b, usedforsecurity=False)
+    assert result["before"] == {"sha256": sha(data).hexdigest(), "md5": md5(data).hexdigest(), "bytes": len(data)}
+    assert result["after"] == {"sha256": sha(served).hexdigest(), "md5": md5(served).hexdigest(), "bytes": len(served)}
+    # the top-level fields are the cleaned file's (the seal is engraved from sha256), and differ from the original's
+    assert (result["sha256"], result["md5"]) == (result["after"]["sha256"], result["after"]["md5"])
+    assert result["before"]["sha256"] != result["after"]["sha256"] and result["before"]["md5"] != result["after"]["md5"]
+    # the inspect step and the clean step agree about the file as received
+    res, body = app.upload("/api/inspect", data, "IMG_0001.JPG")
+    assert json.loads(body)["fingerprints"] == {k: result["before"][k] for k in ("sha256", "md5")}
+    # an already-clean file cleaned again: the numbers still describe the bytes in and the bytes out
+    again = app.clean(served, "IMG_0001.clean.JPG")
+    res, served2 = app.request("GET", f"/api/result/{again['id']}")
+    assert again["before"]["sha256"] == result["after"]["sha256"] and again["after"]["sha256"] == sha(served2).hexdigest()
+
+
 def test_deep_scan_finds_lsb_payload(app):
     data = fixtures.png_lsb_stego()
     res, body = app.upload("/api/inspect", data, "memo.png")

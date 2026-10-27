@@ -38,6 +38,18 @@ DCT_OFF = "off"  # not requested
 DCT_CANONICAL = "canonical"  # coefficients kept, everything around them rebuilt in one canonical form
 DCT_SCRUBBED = "scrubbed"  # coefficient parities randomised, +-1 coefficients removed
 
+# What the engine did about --scrub-alpha (Result.alpha_scrub): data hidden in a picture's transparency (alpha)
+# channel, which the colour-sample scrub above leaves alone wherever alpha is exactly fully clear or fully opaque.
+ALPHA_OFF = "off"  # not requested
+ALPHA_APPLIED = "applied"  # near-opaque and near-clear alpha snapped to opaque / clear, the rest had its low bit randomised
+ALPHA_NO_ALPHA = "no_alpha"  # requested, but the image has no transparency channel to clean
+ALPHA_STATES = (ALPHA_OFF, ALPHA_APPLIED, ALPHA_NO_ALPHA)
+
+# The smallest and largest tolerance (in 8-bit levels) --scrub-alpha accepts.
+ALPHA_TOLERANCE_MIN = 1
+ALPHA_TOLERANCE_MAX = 32
+ALPHA_TOLERANCE_DEFAULT = 5
+
 LIKELY = "likely"
 POSSIBLE = "possible"
 
@@ -181,3 +193,61 @@ def dct_report(state: str, psnr: float | None = None) -> dict | None:
     else:
         summary = "the compressed data was rebuilt from its DCT coefficients in a canonical form; the pixels are unchanged"
     return {"state": state, "headline": _DCT_HEADLINES[state], "summary": summary, "caveat": _DCT_CAVEATS[state], "psnr_db": psnr}
+
+
+def effective_alpha_tolerance(tolerance: int) -> int:
+    """The tolerance the scrub really uses: an even one is rounded up to the next odd one.
+
+    The levels left between "nearly clear" and "nearly opaque" are randomised in pairs (2k, 2k+1).  An odd tolerance
+    ends the clear side on an odd level and the opaque side on an even one, so every pair lies wholly inside the
+    range and a randomised value can never fall back into the part that was snapped.
+    """
+    return int(tolerance) | 1
+
+
+def check_alpha_tolerance(tolerance) -> int:
+    """The tolerance as a whole number, or ValueError saying what is allowed."""
+    if isinstance(tolerance, bool) or not isinstance(tolerance, int) or not (
+        ALPHA_TOLERANCE_MIN <= tolerance <= ALPHA_TOLERANCE_MAX
+    ):
+        raise ValueError(
+            f"the alpha tolerance must be a whole number from {ALPHA_TOLERANCE_MIN} to {ALPHA_TOLERANCE_MAX}"
+        )
+    return tolerance
+
+
+_ALPHA_CAVEAT = (
+    "This closes the transparency channel as a hiding place for differences of up to {tolerance} levels (out of 255) "
+    "from fully clear or fully opaque, and for the lowest bit of every partly transparent pixel. A hidden message "
+    "written with larger differences, or in colour that only shows through transparent areas, is not covered; "
+    "flattening the picture onto a background or dropping its transparency removes the channel altogether. "
+    "It is not proof that nothing is hidden."
+)
+
+
+def alpha_report(state: str, tolerance: int | None = None, pixels: int = 0) -> dict | None:
+    """What cleaning did about data hidden in the transparency channel; None when --scrub-alpha was off."""
+    if state not in (ALPHA_APPLIED, ALPHA_NO_ALPHA):
+        return None
+    if state == ALPHA_NO_ALPHA:
+        return {
+            "state": state,
+            "headline": "nothing to clean",
+            "summary": "the image has no transparency channel, so nothing can be hidden in one",
+            "caveat": "Data can still be hidden in the colour channels: use --scrub-lsb for that.",
+            "tolerance": None,
+            "pixels": 0,
+        }
+    summary = (
+        f"transparency within {tolerance} levels of fully clear or fully opaque was set to exactly clear or opaque, "
+        "and the lowest bit of the remaining partial transparency was randomised"
+    )
+    summary += f" ({pixels:,} pixel{'s' if pixels != 1 else ''} changed)" if pixels else " (no pixel needed changing)"
+    return {
+        "state": state,
+        "headline": "cleaned",
+        "summary": summary,
+        "caveat": _ALPHA_CAVEAT.format(tolerance=tolerance),
+        "tolerance": tolerance,
+        "pixels": pixels,
+    }

@@ -81,6 +81,7 @@ OPERATIONS = (
     "re-encoded",
     "sensor-fingerprint-disrupted",
     "lsb-scrubbed",
+    "alpha-scrubbed",
     "dct-scrubbed",
 )
 DATE_PRECISIONS = ("day", "minute")
@@ -885,6 +886,8 @@ def _operations(result: Result, options: Options, source_frames: int) -> list[st
         ops.add("sensor-fingerprint-disrupted")
     if result.lsb_scrub in (stego.SCRUB_APPLIED, stego.SCRUB_PARTIAL):  # what was done, not what was asked
         ops.add("lsb-scrubbed")
+    if result.alpha_scrub == stego.ALPHA_APPLIED and result.alpha_pixels:  # only when it really changed alpha values
+        ops.add("alpha-scrubbed")
     if result.dct_scrub == stego.DCT_SCRUBBED:
         ops.add("dct-scrubbed")
     if result.frames != source_frames:
@@ -903,7 +906,7 @@ def gather_evidence(source: bytes, result: Result, options: Options) -> Evidence
         x.shape == y.shape and x.dtype == y.dtype and np.array_equal(x, y) for x, y in zip(want, got, strict=True)
     )
     ops = _operations(result, options, len(want))
-    deliberate = any(op in ops for op in ("sensor-fingerprint-disrupted", "lsb-scrubbed", "dct-scrubbed"))
+    deliberate = any(op in ops for op in ("sensor-fingerprint-disrupted", "lsb-scrubbed", "alpha-scrubbed", "dct-scrubbed"))
     if identical:
         integrity, psnr = "identical", None
     else:
