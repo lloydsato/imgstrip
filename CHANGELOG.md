@@ -3,6 +3,30 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
+## [2.0.1]
+
+A dependency floor, no code change in the engine, the command line or the web app. imgstrip now requires **Pillow 13.0.0
+or later** (it asked for 11.2 or later before).
+
+### Security
+
+- **Pillow up to 12.3.0 can hand back uninitialised memory as pixels when it decodes a damaged TIFF** (JPEG-compressed or
+  Group 4 fax, with strips or tiles that end early). Pillow published this as GHSA-q45j-58j2-45rg and fixed it in 13.0.0.
+  imgstrip's verifier cannot see it: stage 2 compares the output with what the decoder returned, and the output holds
+  exactly that, so both checks pass. With the decoder sandbox on (the default) we found no pixels of an earlier image in
+  the output; with `--no-sandbox` or `sandbox=False`, pixels of the image processed just before did reach the output.
+  Requiring Pillow 13.0.0 closes it. If you must stay on an older Pillow, keep the sandbox on, and do not use
+  `--no-sandbox`.
+
+### Tests
+
+- The credentials UI test failed intermittently, on Pillow 13 and, much less often, on Pillow 12.3. It clicked the
+  Content Credentials switch, and later the Remove button, while the page was still starting or moving, so the click
+  sometimes did not land. The test now waits until the page has finished starting and flips the switch and presses
+  Remove through events. This is a fix to the test; the app is unchanged.
+- `tests/test_pillow_floor.py` checks that the installed Pillow meets the floor the package declares, so a test run can
+  never quietly use a Pillow below it.
+
 ## [2.0.0]
 
 A new look for the web app, an explanation beside every switch, and file fingerprints. This is a major version because
@@ -274,6 +298,7 @@ of it that followed (items 1 to 14 below). Each entry names the finding or item 
 Released before this changelog was started; see the `v1.2.4` tag and its GitHub release. This is the version the
 preprint describes.
 
+[2.0.1]: https://github.com/lloydsato/imgstrip/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/lloydsato/imgstrip/compare/v1.2.8...v2.0.0
 [1.2.8]: https://github.com/lloydsato/imgstrip/compare/v1.2.7...v1.2.8
 [1.2.7]: https://github.com/lloydsato/imgstrip/compare/v1.2.6...v1.2.7

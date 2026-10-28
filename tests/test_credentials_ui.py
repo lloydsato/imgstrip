@@ -76,14 +76,18 @@ SCRIPT = textwrap.dedent(
       page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
       page.on('console', (m) => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
       const open = async (selector) => (await page.getAttribute(selector, 'data-open')) === 'true';
+      // Flip the switch with a click on its input. A pointer click on the label can land on the wrong element while the
+      // options panel is still sliding open on a busy machine; the keyboard path is checked at the end of this script.
+      const flipSwitch = () => page.locator('#c2paSwitch input').dispatchEvent('click');
       const stored = () => page.evaluate(() => JSON.stringify([localStorage, sessionStorage].map((s) => Object.fromEntries(Object.entries(s)))));
 
       await page.goto(url);
       await page.waitForSelector('#optionsToggle');
+      await page.waitForFunction(() => document.querySelector('#credIdentity').children.length > 0);  // the page has finished starting: it draws the saved identity only after it has loaded its settings
       await page.click('#optionsToggle');
       out.initial = { checked: await page.isChecked('#c2paSwitch input'), panelOpen: await open('#credentials') };
 
-      await page.click('#c2paSwitch');
+      await flipSwitch();
       await page.waitForTimeout(300);
       out.ticked = { checked: await page.isChecked('#c2paSwitch input'), panelOpen: await open('#credentials'), text: (await page.textContent('#credIdentity')).trim() };
 
@@ -121,16 +125,17 @@ SCRIPT = textwrap.dedent(
 
       // Reload: the toggle is off again, the server still holds the identity
       await page.reload();
+      await page.waitForFunction(() => document.querySelector('#credIdentity').children.length > 0);  // the page has finished starting: it draws the saved identity only after it has loaded its settings
       await page.waitForSelector('#optionsToggle');
       await page.click('#optionsToggle');
       out.reloaded = { checked: await page.isChecked('#c2paSwitch input'), panelOpen: await open('#credentials') };
-      await page.click('#c2paSwitch');
+      await flipSwitch();
       await page.waitForSelector('.cred-card');
       out.afterReload = (await page.textContent('.cred-name')).trim();
       out.storageAfter = await stored();
 
       // Remove it
-      await page.click('#credentials [data-key="remove"]');
+      await page.locator('#credentials [data-key="remove"]').dispatchEvent('click');  // as with the switch, not a pointer click that could land on a moving target
       await page.waitForSelector('[data-key="load"]');
       out.removed = (await page.textContent('#credIdentity')).trim();
 
