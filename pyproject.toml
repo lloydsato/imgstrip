@@ -7,7 +7,7 @@ name = "imgstrip"
 dynamic = ["version"]
 description = "Remove all metadata and hidden data from images by rebuilding them from their pixels, with fail-closed verification."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 dependencies = [
@@ -45,7 +45,7 @@ addopts = "-ra"
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B"]

@@ -6,7 +6,8 @@ tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `
 ## [2.0.1]
 
 A dependency floor, no code change in the engine, the command line or the web app. imgstrip now requires **Pillow 13.0.0
-or later** (it asked for 11.2 or later before).
+or later** (it asked for 11.2 or later before). Pillow 13 needs Python 3.11, so imgstrip now requires **Python 3.11 or
+newer**; Python 3.10 reached end of life on 1 October 2026 and gets no further security fixes.
 
 ### Security
 
@@ -24,8 +25,11 @@ or later** (it asked for 11.2 or later before).
   Content Credentials switch, and later the Remove button, while the page was still starting or moving, so the click
   sometimes did not land. The test now waits until the page has finished starting and flips the switch and presses
   Remove through events. This is a fix to the test; the app is unchanged.
-- `tests/test_pillow_floor.py` checks that the installed Pillow meets the floor the package declares, so a test run can
-  never quietly use a Pillow below it.
+- `test_the_strip_size_never_changes_the_lsb_statistics` passed `None` to `pytest.approx` for the four image shapes that are too
+  small for the weighted estimate, which pytest 9.2.0 refuses with a `TypeError`. The test now checks for `None` first.
+- `tests/test_pillow_floor.py` checks that the installed Pillow meets the floor the package declares, and that
+  `requires-python` is no lower than the Python that Pillow's floor needs, so a test run can never quietly use a Pillow
+  below it and the package can never declare a Python it cannot install on.
 
 ## [2.0.0]
 

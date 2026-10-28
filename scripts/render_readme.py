@@ -8,7 +8,7 @@ The values come from the files that own them, so nothing is typed twice:
 
     {{VERSION}}        __version__ in src/imgstrip/__init__.py            (1.2.2)
     {{VERSION_BADGE}}  the same, escaped for a shields.io static badge   (1.2.2)
-    {{PYTHON_MIN}}     requires-python in pyproject.toml, lower bound    (3.10)
+    {{PYTHON_MIN}}     requires-python in pyproject.toml, lower bound    (3.11)
 
 Standard library only, and it never imports imgstrip, so it runs before anything is installed.
 

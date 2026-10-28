@@ -6,7 +6,7 @@
 <br>
 
 [![Version](https://img.shields.io/badge/version-2.0.1-2fbf8f?style=flat-square)](https://pypi.org/project/imgstrip/)
-[![Python](https://img.shields.io/badge/python-3.10%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://pypi.org/project/imgstrip/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://pypi.org/project/imgstrip/)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-blue?style=flat-square)](https://github.com/lloydsato/imgstrip/blob/main/LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/lloydsato/imgstrip/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/lloydsato/imgstrip/actions/workflows/ci.yml)
 ![Runs locally](https://img.shields.io/badge/runs-100%25%20local-2fbf8f?style=flat-square)
@@ -79,7 +79,7 @@ Your original file is never touched. The clean copy is saved next to it.
 
 ## Quick start
 
-You need **Python 3.10 or newer**.
+You need **Python 3.11 or newer**.
 
 ```console
 pip install imgstrip

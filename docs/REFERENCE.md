@@ -27,7 +27,7 @@ clean    DSCN0010.clean.jpg (JPEG 640x480)
 
 ## Install
 
-Requires Python 3.10+.
+Requires Python 3.11+.
 
 ```console
 pip install .            # installs Pillow, numpy and pillow-heif (for iPhone HEIC photos)

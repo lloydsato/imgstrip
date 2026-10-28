@@ -152,7 +152,10 @@ def test_the_strip_size_never_changes_the_lsb_statistics(monkeypatch, shape):
         strips = analysis._channel_stats(channel)
         assert (strips.pairs, strips.x, strips.z, strips.w) == (whole.pairs, whole.x, whole.z, whole.w)
         assert strips.spa() == whole.spa()
-        assert strips.ws() == pytest.approx(whole.ws(), rel=1e-12, abs=1e-15)
+        if whole.ws() is None:  # a strip too small for the weighted estimate has none; newer pytest refuses approx(None)
+            assert strips.ws() is None
+        else:
+            assert strips.ws() == pytest.approx(whole.ws(), rel=1e-12, abs=1e-15)
 
 
 def test_the_integer_ws_terms_are_the_floating_point_formula_to_the_bit():
