@@ -3,6 +3,65 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
+## [2.0.2]
+
+Fixes and hardening found in a line-by-line review of 2.0.1. No change to what the engine writes, to the verifier or to
+the sandbox; every fix has a test.
+
+### Security
+
+- **Text from a file could reach the terminal unfiltered.** File names, and metadata shown by `--check`, `-v` and
+  `--check --deep`, were printed as they were, so a name or a tag holding terminal escape sequences (cursor moves, a
+  changed window title) could rewrite what the person sees. The command line now writes every control character
+  (including the C1 range and the characters that reorder text, such as U+202E) as an escape (`\x1b`, `\u202e`).
+  `--json` output already escaped them and is unchanged. The web app's file-name cleaner had the same gap for the C1
+  range and the reordering characters; it now strips them.
+- **The web app read an upload before it took a place in the queue.** Requests that were waiting for a free slot
+  already held their whole upload in memory, so a few slow or large requests could use far more memory than the slot
+  count suggests. The body is now read only once the request has a slot, and an upload that arrives slower than about
+  1 MiB/s (after a minute's grace) is cut off with a 408.
+
+### Fixed
+
+- **Option errors read as crashes or did odd things.** `--suffix` with a path separator (`-s "../x"`, `-s /`) ended in
+  "internal error: ValueError"; it is now a usage error. `--max-pixels -5` reported "-0 MP"; it must now be a positive
+  whole number. `-o all.jpg a.png b.png` made a directory called `all.jpg`; with several files, an `-o` that does not
+  exist yet and looks like a file name is refused (create the directory first, or give a name without an image
+  extension). A symbolic link loop, or a link to nothing, now says so instead of "no such file".
+- **Making a file's permissions raced with other threads.** The default mode of a new file was found by setting the
+  process umask to zero and putting it back, which another thread could observe. On Linux the umask is now read from
+  `/proc/self/status`; elsewhere it is read once when the module loads.
+- **The refusal of a very noisy picture did not say why or what to do.** A picture of static or dense grain (a lossy
+  codec reproduces it worst) can fail the pixel check of a lossy output ("re-encoded image deviates too much", or the
+  8x8 block message). Both messages now say so and point to `--format png`. We tested the way out before writing it:
+  PNG always gets such a picture through, and a higher `-q` does not (the allowed error shrinks as the quality rises),
+  so the message does not suggest that. Behaviour is unchanged: the picture is still refused and nothing is written.
+- **A test that could not fail.** `test_new_files_respect_umask` referred to a name that no longer existed and accepted
+  two different modes; it now checks the exact mode.
+
+### Documentation
+
+- The README said that on macOS the decoder "cannot write to files". Only Linux with Landlock stops it creating,
+  changing and deleting files; on macOS and older kernels the limit is that it cannot write data (`RLIMIT_FSIZE`), as
+  `docs/REFERENCE.md` already said. The README now says the same.
+- The sandbox cost is given as it was measured on a two-core test machine, not as "about 15 ms per file": about 5 to
+  10 ms for a small picture, about 0.2 s for a 12-megapixel photo, and about 0.2 s once per run to start it.
+- `SECURITY.md` says how to report a vulnerability privately, and what counts as one.
+
+### Project
+
+- **`.github/workflows/fuzz.yml` is in the repository.** 1.2.5 and later changelogs and `fuzz/run.py` name it, but it
+  was not in the 2.0.1 tree. Every Atheris target runs for a minute on each push and pull request and for half an hour
+  each night; a second job (night and on request) fuzzes the decoders through a Pillow built with AddressSanitizer and
+  UndefinedBehaviorSanitizer. A crashing input is kept as an artifact.
+- Package metadata: author, keywords, classifiers, project URLs (documentation, changelog, source, security policy).
+  The numpy floor is now `numpy>=1.26` (1.24 has no build for Python 3.12 and later, so it could not be met there).
+  Python 3.14 is in the test matrix, and a new CI job installs the lowest versions pyproject allows
+  (numpy 1.26.4, Pillow 13.0.0, pillow-heif 0.18.0) on Python 3.11.
+- GitHub Actions are pinned to commits (the version is in a comment), workflows get read-only tokens, and Dependabot
+  keeps the pins current. A `.gitignore` is added.
+- About sixty `# noqa` comments for rules this project does not enable are plain comments now.
+
 ## [2.0.1]
 
 A dependency floor, no code change in the engine, the command line or the web app. imgstrip now requires **Pillow 13.0.0

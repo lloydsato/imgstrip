@@ -804,7 +804,7 @@ def test_the_page_sends_nothing_for_a_switch_that_cannot_apply():
         "const p={format:'',icc:'convert',auto_orient:true,scrub_alpha:true};"
         "process.stdout.write(JSON.stringify(S.effective(p,S.evaluate(f,p,{limits:{}})).scrub_alpha));"
     )
-    run = lambda facts: subprocess.run(["node", "-e", script, str(SUPPORT_JS), json.dumps(facts)], capture_output=True, text=True).stdout  # noqa: E731
+    run = lambda facts: subprocess.run(["node", "-e", script, str(SUPPORT_JS), json.dumps(facts)], capture_output=True, text=True).stdout
     assert run(_facts_of()) == "true" and run(_facts_of(alpha=False, mode="RGB")) == "false"
 
 

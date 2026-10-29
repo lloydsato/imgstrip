@@ -328,7 +328,7 @@ def test_signing_works_for_many_files_at_once(app, signer, creds):
             r = clean_signed(app, data, f"p{i}.png")
             _, out = app.request("GET", f"/api/result/{r['id']}")
             results.append(creds.read_credential(out).imgstrip)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             errors.append(repr(exc))
 
     threads = [threading.Thread(target=work, args=(i,)) for i in range(5)]

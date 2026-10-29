@@ -121,7 +121,7 @@ def hidden_in_pixels(data: bytes) -> bool:
         _Job._verify_nothing_hidden_in_pixels(0, im, hidden, arr is not None, False)
     except VerificationError:
         return True
-    except Exception:  # noqa: BLE001 - undecodable data is "noticed" elsewhere
+    except Exception:  # undecodable data is "noticed" elsewhere
         return False
     return False
 
@@ -132,7 +132,7 @@ def noticed(mutated: bytes, base_view) -> bool:
         return True
     try:
         view = oracles.our_view(mutated)
-    except Exception:  # noqa: BLE001 - a reader that cannot decode the file has noticed
+    except Exception:  # a reader that cannot decode the file has noticed
         return True
     return oracles.compare(view, base_view) is not None or hidden_in_pixels(mutated)
 

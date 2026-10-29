@@ -232,11 +232,11 @@ def scan_pixels(data: bytes) -> PixelScan:
                     break
                 try:
                     im.seek(index)
-                except Exception as exc:  # noqa: BLE001 - decoders raise arbitrary errors on corrupt data
+                except Exception as exc:  # decoders raise arbitrary errors on corrupt data
                     raise StripError(f"cannot decode frame {index + 1}: {exc}") from None
             try:
                 im.load()
-            except Exception as exc:  # noqa: BLE001 - decoders raise arbitrary errors on corrupt data
+            except Exception as exc:  # decoders raise arbitrary errors on corrupt data
                 raise StripError(f"cannot decode image: {exc}") from None
             width, height = im.size
             budget -= width * height

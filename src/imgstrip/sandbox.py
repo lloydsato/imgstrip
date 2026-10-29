@@ -447,7 +447,7 @@ def _job(name: str, params: dict, data: bytes):
                 return {"pixels": np.asarray(im), "mode": im.mode}
             except StripError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - decoders raise anything on corrupt data
+            except Exception as exc:  # decoders raise anything on corrupt data
                 raise StripError(f"cannot decode image ({type(exc).__name__}: {exc})") from None
     if name == "scan":
         from .analysis import scan_pixels
@@ -465,7 +465,7 @@ def _job(name: str, params: dict, data: bytes):
         try:
             import resource
 
-            limit = lambda which: list(resource.getrlimit(which))  # noqa: E731
+            limit = lambda which: list(resource.getrlimit(which))
             fsize, core_, cpu = (limit(r) for r in (resource.RLIMIT_FSIZE, resource.RLIMIT_CORE, resource.RLIMIT_CPU))
         except ImportError:  # pragma: no cover - Windows: a process of its own, and nothing more
             fsize = core_ = cpu = None
@@ -533,7 +533,7 @@ def _answer(name: str, params: dict, data: bytes, out: _Writer) -> None:
         out.frame(b"X", json.dumps({"kind": "strip", "message": str(exc)}).encode())
     except MemoryError:
         out.frame(b"X", json.dumps({"kind": "memory", "message": "not enough memory to decode this image"}).encode())
-    except BaseException as exc:  # noqa: BLE001 - every failure must reach the main process as a message
+    except BaseException as exc:  # every failure must reach the main process as a message
         out.frame(b"X", json.dumps({"kind": "error", "message": f"{type(exc).__name__}: {exc}"}).encode())
 
 
@@ -584,7 +584,7 @@ def _serve() -> None:
     out = _Writer(stdout)
     try:
         _preload()
-    except BaseException as exc:  # noqa: BLE001
+    except BaseException as exc:
         out.frame(b"F", f"{type(exc).__name__}: {exc}".encode())
         out.flush()
         return
@@ -622,7 +622,7 @@ def _serve() -> None:
                 header["landlock"] = _restrict()
                 with os.fdopen(write_end, "wb", buffering=_CHUNK) as fh:
                     _answer(header["job"], header, data, _Writer(fh))
-            except BaseException:  # noqa: BLE001
+            except BaseException:
                 code = 70
             finally:
                 os._exit(code)

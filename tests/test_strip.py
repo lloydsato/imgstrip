@@ -681,7 +681,7 @@ def test_pillow_guard_is_thread_safe():
                     warnings.warn(f"worker {n} round {round_ % 3}", stacklevel=2)
                     inside.wait(10)
             seen[n] = collected
-        except BaseException as exc:  # noqa: BLE001 - reported on the main thread
+        except BaseException as exc:  # reported on the main thread
             errors.append(exc)
 
     threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]

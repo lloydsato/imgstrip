@@ -28,7 +28,6 @@ import sys
 import tempfile
 
 _TEMP_PREFIX = ".imgstrip-"
-_UMASK: int | None = None
 # What a file system says when it has no hard links (FAT, exFAT, some network shares and FUSE file systems).
 _NO_LINKS = {
     getattr(errno, name)
@@ -39,13 +38,42 @@ _NO_LINKS = {
 _NO_NOREPLACE = {getattr(errno, name) for name in ("EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP") if hasattr(errno, name)}
 
 
+def _umask_from_proc() -> int | None:
+    """The process's umask as Linux reports it (4.7 and later), or None where that is not available."""
+    try:
+        with open("/proc/self/status", "rb") as fh:
+            for line in fh:
+                if line.startswith(b"Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _umask_by_setting() -> int:
+    """Read the umask the only portable way: set one and put the old one back.
+
+    For the instant between the two calls the process's umask is 0, and a file another thread creates then gets
+    permissions it should not have, so this runs once, when the module is imported, before any thread of ours exists.
+    """
+    old = os.umask(0)
+    os.umask(old)
+    return old
+
+
+_UMASK = _umask_by_setting() if _umask_from_proc() is None else None
+
+
 def default_mode() -> int:
-    """The permission bits a new file gets from the process's umask."""
-    global _UMASK
-    if _UMASK is None:
-        _UMASK = os.umask(0)
-        os.umask(_UMASK)
-    return 0o666 & ~_UMASK
+    """The permission bits a new file gets from the process's umask.
+
+    Where the system reports the umask (Linux) this is read each time and the umask is never touched; elsewhere it is
+    the value read when the module was imported.
+    """
+    umask = _umask_from_proc()
+    if umask is None:
+        umask = _UMASK if _UMASK is not None else 0o022
+    return 0o666 & ~umask
 
 
 def _temporary(directory: str, data: bytes | os.PathLike, mode: int | None) -> str:

@@ -347,7 +347,7 @@ def _exif_findings(raw: bytes, report: Report, label: str = "EXIF") -> None:
         ifd1 = exif.get_ifd(-1)
         if ifd1 and (0x0201 in ifd1 or 0x0111 in ifd1):
             report.add(HIDDEN, "Embedded EXIF thumbnail", f"{ifd1.get(0x0202, '?')} bytes")
-    except Exception:  # noqa: BLE001 - untrusted data, any parser failure is "opaque"
+    except Exception:  # untrusted data, any parser failure is "opaque"
         report.add(METADATA, label, detail + " (unparseable)")
 
 

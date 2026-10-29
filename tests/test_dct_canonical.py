@@ -133,7 +133,7 @@ def test_padding_bits_of_the_last_byte_are_not_a_channel():
             try:
                 if dct.visible_equal(dct.read(candidate), reference):
                     seen.add(candidate)
-            except Exception:  # noqa: BLE001 - an invalid candidate is simply not a variant
+            except Exception:  # an invalid candidate is simply not a variant
                 pass
     assert len(seen) > 1, "no padding bit could be changed, the test does not test anything"
     assert {canonical(v) for v in seen} == {out}

@@ -64,6 +64,17 @@ INPUT_FORMATS = (
     "ICNS",
     "DDS",
 )
+
+# Added to the two verifier refusals of a lossy output.  A picture of fine noise (static, dense grain) is what a lossy
+# codec reproduces worst, so its re-encode can fail the pixel check however high the quality is set: a higher quality
+# makes the allowed error smaller too.  PNG is lossless, so its pixel check is exact and it keeps the defaults'
+# guarantees (--jpeg-lossless would also get a JPEG through, but it keeps the picture's compressed data, so it is
+# not offered here).
+LOSSY_ADVICE = (
+    "If the picture is very noisy (static, dense grain), lossy compression cannot reproduce it this closely; to keep "
+    "every pixel exactly, save it as PNG instead (--format png on the command line; the file will be larger)."
+)
+
 OUTPUT_FORMATS = ("JPEG", "PNG", "WEBP", "GIF", "TIFF", "BMP", "AVIF", "HEIF")
 # The longest side the encoders accept, measured against Pillow's own (an image past it makes the encoder fail).
 OUTPUT_MAX_SIDE = {"JPEG": 65500, "WEBP": 16383, "GIF": 65535, "AVIF": 32768}
@@ -296,7 +307,7 @@ _guard_saved: dict = {}
 _guard_local = threading.local()
 
 
-def _record_warning(message, category, filename, lineno, file=None, line=None):  # noqa: ARG001 - warnings hook
+def _record_warning(message, category, filename, lineno, file=None, line=None):  # warnings hook
     sinks = getattr(_guard_local, "sinks", None)
     if sinks:
         sinks[-1].append(warnings.WarningMessage(message, category, filename, lineno))
@@ -368,7 +379,7 @@ def open_image(data: bytes) -> Image.Image:
                 f"unsupported {fmt or 'PSD'} variant (e.g. 16-bit Lab or 16-bit PSD); convert it to a common format first"
             ) from None
         raise StripError("not a supported image format") from None
-    except Exception as exc:  # noqa: BLE001 - corrupt headers raise arbitrary exceptions
+    except Exception as exc:  # corrupt headers raise arbitrary exceptions
         raise StripError(f"cannot read image: {exc}") from None
 
 
@@ -387,7 +398,7 @@ def camera_raw_kind(data: bytes) -> str | None:
             tags = {e[0] for e in entries}
             if 50706 in tags:
                 return "DNG"
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
     if data[:4] in (b"IIRO", b"IIRS", b"MMOR"):
         return "Olympus ORF"
@@ -615,7 +626,7 @@ def _orientation(im: Image.Image, warn: list[str]) -> int:
             value = exif.get(0x0112)
         elif hasattr(im, "tag_v2"):
             value = im.tag_v2.get(274)
-    except Exception:  # noqa: BLE001 - corrupt EXIF must not stop stripping
+    except Exception:  # corrupt EXIF must not stop stripping
         warn.append("EXIF data is corrupt; orientation could not be read")
         return 1
     if isinstance(value, (tuple, list)) and value:
@@ -843,7 +854,7 @@ class _Job:
                 ) from None
             except MemoryError:
                 raise StripError("not enough memory to process this image") from None
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 # Decoders raise all kinds of exceptions on corrupt input
                 # (IndexError, KeyError, RuntimeError, ...).  Nothing has been
                 # written at this point, so report it as a per-file failure.
@@ -1120,7 +1131,7 @@ class _Job:
             raise
         except MemoryError:
             raise StripError("not enough memory to decode this image") from None
-        except Exception as exc:  # noqa: BLE001 - corrupt data raises arbitrary errors
+        except Exception as exc:  # corrupt data raises arbitrary errors
             raise StripError(f"cannot decode image: {exc}") from None
         if animated:
             # A frame extending past the logical screen makes Pillow enlarge the
@@ -1659,7 +1670,7 @@ class _Job:
             sampling = JpegImagePlugin.get_sampling(im)
             if sampling in (0, 1, 2):
                 return sampling
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return 2
 
@@ -1978,7 +1989,9 @@ class _Job:
                 continue
             error = total / max(1, samples) * (255.0 / full)
             if error > tolerance:
-                raise VerificationError(f"frame {i}: re-encoded image deviates too much (mean error {error:.1f})")
+                raise VerificationError(
+                    f"frame {i}: re-encoded image deviates too much (mean error {error:.1f}). {LOSSY_ADVICE}"
+                )
             self._check_blocks(i, blocks, out)
         check.close()  # Pillow's decode is no longer needed while the independent reader works
         del check
@@ -2040,7 +2053,7 @@ class _Job:
                 raise VerificationError(
                     f"frame {i}: the 8x8 block at x={x}, y={y} differs from the written pixels by {value:.1f} levels "
                     f"(RMS, {name}; a re-encode at this quality moves no block more than {limit:.1f}), so part of the "
-                    "picture changed"
+                    f"picture changed. {LOSSY_ADVICE}"
                 )
 
     @staticmethod
@@ -2436,5 +2449,5 @@ def canonical_frames_here(data: bytes, max_pixels: int = DEFAULT_MAX_PIXELS) -> 
             raise StripError("image is too large to compare") from None
         except MemoryError:
             raise StripError("not enough memory to compare these images") from None
-        except Exception as exc:  # noqa: BLE001 - decoders raise anything on corrupt data
+        except Exception as exc:  # decoders raise anything on corrupt data
             raise StripError(f"cannot decode image ({type(exc).__name__}: {exc})") from exc

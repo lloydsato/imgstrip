@@ -5,7 +5,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-2.0.1-2fbf8f?style=flat-square)](https://pypi.org/project/imgstrip/)
+[![Version](https://img.shields.io/badge/version-2.0.2-2fbf8f?style=flat-square)](https://pypi.org/project/imgstrip/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://pypi.org/project/imgstrip/)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-blue?style=flat-square)](https://github.com/lloydsato/imgstrip/blob/main/LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/lloydsato/imgstrip/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/lloydsato/imgstrip/actions/workflows/ci.yml)
@@ -98,7 +98,7 @@ Check which version you have:
 
 ```console
 $ imgstrip --version
-imgstrip 2.0.1
+imgstrip 2.0.2
 ```
 
 Want to be sure the install works? Run `imgstrip --self-test`. It builds 21 booby-trapped test images, cleans them in every mode, and has independent image readers confirm the results.
@@ -133,7 +133,7 @@ flowchart LR
     E -->|no| X
 ```
 
-If either check fails, **nothing is written**. Failing safe is the whole point. The decoding runs in a fresh process for every file, which hands back only pixels and a few checked values and, on Linux and macOS, cannot write to files, so a hostile file that exploits a decoder bug is cut off from imgstrip's own memory and from the file it writes ([what it does and does not stop](docs/REFERENCE.md#decoding-in-a-sandbox); `--no-sandbox` turns it off).
+If either check fails, **nothing is written**. Failing safe is the whole point. The decoding runs in a fresh process for every file, which hands back only pixels and a few checked values and, on Linux (with Landlock), cannot create, change or delete files (on macOS and older kernels it is limited to not writing data), so a hostile file that exploits a decoder bug is cut off from imgstrip's own memory and from the file it writes ([what it does and does not stop](docs/REFERENCE.md#decoding-in-a-sandbox); `--no-sandbox` turns it off).
 
 (If you're reading this on PyPI and the diagram shows as plain text, the [GitHub page](https://github.com/lloydsato/imgstrip#how-it-works) renders it.)
 
@@ -281,3 +281,5 @@ imgstrip is free software, released under the [BSD 3-Clause License](https://git
 Versions up to 1.2.0 were released under the GNU Affero General Public License v3.0 or later; 1.2.1 and later are BSD-3-Clause.
 
 Questions, bug reports and odd files that break it are welcome in the [issue tracker](https://github.com/lloydsato/imgstrip/issues).
+
+A way to make imgstrip release a file that still carries metadata or hidden data, or to get out of its decoder sandbox or its local web app, is a security problem: please report it privately as described in [SECURITY.md](https://github.com/lloydsato/imgstrip/blob/main/SECURITY.md), not in the issue tracker.

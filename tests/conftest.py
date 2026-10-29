@@ -9,9 +9,9 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from imgstrip import fixtures  # noqa: E402
-from imgstrip.inspect import inspect_bytes  # noqa: E402
-from imgstrip.selftest import exiftool_findings  # noqa: E402
+from imgstrip import fixtures
+from imgstrip.inspect import inspect_bytes
+from imgstrip.selftest import exiftool_findings
 
 # The Content Credentials tests need the optional C2PA support; without it they are not even collected
 # (several import `cryptography` or `c2pa` at module level).

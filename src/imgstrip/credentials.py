@@ -150,7 +150,7 @@ def available() -> bool:
 def sdk_version() -> str | None:
     try:
         return _sdk().sdk_version()
-    except Exception:  # noqa: BLE001 - purely informational
+    except Exception:  # purely informational
         return None
 
 
@@ -313,7 +313,7 @@ class Identity:
                 if cand.subject == top.issuer:
                     try:
                         top.verify_directly_issued_by(cand)
-                    except Exception:  # noqa: BLE001 - not the issuer: keep looking
+                    except Exception:  # not the issuer: keep looking
                         continue
                     nxt = cand
                     break
@@ -425,7 +425,7 @@ def _load_key(pem: bytes, passphrase: bytes | None):
         ):
             raise PassphraseRequired("The passphrase is wrong, or the key file is damaged.") from None
         raise CredentialError("The private key could not be read (is it a PEM-encoded key?).") from None
-    except Exception:  # noqa: BLE001 - never echo library internals that might touch key bytes
+    except Exception:  # never echo library internals that might touch key bytes
         raise CredentialError("The private key could not be read.") from None
 
 
@@ -461,7 +461,7 @@ def load_pkcs12_identity(data: bytes, passphrase: bytes | None = None) -> Identi
         if passphrase is not None:
             raise PassphraseRequired("The passphrase is wrong, or the bundle is damaged.") from None
         raise CredentialError("The certificate bundle could not be read (is it a .p12 / .pfx file?).") from None
-    except Exception:  # noqa: BLE001
+    except Exception:
         raise CredentialError("The certificate bundle could not be read (is it a .p12 / .pfx file?).") from None
     if key is None or cert is None:
         raise CredentialError("The bundle must contain a private key and its certificate.")
@@ -947,7 +947,7 @@ def read_source_credentials(source: bytes, result: Result) -> dict | None:
         cred = read_credential(source)
     except CredentialsUnavailable:
         raise
-    except Exception:  # noqa: BLE001 - the original's credentials are only reported, never trusted
+    except Exception:  # the original's credentials are only reported, never trusted
         return info
     info["readable"] = cred.state is not None
     info["valid"] = None if cred.state is None else cred.state in ("Valid", "Trusted")
@@ -1108,7 +1108,7 @@ def _sign_bytes(
         raise
     except c2pa.C2paError as exc:
         raise CredentialError(_sdk_rejection(_sdk_message(exc))) from None
-    except Exception as exc:  # noqa: BLE001 - never let an SDK exception carry anything else
+    except Exception as exc:  # never let an SDK exception carry anything else
         raise CredentialError(f"Signing failed ({type(exc).__name__}).") from None
 
 
@@ -1258,7 +1258,7 @@ def check_cose_signature(manifest: jumbf.Manifest, expect_chain: list | None = N
             raise CredentialError("The signing key type is not supported.")
     except CredentialError:
         raise
-    except Exception:  # noqa: BLE001 - InvalidSignature and friends
+    except Exception:  # InvalidSignature and friends
         raise CredentialError("The signature does not verify.") from None
     return leaf
 
@@ -1514,7 +1514,7 @@ def read_credential(data: bytes, anchors: bytes | None = None) -> Credential:
         cred.problems.append(f"the credential could not be read ({message})")
         cred.state = "Invalid"
         return cred
-    except Exception:  # noqa: BLE001 - the SDK's wrapper raises plain KeyError/TypeError on some damaged manifests
+    except Exception:  # the SDK's wrapper raises plain KeyError/TypeError on some damaged manifests
         cred.problems.append("the credential could not be read (it is damaged)")
         cred.state = "Invalid"
         return cred

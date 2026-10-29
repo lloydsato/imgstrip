@@ -117,3 +117,50 @@ def test_verification_still_rejects_a_picture_that_changed():
     buf = io.BytesIO()
     Image.fromarray(smooth).save(buf, "JPEG", quality=90)
     assert strip_image(buf.getvalue(), core.Options()).verified_exact is not None
+
+
+def _noise(fmt, size=96, quality=90, seed=21):
+    import io
+
+    from PIL import Image
+
+    rng = np.random.default_rng(seed)
+    buf = io.BytesIO()
+    Image.fromarray(rng.integers(0, 256, (size, size, 3), dtype=np.uint8)).save(buf, fmt, quality=quality)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("fmt", ["JPEG", "WEBP"])
+def test_the_refusal_of_a_noisy_picture_says_what_to_do_and_that_advice_works(fmt):
+    """The message points to PNG; PNG must really get the same picture through (checked, not assumed)."""
+    from imgstrip import VerificationError, strip_image
+
+    data = _noise(fmt)
+    with pytest.raises(VerificationError) as refused:
+        strip_image(data, core.Options())
+    text = str(refused.value)
+    assert "deviates too much" in text and core.LOSSY_ADVICE in text and "--format png" in text
+    result = strip_image(data, core.Options(format="png"))
+    assert result.data[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_a_higher_quality_does_not_get_a_noisy_picture_through():
+    """Why the message does not say 'try a higher quality': the allowed error shrinks as the quality rises."""
+    from imgstrip import VerificationError, strip_image
+
+    data = _noise("JPEG")
+    for quality in (95, 100):
+        with pytest.raises(VerificationError, match="deviates too much"):
+            strip_image(data, core.Options(quality=quality))
+
+
+def test_the_block_refusal_carries_the_same_advice():
+    want = np.full((16, 16, 3), 128, np.uint8)
+    got = want.copy()
+    got[8:16, 8:16] = 0
+    blocks = core.BlockError()
+    blocks.add(got, want, False, 0)
+    job = core._Job(b"", core.Options(), None)
+    with pytest.raises(core.VerificationError, match=r"8x8 block at x=8, y=8.*part of the picture changed\. If the picture is very noisy") as e:
+        job._check_blocks(0, blocks, "JPEG")
+    assert "--format png" in str(e.value)

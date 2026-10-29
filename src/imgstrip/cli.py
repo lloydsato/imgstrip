@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import collections
 import concurrent.futures
+import errno
 import functools
 import getpass
 import itertools
 import json
 import os
+import re
 import secrets
 import stat
 import sys
@@ -129,6 +131,39 @@ class Outcome:
 # --------------------------------------------------------------------------
 # Argument parsing
 # --------------------------------------------------------------------------
+
+
+# Text that came from a file name, a path or a file's own contents must never act on the terminal that shows it:
+# an escape sequence in a name could clear the screen, retitle the window or forge a "cleaned" line, and a right-to-left
+# override could make a name read backwards.  Every human-readable line is passed through ``safe_text``; ``--json``
+# output is escaped by the JSON encoder instead.
+_UNSAFE_TEXT = re.compile("[\x00-\x1f\x7f-\x9f\ud800-\udfff\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def safe_text(text: str) -> str:
+    """``text`` with control characters, lone surrogates (bytes of a name that is not UTF-8) and bidirectional
+    overrides written out as ``\\x1b`` or ``\\u202e``, so they show up instead of acting."""
+
+    def write_out(match: re.Match) -> str:
+        code = ord(match.group())
+        return f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}"
+
+    return _UNSAFE_TEXT.sub(write_out, text)
+
+
+def _say(text: str = "", file=None) -> None:
+    """``print`` for lines meant for a person's terminal."""
+    print(safe_text(text), file=file if file is not None else sys.stdout)
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -256,7 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     proc.add_argument(
         "--max-pixels",
-        type=int,
+        type=_positive_int,
         default=DEFAULT_MAX_PIXELS,
         metavar="N",
         help=f"refuse images larger than N pixels (default: {DEFAULT_MAX_PIXELS // 1_000_000}M)",
@@ -412,8 +447,20 @@ def discover(paths: list[str], recursive: bool, suffix: str, problems: list[Outc
                 seen.add(key)
                 tasks.append(Task(str(path), None))
         else:
-            fail(raw, "no such file or directory")
+            fail(raw, _why_missing(raw))
     return tasks
+
+
+def _why_missing(raw: str) -> str:
+    """Why ``raw`` is not there: it may be a symbolic link that goes nowhere or round in a circle."""
+    try:
+        os.stat(raw)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return "symbolic links lead round in a circle"
+        if os.path.islink(raw):
+            return "symbolic link to a file that does not exist"
+    return "no such file or directory"
 
 
 def output_extension(source: str, fmt: str) -> str:
@@ -608,7 +655,7 @@ def check_one(task: Task, deep: bool) -> Outcome:
 
             if credentials.available():
                 payload["credential"] = credentials.read_credential(data).as_dict()
-        except Exception as exc:  # noqa: BLE001 - the extra verdict is informational
+        except Exception as exc:  # the extra verdict is informational
             notes.append(f"credential could not be read: {exc}")
     return Outcome(task, "checked", payload=payload)
 
@@ -776,7 +823,7 @@ def _warn_key_permissions(path: str) -> None:
     except OSError:
         return
     if os.name == "posix" and mode & 0o077:
-        print(f"warning: {path} can be read by other users (mode {mode:04o}); run: chmod 600 {path}", file=sys.stderr)
+        _say(f"warning: {path} can be read by other users (mode {mode:04o}); run: chmod 600 {path}", file=sys.stderr)
 
 
 def load_signing_identity(args):
@@ -943,10 +990,10 @@ def make_test_identity_files(args) -> int:
         write_new(names["root"], test.root_pem)
     except FileExistsError as exc:
         raise _Usage(f"will not overwrite: {exc.filename}") from None
-    print(f"created a TEST identity for '{args.c2pa_test_name}' in {folder}:")
-    print(f"  {names['chain'].name}   signing certificate   (--c2pa-cert)")
-    print(f"  {names['key'].name}     private key           (--c2pa-key)")
-    print(f"  {names['root'].name}        test root CA          (--c2pa-trust-anchors)")
+    _say(f"created a TEST identity for '{args.c2pa_test_name}' in {folder}:")
+    _say(f"  {names['chain'].name}   signing certificate   (--c2pa-cert)")
+    _say(f"  {names['key'].name}     private key           (--c2pa-key)")
+    _say(f"  {names['root'].name}        test root CA          (--c2pa-trust-anchors)")
     print("Credentials made with it are cryptographically valid but UNTRUSTED: public viewers show 'Unverified'.")
     print("Use it to try the feature. For publication, use a certificate from an authority on the C2PA Trust List.")
     return EXIT_OK
@@ -1073,89 +1120,89 @@ class Reporter:
         a = self.args
         p = self.stream
         if o.status == "failed":
-            print(f"FAILED   {name}: {o.message}", file=sys.stderr)
+            _say(f"FAILED   {name}: {o.message}", file=sys.stderr)
             return
         if a.quiet:
             return
         if o.status == "skipped":
             if a.verbose:
-                print(f"skipped  {name}: {o.message}", file=p)
+                _say(f"skipped  {name}: {o.message}", file=p)
             return
         if o.status in ("verified", "unverified"):
             pl = o.payload
             word = "ok" if o.status == "verified" else "PROBLEM"
-            print(f"{word:<8} {name} ({pl.get('format') or 'unknown'})", file=p)
+            _say(f"{word:<8} {name} ({pl.get('format') or 'unknown'})", file=p)
             for line in _credential_lines(pl["credential"]):
-                print(f"           {line}", file=p)
+                _say(f"           {line}", file=p)
             audit = pl.get("audit")
             if audit:
                 if audit["ok"]:
-                    print(
+                    _say(
                         f"           audit: the original matches; pixels {_PIXEL_WORDS.get(audit['measured'], audit['measured'])}",
                         file=p,
                     )
                 else:
                     for problem in audit["problems"] or ["the audit did not pass"]:
-                        print(f"           audit problem: {problem}", file=p)
+                        _say(f"           audit problem: {problem}", file=p)
             return
         if o.status == "checked":
             pl = o.payload
             size = f" {pl['size'][0]}x{pl['size'][1]}" if pl.get("size") else ""
             fmt = pl.get("format") or "unknown"
             if pl["clean"]:
-                print(f"clean    {name} ({fmt}{size})", file=p)
+                _say(f"clean    {name} ({fmt}{size})", file=p)
             else:
                 n = len(pl["findings"])
-                print(f"FOUND    {name} ({fmt}{size}): {n} item(s)", file=p)
+                _say(f"FOUND    {name} ({fmt}{size}): {n} item(s)", file=p)
                 for f in pl["findings"]:
                     detail = f": {f['detail']}" if f["detail"] else ""
-                    print(f"           [{f['category']}] {f['label']}{detail}", file=p)
+                    _say(f"           [{f['category']}] {f['label']}{detail}", file=p)
             if pl.get("error"):
-                print(f"           [structure] {pl['error']}", file=p)
+                _say(f"           [structure] {pl['error']}", file=p)
             for note in pl.get("notes", []):
-                print(f"           note: {note}", file=p)
-            print(f"           {_stego_line(pl['steganography'])}", file=p)
+                _say(f"           note: {note}", file=p)
+            _say(f"           {_stego_line(pl['steganography'])}", file=p)
             if pl.get("credential"):
                 for line in _credential_lines(pl["credential"]):
-                    print(f"           {line}", file=p)
+                    _say(f"           {line}", file=p)
             return
         pl = o.payload
         dest = "<stdout>" if o.destination == STDIO else ("(in place)" if a.in_place else o.destination)
         verb = "would clean" if a.dry_run else "cleaned"
         sizes = f"{_human_size(pl['bytes_in'])} -> {_human_size(pl['bytes_out'])}"
-        print(f"{verb:<8} {name} -> {dest}  ({pl['output_format']} {pl['size'][0]}x{pl['size'][1]}, {sizes})", file=p)
+        _say(f"{verb:<8} {name} -> {dest}  ({pl['output_format']} {pl['size'][0]}x{pl['size'][1]}, {sizes})", file=p)
         removed = pl["removed"]
         if a.verbose:
             for f in removed:
                 detail = f": {f['detail']}" if f["detail"] else ""
-                print(f"           - removed [{f['category']}] {f['label']}{detail}", file=p)
+                _say(f"           - removed [{f['category']}] {f['label']}{detail}", file=p)
             for act in pl["actions"]:
-                print(f"           * {act}", file=p)
-            print(f"           verified by: {', '.join(pl['verified_by'])}", file=p)
+                _say(f"           * {act}", file=p)
+            _say(f"           verified by: {', '.join(pl['verified_by'])}", file=p)
             if pl["kept"]:
                 kept = ", ".join(f"{k} {v}" for k, v in pl["kept"].items())
-                print(f"           kept from the input: {kept}", file=p)
+                _say(f"           kept from the input: {kept}", file=p)
         elif removed:
             labels = []
             for f in removed:
                 if f["label"] not in labels:
                     labels.append(f["label"])
-            print(f"           removed: {', '.join(labels)}", file=p)
+            _say(f"           removed: {', '.join(labels)}", file=p)
         verdict = pl["steganography"]
         if a.deep or a.verbose or verdict["state"] in (stego.SCRUBBED, stego.DETECTED):
-            print(f"           {_stego_line(verdict)}", file=p)
+            _say(f"           {_stego_line(verdict)}", file=p)
         if pl.get("dct"):
             d = pl["dct"]
-            print(f"           jpeg coefficients: {d['headline']}: {d['summary']}. {d['caveat']}", file=p)
+            _say(f"           jpeg coefficients: {d['headline']}: {d['summary']}. {d['caveat']}", file=p)
         if pl.get("alpha"):
             al = pl["alpha"]
-            print(f"           transparency: {al['headline']}: {al['summary']}. {al['caveat']}", file=p)
+            _say(f"           transparency: {al['headline']}: {al['summary']}. {al['caveat']}", file=p)
         for w in pl["warnings"]:
-            print(f"           warning: {w}", file=p)
+            _say(f"           warning: {w}", file=p)
         cred = pl.get("credentials")
         if cred:
             who = cred["signer"] or "unknown signer"
-            print(
+            _say(
                 f"           signed: {who}, {cred['date']}, pixels {_PIXEL_WORDS[cred['pixel_integrity']]} [{cred['label']}]",
                 file=p,
             )
@@ -1249,6 +1296,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"--alpha-tolerance must be between {stego.ALPHA_TOLERANCE_MIN} and {stego.ALPHA_TOLERANCE_MAX}")
     if args.jobs is not None and args.jobs < 1:
         parser.error("--jobs must be at least 1")
+    if any(sep and sep in args.suffix for sep in ("/", "\\", os.sep, os.altsep)):
+        parser.error("--suffix is added to a file name, so it cannot contain a path separator")
     if args.paths.count(STDIO) > 1:
         parser.error("stdin can only be given once")
 
@@ -1268,6 +1317,19 @@ def main(argv: list[str] | None = None) -> int:
         and not Path(args.output).is_dir()
     ):
         parser.error("--output must be a directory when processing several files")
+    if (
+        args.output
+        and args.output != STDIO
+        and not single
+        and not Path(args.output).exists()
+        and not args.output.endswith(os.sep)
+        and format_from_name(args.output)
+    ):
+        # "-o all.jpg" with several inputs would otherwise create a directory called all.jpg and fill it.
+        parser.error(
+            f"--output {args.output} looks like a file name, but several files are being processed: "
+            "give a directory (create it first if its name should end in an image extension)"
+        )
 
     if names_output_file(args, single) and not args.check and not args.c2pa_verify:
         # "-o clean.png" must produce a PNG, not JPEG bytes under a .png name.
@@ -1303,7 +1365,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.json and not args.quiet:
                 for n in signing.assessment.notices:
                     if n.severity == "warning" or (n.severity == "info" and args.verbose):
-                        print(f"{'warning' if n.severity == 'warning' else 'note'}: {n.message}", file=sys.stderr)
+                        _say(f"{'warning' if n.severity == 'warning' else 'note'}: {n.message}", file=sys.stderr)
         elif args.c2pa_verify:
             anchors = load_anchors(args)
     except _Usage as exc:
@@ -1349,7 +1411,7 @@ def main(argv: list[str] | None = None) -> int:
                     pending.append((nxt, pool.submit(work, nxt)))
                 try:
                     handle(fut.result())
-                except Exception as exc:  # noqa: BLE001 - a crashed worker must not stop the batch
+                except Exception as exc:  # a crashed worker must not stop the batch
                     handle(Outcome(task, "failed", message=f"internal error: {exc}"))
     else:
         for task in tasks:
@@ -1357,7 +1419,7 @@ def main(argv: list[str] | None = None) -> int:
                 handle(work(task))
             except KeyboardInterrupt:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 handle(Outcome(task, "failed", message=f"internal error: {type(exc).__name__}: {exc}"))
 
     if args.c2pa_verify:

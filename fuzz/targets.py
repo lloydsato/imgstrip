@@ -98,7 +98,7 @@ def decode(data: bytes) -> None:
             for i in range(min(getattr(im, "n_frames", 1) or 1, 4)):
                 im.seek(i)
                 im.load()
-        except Exception:  # noqa: BLE001 - see the docstring
+        except Exception:  # see the docstring
             return
 
 
@@ -145,7 +145,7 @@ def seeds(target: str) -> dict[str, bytes]:
         for name in ("sRGB", "LAB", "XYZ"):
             try:
                 out[name] = ImageCms.ImageCmsProfile(ImageCms.createProfile(name)).tobytes()
-            except Exception:  # noqa: BLE001 - LittleCMS cannot serialise every built-in profile
+            except Exception:  # LittleCMS cannot serialise every built-in profile
                 pass
         for name, data in fx.items():
             profile = _embedded_profile(data)
@@ -158,7 +158,7 @@ def seeds(target: str) -> dict[str, bytes]:
             for fmt in ("JPEG", "PNG", "WEBP", "GIF", "TIFF", "AVIF", "HEIF"):
                 try:
                     store = jumbf.extract_store(data, fmt)
-                except Exception:  # noqa: BLE001 - only the fixtures that carry a store give a seed
+                except Exception:  # only the fixtures that carry a store give a seed
                     continue
                 if store:
                     out[name] = store
@@ -172,7 +172,7 @@ def seeds(target: str) -> dict[str, bytes]:
 def _embedded_profile(data: bytes) -> bytes | None:
     try:
         return open_image(data).info.get("icc_profile") or None
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 

@@ -10,9 +10,38 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
+authors = [{ name = "Lloyd Sato" }]
+keywords = [
+    "image sanitisation",
+    "metadata removal",
+    "exif",
+    "content disarm and reconstruction",
+    "steganography",
+    "PRNU",
+    "privacy",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Security",
+    "Topic :: Security :: Cryptography",
+]
+# The lowest versions are the ones the "minimum-versions" job in .github/workflows/ci.yml tests (numpy 1.26 is the
+# first release with wheels for Python 3.12; newer Pythons need newer numpy, which pip picks by itself).
 dependencies = [
     "Pillow>=13.0.0",
-    "numpy>=1.24",
+    "numpy>=1.26",
     "pillow-heif>=0.18",
 ]
 
@@ -24,7 +53,11 @@ test = ["pytest>=7", "c2pa-python>=0.38,<1", "cryptography>=42"]
 
 [project.urls]
 Homepage = "https://github.com/lloydsato/imgstrip"
+Documentation = "https://github.com/lloydsato/imgstrip/blob/main/docs/REFERENCE.md"
+Changelog = "https://github.com/lloydsato/imgstrip/blob/main/CHANGELOG.md"
+Source = "https://github.com/lloydsato/imgstrip"
 Issues = "https://github.com/lloydsato/imgstrip/issues"
+"Security policy" = "https://github.com/lloydsato/imgstrip/blob/main/SECURITY.md"
 
 [project.scripts]
 imgstrip = "imgstrip.cli:entry"

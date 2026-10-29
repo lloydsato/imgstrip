@@ -13,8 +13,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fuzz"))
 
-import targets  # noqa: E402
-from test_fuzz import mutate  # noqa: E402
+import targets
+from test_fuzz import mutate
 
 CHEAP = [t for t in targets.TARGETS if t != "strip"]  # the engine itself is mutation-fuzzed in test_fuzz.py
 

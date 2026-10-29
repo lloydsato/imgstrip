@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -12,7 +13,7 @@ import pytest
 from PIL import Image
 
 from imgstrip import fixtures, inspect_bytes
-from imgstrip.cli import main
+from imgstrip.cli import main, safe_text
 
 
 @pytest.fixture
@@ -204,17 +205,16 @@ def test_random_name(tmp_path, jpg):
 
 
 def test_new_files_respect_umask(tmp_path, jpg):
-    import imgstrip.cli as cli
+    from imgstrip import fileio
 
-    cli._UMASK = None  # drop the value an earlier test may have cached
     old = os.umask(0o027)
     try:
         assert main([str(jpg)]) == 0
     finally:
         os.umask(old)
-    cli._UMASK = None  # reset cache for other tests
     mode = stat.S_IMODE(jpg.with_name("photo.clean.jpg").stat().st_mode)
-    assert mode in (0o640, 0o644)
+    # Linux reports the current umask, so it is followed exactly; elsewhere the value read at import is used
+    assert mode == 0o640 if fileio._umask_from_proc() is not None else mode in (0o640, 0o644)
 
 
 def test_unicode_and_spaces(tmp_path, fx):
@@ -286,3 +286,119 @@ def test_walk_reports_unsupported_images_instead_of_skipping(tmp_path, capsys):
     assert main(["-r", str(tmp_path), "-o", str(tmp_path / "out")]) == 1
     err = capsys.readouterr().err
     assert "broken.png" in err and "notes.md" not in err
+
+
+# --- text that comes from files must not act on the terminal -----------------------------------------------------
+
+UNSAFE = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f\ud800-\udfff\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+NAME = "a\x1b[2J\x1b]0;PWNED\x07\u202eb\x9bc\nFAKE cleaned line.jpg"
+
+
+def test_safe_text_writes_controls_out_and_keeps_real_text():
+    assert safe_text("a\x1b[31m\x07\n\t\x7f\x9b") == "a\\x1b[31m\\x07\\x0a\\x09\\x7f\\x9b"
+    assert safe_text("x\u202ey\u2067z\u061c") == "x\\u202ey\\u2067z\\u061c"
+    assert safe_text("b\udcffd") == "b\\udcffd"  # a byte of a file name that is not UTF-8
+    plain = "photo é☃ 日本語 👨\u200d👩\u200d👧 (1).jpg"  # real names, emoji sequences and all
+    assert safe_text(plain) == plain
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows file names cannot hold these characters")
+@pytest.mark.parametrize("flags", [[], ["-v"], ["--check"], ["-n"], ["--check", "--deep"]])
+def test_control_characters_in_file_names_never_reach_the_terminal(tmp_path, fx, capsys, flags):
+    evil = tmp_path / NAME
+    evil.write_bytes(fx["jpeg_everything.jpg"])
+    broken = tmp_path / NAME.replace(".jpg", ".png")
+    broken.write_bytes(b"not an image")
+    main([*flags, str(evil), str(broken)])
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert text and not UNSAFE.search(text.replace("\n", ""))
+    assert "\\x1b" in text and "\\u202e" in text
+    # the newline inside a name is written out, so the name cannot start a line of its own
+    assert not any(line.startswith("FAKE") for line in text.splitlines())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows file names cannot hold these characters")
+def test_json_report_keeps_the_real_name_escaped(tmp_path, fx, capsys):
+    evil = tmp_path / NAME
+    evil.write_bytes(fx["jpeg_everything.jpg"])
+    assert main(["--json", str(evil)]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert Path(report["files"][0]["file"]).name == NAME
+
+
+def test_text_from_inside_a_file_is_written_out_too(tmp_path, capsys):
+    """Metadata text reaches the report through the inspector; C1 controls and overrides were not removed there."""
+    from PIL.PngImagePlugin import PngInfo
+
+    info = PngInfo()
+    info.add_itxt("Comment", "hi\u009b2J\u202eevil\x1b[31m")
+    path = tmp_path / "meta.png"
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(path, pnginfo=info)
+    main(["--check", str(path)])
+    text = capsys.readouterr().out
+    assert "FOUND" in text and not UNSAFE.search(text.replace("\n", ""))
+
+
+# --- options that cannot work are refused up front ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("suffix", ["/x", "../x", "a/b", "\\x"])
+def test_a_suffix_cannot_hold_a_path_separator(jpg, capsys, suffix):
+    with pytest.raises(SystemExit) as stop:
+        main([str(jpg), "-s", suffix])
+    assert stop.value.code == 2
+    err = capsys.readouterr().err
+    assert "path separator" in err and "internal error" not in err
+    assert [p.name for p in jpg.parent.iterdir()] == ["photo.jpg"]
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "abc", "1.5"])
+def test_max_pixels_must_be_a_positive_whole_number(jpg, capsys, value):
+    with pytest.raises(SystemExit) as stop:
+        main([str(jpg), "--max-pixels", value])
+    assert stop.value.code == 2
+    assert "--max-pixels" in capsys.readouterr().err
+
+
+def test_a_file_name_for_output_is_refused_with_several_inputs(tmp_path, jpg, fx, capsys):
+    second = tmp_path / "second.jpg"
+    second.write_bytes(fx["jpeg_everything.jpg"])
+    with pytest.raises(SystemExit) as stop:
+        main([str(jpg), str(second), "-o", str(tmp_path / "all.jpg")])
+    assert stop.value.code == 2
+    assert "looks like a file name" in capsys.readouterr().err
+    assert not (tmp_path / "all.jpg").exists()
+    # a directory that already exists, or one named without an image extension, still works
+    (tmp_path / "ready.jpg").mkdir()
+    assert main([str(jpg), str(second), "-o", str(tmp_path / "ready.jpg")]) == 0
+    assert main([str(jpg), str(second), "-o", str(tmp_path / "plain")]) == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs symbolic links")
+def test_symbolic_links_that_go_nowhere_are_named_as_such(tmp_path, capsys):
+    (tmp_path / "dangling.jpg").symlink_to(tmp_path / "gone.jpg")
+    (tmp_path / "a.jpg").symlink_to(tmp_path / "b.jpg")
+    (tmp_path / "b.jpg").symlink_to(tmp_path / "a.jpg")
+    assert main(["--json", "--check", str(tmp_path / "dangling.jpg"), str(tmp_path / "a.jpg"), str(tmp_path / "none.jpg")]) == 1
+    report = json.loads(capsys.readouterr().out)
+    why = {Path(f["file"]).name: f["message"] for f in report["files"]}
+    assert why == {
+        "dangling.jpg": "symbolic link to a file that does not exist",
+        "a.jpg": "symbolic links lead round in a circle",
+        "none.jpg": "no such file or directory",
+    }
+
+
+def test_a_noisy_picture_is_refused_with_the_way_out_and_the_way_out_works(tmp_path):
+    import numpy as np
+    from PIL import Image
+
+    noise = tmp_path / "static.jpg"
+    Image.fromarray(np.random.default_rng(21).integers(0, 256, (96, 96, 3), dtype=np.uint8)).save(noise, quality=90)
+    refused = run_cli(noise, "-o", tmp_path / "out.jpg")
+    assert refused.returncode == 1 and not (tmp_path / "out.jpg").exists()
+    message = refused.stdout.decode() + refused.stderr.decode()
+    assert "deviates too much" in message and "--format png" in message
+    worked = run_cli(noise, "--format", "png", "-o", tmp_path / "out.png")
+    assert worked.returncode == 0 and (tmp_path / "out.png").read_bytes()[:4] == b"\x89PNG"

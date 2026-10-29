@@ -1016,3 +1016,76 @@ def test_chunked_upload_is_refused(app):
     sock.sendall(head.encode())
     assert sock.recv(64).startswith(b"HTTP/1.1 411")
     sock.close()
+
+
+# --------------------------------------------------------------------------
+# Uploads wait for a job slot before they are read; slow ones are cut off
+# --------------------------------------------------------------------------
+
+
+class _CountingSlots:
+    """Stands in for the session's job semaphore and records how many slots are held."""
+
+    def __init__(self):
+        self.held = 0
+        self.lock = threading.Lock()
+
+    def __enter__(self):
+        with self.lock:
+            self.held += 1
+
+    def __exit__(self, *exc):
+        with self.lock:
+            self.held -= 1
+
+
+@pytest.mark.parametrize(
+    "path", ["/api/inspect", "/api/preview", "/api/clean"], ids=["inspect", "preview", "clean"]
+)
+def test_an_upload_is_read_only_while_holding_a_job_slot(app, monkeypatch, path):
+    slots = _CountingSlots()
+    app.session.jobs = slots
+    held_when_read = []
+    original = web.Handler._upload
+
+    def watching(self):
+        held_when_read.append(slots.held)
+        return original(self)
+
+    monkeypatch.setattr(web.Handler, "_upload", watching)
+    res, body = app.upload(path, fixtures.all_fixtures()["jpeg_everything.jpg"])
+    assert res.status == 200, body
+    assert held_when_read == [1]
+
+
+def test_a_request_waiting_for_a_slot_has_not_had_its_body_read(app, monkeypatch):
+    app.session.jobs = threading.BoundedSemaphore(1)
+    app.session.jobs.acquire()  # the only slot is busy
+    reads = []
+    original = web.Handler._upload
+    monkeypatch.setattr(web.Handler, "_upload", lambda self: (reads.append(1), original(self))[1])
+    data = fixtures.all_fixtures()["jpeg_everything.jpg"]
+    result = {}
+    thread = threading.Thread(target=lambda: result.update(r=app.upload("/api/inspect", data)))
+    thread.start()
+    time.sleep(0.5)
+    assert reads == [] and thread.is_alive()  # waiting, nothing read
+    app.session.jobs.release()
+    thread.join(30)
+    assert reads == [1] and result["r"][0].status == 200
+
+
+def test_an_upload_that_crawls_is_cut_off(app, monkeypatch):
+    monkeypatch.setattr(web, "UPLOAD_GRACE", -100)  # the allowance is already used up
+    big = b"\xff\xd8" + os.urandom(2 << 20)
+    res, body = app.upload("/api/inspect", big)
+    assert res.status == 408 and b"too slow" in body
+    # a normal upload still works afterwards, and a small one is never cut off mid-way
+    monkeypatch.setattr(web, "UPLOAD_GRACE", 60)
+    res, _ = app.upload("/api/inspect", fixtures.all_fixtures()["jpeg_everything.jpg"])
+    assert res.status == 200
+
+
+def test_names_lose_controls_and_bidirectional_overrides():
+    name = web.safe_filename(urllib.parse.quote("a\x1b[2J\x9bb‮c⁦d\ne.jpg"))
+    assert name == "a[2Jbcde.jpg"

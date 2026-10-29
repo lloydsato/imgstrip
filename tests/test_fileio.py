@@ -165,3 +165,19 @@ def test_force_replaces_the_output_with_a_new_file(jpg):
     os.link(out, keep)
     assert main([str(jpg), "--force"]) == 0
     assert keep.read_bytes() == b"old output" and out.read_bytes() != b"old output"
+
+
+@pytest.mark.skipif(fileio._umask_from_proc() is None, reason="this system does not report the umask")
+def test_default_mode_follows_the_umask_without_touching_it(monkeypatch):
+    seen = []
+    monkeypatch.setattr(os, "umask", lambda *a: seen.append(a) or 0)  # must never be called
+    assert fileio.default_mode() == 0o666 & ~fileio._umask_from_proc()
+    assert seen == []
+    monkeypatch.undo()
+    old = os.umask(0o077)
+    try:
+        assert fileio.default_mode() == 0o600
+        os.umask(0o002)
+        assert fileio.default_mode() == 0o664
+    finally:
+        os.umask(old)

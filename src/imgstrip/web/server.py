@@ -38,6 +38,7 @@ import signal
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 import webbrowser
 import zipfile
@@ -63,6 +64,8 @@ PREVIEW_MAX_PIXELS = 100_000_000
 WEB_MAX_PIXELS = 100_000_000  # the CLI default is 150 MP; a browser upload is buffered whole, so the web app is stricter
 MAX_CONNECTIONS = 32  # simultaneous connections; extra ones are closed at once
 SOCKET_TIMEOUT = 30  # seconds a connection may sit idle in the middle of a read
+UPLOAD_GRACE = 60  # seconds an upload may take regardless of its size ...
+UPLOAD_MIN_RATE = 1 << 20  # ... plus one second for every MiB: a slower trickle would hold a job slot for good
 DEFAULT_SUFFIX = ".clean"
 STATIC_FILES = {
     "app.css": "text/css; charset=utf-8",
@@ -78,7 +81,7 @@ CSP = (
     "frame-ancestors 'none'"
 )
 _ID = re.compile(r"[A-Za-z0-9_-]{16,64}")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")  # controls, bidirectional overrides
 
 
 class ApiError(Exception):
@@ -601,7 +604,7 @@ def load_identity_payload(session: Session, payload: dict) -> dict:
         raise ApiError(422, str(exc), code="passphrase")
     except credentials.CredentialError as exc:
         raise ApiError(422, str(exc))
-    except Exception:  # noqa: BLE001 - never echo a library's message back: it may quote key data
+    except Exception:  # never echo a library's message back: it may quote key data
         raise ApiError(422, "The certificate or key could not be read.")
     blocking = [n for n in assessment.notices if n.severity == "error"]
     if blocking:
@@ -622,7 +625,7 @@ def test_identity_payload(session: Session, payload: dict) -> dict:
         assessment = credentials.assess(test.identity, anchors)
     except credentials.CredentialError as exc:
         raise ApiError(422, str(exc))
-    except Exception:  # noqa: BLE001
+    except Exception:
         raise ApiError(422, "The test identity could not be created.")
     session.set_identity(test.identity, assessment, anchors)
     return {"identity": assessment.as_dict(), "root_pem": test.root_pem.decode("ascii")}
@@ -665,7 +668,7 @@ def _probe_here(data: bytes) -> tuple[str | None, tuple[int, int] | None]:
         with _pillow_guard([]):
             im = open_image(data)
             return canonical_format(im.format), im.size
-    except Exception:  # noqa: BLE001 - anything unreadable is simply "not an image we can decode"
+    except Exception:  # anything unreadable is simply "not an image we can decode"
         return None, None
 
 
@@ -704,7 +707,7 @@ def image_facts_here(data: bytes) -> dict | None:
                 # Can the picture carry a transparency channel?  (A colour key in a palette-less image counts too.)
                 "alpha": _may_have_alpha(im),
             }
-    except Exception:  # noqa: BLE001 - anything unreadable is simply "no facts": every option stays available
+    except Exception:  # anything unreadable is simply "no facts": every option stays available
         return None
 
 
@@ -752,7 +755,7 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
     if any(credentials.is_c2pa_finding(f) for f in findings) and credentials.available():
         try:
             credential = credentials.read_credential(data).as_dict()
-        except Exception:  # noqa: BLE001 - the extra verdict is informational; the scan stands without it
+        except Exception:  # the extra verdict is informational; the scan stands without it
             credential = None
     return {
         "format": report.format,
@@ -806,7 +809,7 @@ def preview_pixels_here(data: bytes, edge: int, limit: int):
         im.draft("RGB", (edge * 2, edge * 2))  # JPEG only: decode at reduced scale
         try:
             im = ImageOps.exif_transpose(im)
-        except Exception:  # noqa: BLE001 - a broken orientation tag must not block a preview
+        except Exception:  # a broken orientation tag must not block a preview
             pass
         if im.mode.startswith("I") or im.mode == "F":  # 16/32-bit and float: Pillow would clip, not scale
             im = im.convert("I") if im.mode.startswith("I;16") else im
@@ -988,7 +991,7 @@ class Handler(BaseHTTPRequestHandler):
     port: int
 
     # Requests are not logged: file names and paths are exactly what users want kept private.
-    def log_message(self, format, *args):  # noqa: A002 - signature fixed by the base class
+    def log_message(self, format, *args):  # signature fixed by the base class
         return
 
     # ---- plumbing ---------------------------------------------------------
@@ -1071,11 +1074,14 @@ class Handler(BaseHTTPRequestHandler):
         # buffer itself: BytesIO.getvalue() shares it, where bytearray -> bytes() held two copies at the peak.
         data = io.BytesIO()
         received = 0
+        deadline = time.monotonic() + UPLOAD_GRACE + length / UPLOAD_MIN_RATE
         while received < length:
             chunk = self.rfile.read(min(1 << 20, length - received))
             if not chunk:
                 raise ApiError(400, "Upload was cut short.")
             received += data.write(chunk)
+            if received < length and time.monotonic() > deadline:
+                raise ApiError(408, "The upload was too slow.")
         return data.getvalue()
 
     def _json_body(self) -> dict:
@@ -1101,10 +1107,10 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- routing ----------------------------------------------------------
 
-    def do_HEAD(self):  # noqa: N802
+    def do_HEAD(self):
         self.do_GET()
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         if not self._host_ok():
             return self._send(421, b"Misdirected request", "text/plain; charset=utf-8")
         url = urllib.parse.urlsplit(self.path)
@@ -1125,13 +1131,13 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(404, "Not found.")
         except ApiError as exc:
             self._error(exc.status, exc.message, exc.code)
-        except Exception as exc:  # noqa: BLE001 - one bad request must never take the server down
+        except Exception as exc:  # one bad request must never take the server down
             self._error(500, f"Internal error ({type(exc).__name__}).")
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         self._api_write()
 
-    def do_DELETE(self):  # noqa: N802
+    def do_DELETE(self):
         self._api_write()
 
     def _api_write(self) -> None:
@@ -1149,21 +1155,21 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(403, "This link has already been used.")
                 return self._json(200, {"token": token})
             self._require_token()
+            # An upload is read inside the job slot, not before it: a request waiting for a slot holds no file in
+            # memory, so the files in memory at once are at most the number of slots, however many connections wait.
             if route == ("POST", "/api/inspect"):
-                data = self._upload()
                 deep = query.get("deep", ["0"])[0] == "1"
                 with self.session.jobs:
-                    return self._json(200, inspect_payload(data, deep))
+                    return self._json(200, inspect_payload(self._upload(), deep))
             if route == ("POST", "/api/preview"):
-                data = self._upload()
                 with self.session.jobs:
+                    data = self._upload()
                     try:
                         png = preview_bytes(data)
-                    except Exception as exc:  # noqa: BLE001 - any decoder failure means "no preview"
+                    except Exception as exc:  # any decoder failure means "no preview"
                         raise ApiError(422, f"No preview: {exc}")
                 return self._send(200, png, "image/png")
             if route == ("POST", "/api/clean"):
-                data = self._upload()
                 filename = safe_filename(self.headers.get("X-Filename"))
                 try:
                     raw = json.loads(urllib.parse.unquote(self.headers.get("X-Options") or "{}"))
@@ -1178,6 +1184,7 @@ class Handler(BaseHTTPRequestHandler):
                 if scan_state not in (None, stego.DETECTED, stego.NOT_DETECTED):
                     raise ApiError(400, "X-Scan must be detected or not_detected.")
                 with self.session.jobs:
+                    data = self._upload()
                     return self._json(200, clean_payload(self.session, data, filename, options, config, scan_state, random_name))
             if route == ("POST", "/api/identity"):
                 return self._json(200, load_identity_payload(self.session, self._json_body()))
@@ -1209,7 +1216,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(404, "Not found.")
         except ApiError as exc:
             self._error(exc.status, exc.message, exc.code)
-        except Exception as exc:  # noqa: BLE001 - one bad file must never take the server down
+        except Exception as exc:  # one bad file must never take the server down
             self._error(500, f"Internal error ({type(exc).__name__}).")  # never the message: it may quote a path
 
     # ---- pages ------------------------------------------------------------
@@ -1298,7 +1305,7 @@ def launch_url(httpd: Server, key: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def _stop_on_signal(signum, frame):  # noqa: ARG001 - signal handler signature
+def _stop_on_signal(signum, frame):  # signal handler signature
     raise KeyboardInterrupt
 
 

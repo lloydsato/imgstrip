@@ -214,7 +214,7 @@ def test_concurrent_signing_is_safe(creds, signer):
         try:
             _r, _e, s = run(creds, source, Options(), signer.identity)
             results.append(creds.read_credential(s.data).imgstrip)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             errors.append(repr(exc))
 
     threads = [threading.Thread(target=work) for _ in range(6)]
@@ -865,12 +865,12 @@ def test_a_remote_manifest_link_is_never_followed(creds):
     hits = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             hits.append(self.path)
             self.send_response(404)
             self.end_headers()
 
-        do_HEAD = do_GET  # noqa: N815
+        do_HEAD = do_GET
 
         def log_message(self, *a):
             pass

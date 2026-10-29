@@ -564,7 +564,7 @@ def differential(data: bytes, fmt: str, exact: bool, *, allow_icc: bool = False)
     readers: list[str] = []
     try:
         mine = our_view(data)
-    except Exception as exc:  # noqa: BLE001 - any failure to re-read our own output is a finding
+    except Exception as exc:  # any failure to re-read our own output is a finding
         return Differential([f"Pillow cannot re-read the output: {exc}"], readers)
     if fmt == "PNG":
         try:

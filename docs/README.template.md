@@ -138,7 +138,7 @@ flowchart LR
     E -->|no| X
 ```
 
-If either check fails, **nothing is written**. Failing safe is the whole point. The decoding runs in a fresh process for every file, which hands back only pixels and a few checked values and, on Linux and macOS, cannot write to files, so a hostile file that exploits a decoder bug is cut off from imgstrip's own memory and from the file it writes ([what it does and does not stop](docs/REFERENCE.md#decoding-in-a-sandbox); `--no-sandbox` turns it off).
+If either check fails, **nothing is written**. Failing safe is the whole point. The decoding runs in a fresh process for every file, which hands back only pixels and a few checked values and, on Linux (with Landlock), cannot create, change or delete files (on macOS and older kernels it is limited to not writing data), so a hostile file that exploits a decoder bug is cut off from imgstrip's own memory and from the file it writes ([what it does and does not stop](docs/REFERENCE.md#decoding-in-a-sandbox); `--no-sandbox` turns it off).
 
 (If you're reading this on PyPI and the diagram shows as plain text, the [GitHub page](https://github.com/lloydsato/imgstrip#how-it-works) renders it.)
 
@@ -286,3 +286,5 @@ imgstrip is free software, released under the [BSD 3-Clause License](https://git
 Versions up to 1.2.0 were released under the GNU Affero General Public License v3.0 or later; 1.2.1 and later are BSD-3-Clause.
 
 Questions, bug reports and odd files that break it are welcome in the [issue tracker](https://github.com/lloydsato/imgstrip/issues).
+
+A way to make imgstrip release a file that still carries metadata or hidden data, or to get out of its decoder sandbox or its local web app, is a security problem: please report it privately as described in [SECURITY.md](https://github.com/lloydsato/imgstrip/blob/main/SECURITY.md), not in the issue tracker.
