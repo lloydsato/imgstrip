@@ -1,0 +1,9 @@
+# Keeps the pinned GitHub Actions (each is pinned to a commit, with its version in a comment) up to date.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
