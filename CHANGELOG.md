@@ -58,8 +58,7 @@ the sandbox; every fix has a test.
   The numpy floor is now `numpy>=1.26` (1.24 has no build for Python 3.12 and later, so it could not be met there).
   Python 3.14 is in the test matrix, and a new CI job installs the lowest versions pyproject allows
   (numpy 1.26.4, Pillow 13.0.0, pillow-heif 0.18.0) on Python 3.11.
-- GitHub Actions are pinned to commits (the version is in a comment), workflows get read-only tokens, and Dependabot
-  keeps the pins current. A `.gitignore` is added.
+- Workflows get read-only tokens by default. A `.gitignore` is added.
 - About sixty `# noqa` comments for rules this project does not enable are plain comments now.
 
 ## [2.0.1]
