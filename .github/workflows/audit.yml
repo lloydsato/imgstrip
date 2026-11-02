@@ -1,0 +1,23 @@
+name: Dependency audit
+
+# Once a week, ask the Python Packaging Advisory Database whether any package imgstrip installs has a known
+# vulnerability.  It only reports: a finding fails this run (GitHub then emails the repository's owner) and nothing is
+# changed or proposed.  Delete this file to switch it off.
+on:
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[c2pa]' pip-audit
+      - run: pip-audit --skip-editable
