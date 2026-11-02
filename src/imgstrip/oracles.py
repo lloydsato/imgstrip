@@ -20,6 +20,7 @@ read a format says so instead of guessing.  Used by ``imgstrip --self-test`` and
 from __future__ import annotations
 
 import functools
+import os
 import re
 import shutil
 import struct
@@ -331,9 +332,30 @@ _EXT = {
 }
 
 
+_ENV_KEEP = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR")
+
+
+def clean_environment() -> dict[str, str]:
+    """The environment an independent reader runs in: what a program needs to start, nothing of the user's (a token,
+    a passphrase, a configuration that points a tool at a policy file)."""
+    return {k: os.environ[k] for k in _ENV_KEEP if k in os.environ}
+
+
+def which(name: str) -> str | None:
+    """The absolute path of an installed program, or None.  A program found only in the current directory (a relative
+    ``PATH`` entry) is not used: the readers run on files this tool is about to judge."""
+    found = shutil.which(name)
+    if found is None:
+        return None
+    found = os.path.abspath(found)
+    return None if os.path.dirname(found) == os.getcwd() else found
+
+
 def _run(cmd: list[str], timeout: int = 60) -> bytes:
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        proc = subprocess.run(
+            cmd, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL, env=clean_environment()
+        )
     except subprocess.TimeoutExpired:
         raise OracleError(f"{cmd[0]} timed out") from None
     if proc.returncode:
@@ -370,7 +392,14 @@ def _passthrough_flags(ffmpeg: str) -> tuple[str, ...]:
     older releases only know ``-vsync``.  A build that does not say its version (a git build) is taken to be new.
     """
     try:
-        banner = subprocess.run([ffmpeg, "-version"], capture_output=True, text=True, timeout=30).stdout
+        banner = subprocess.run(
+            [ffmpeg, "-version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+            env=clean_environment(),
+        ).stdout
     except (OSError, subprocess.SubprocessError):
         return ("-vsync", "0")
     found = re.search(r"version\s+n?(\d+)\.(\d+)", banner)
@@ -400,12 +429,10 @@ class ImageMagick(_External):
     formats = frozenset({"JPEG", "PNG", "WEBP", "GIF", "TIFF", "BMP", "AVIF", "HEIF"})
 
     def __init__(self) -> None:
-        magick = shutil.which("magick")
-        convert = shutil.which("convert")
+        magick = which("magick")
+        convert = which("convert")
         self.convert = [magick] if magick else ([convert] if convert else None)
-        self.identify = (
-            [magick, "identify"] if magick else ([shutil.which("identify")] if shutil.which("identify") else None)
-        )
+        self.identify = [magick, "identify"] if magick else ([which("identify")] if which("identify") else None)
 
     def available(self) -> bool:
         return self.convert is not None and self.identify is not None
@@ -438,8 +465,8 @@ class FFmpeg(_External):
     formats = frozenset({"PNG", "GIF", "BMP", "TIFF", "JPEG", "WEBP"})
 
     def __init__(self) -> None:
-        self.ffmpeg = shutil.which("ffmpeg")
-        self.ffprobe = shutil.which("ffprobe")
+        self.ffmpeg = which("ffmpeg")
+        self.ffprobe = which("ffprobe")
 
     def available(self) -> bool:
         return bool(self.ffmpeg and self.ffprobe)
@@ -460,6 +487,8 @@ class FFmpeg(_External):
             probe = _run(
                 [
                     self.ffprobe,
+                    "-protocol_whitelist",
+                    "file",
                     "-v",
                     "error",
                     "-select_streams",
@@ -481,6 +510,9 @@ class FFmpeg(_External):
             raw = _run(
                 [
                     self.ffmpeg,
+                    "-nostdin",
+                    "-protocol_whitelist",
+                    "file",
                     "-v",
                     "error",
                     "-noautorotate",

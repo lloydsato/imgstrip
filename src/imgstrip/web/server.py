@@ -35,6 +35,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import sys
 import tempfile
 import threading
@@ -50,9 +51,9 @@ from pathlib import Path
 from .. import __version__
 from .. import credentials, stego
 from ..cli import RAW_EXTENSIONS, output_extension
-from ..core import EXTENSIONS, OUTPUT_FORMATS, Options, StripError, heif_available, strip_image
+from ..core import EXTENSIONS, OUTPUT_FORMATS, Options, StripError, heif_available, inspect_isolated, strip_image
 from ..fileio import write_new
-from ..inspect import HIDDEN, METADATA, Finding, inspect_bytes
+from ..inspect import HIDDEN, METADATA, Finding
 
 STATIC_DIR = Path(__file__).with_name("static")
 DEFAULT_PORT = 8765
@@ -299,6 +300,9 @@ class Session:
         self._receipts: list[dict] = []
 
     def set_identity(self, identity, assessment, anchors: bytes | None) -> None:
+        from .. import sandbox
+
+        sandbox.harden_process()  # a key is about to live in this process's memory
         with self._lock:
             self._identity, self._assessment, self._anchors = identity, assessment, anchors
 
@@ -563,6 +567,13 @@ def _b64(value, what: str, *, required: bool = True, limit: int = 256 << 10) -> 
     return data
 
 
+def _sandbox_state() -> dict:
+    """What the decoder sandbox confines on this computer (see ``sandbox.status``), for ``/api/info``."""
+    from .. import sandbox
+
+    return sandbox.status()
+
+
 def limits_info() -> dict:
     """The size limits the options panel greys options out by; one source for the page and the engine."""
     from .. import prnu
@@ -714,7 +725,7 @@ def image_facts_here(data: bytes) -> dict | None:
 def inspect_payload(data: bytes, deep: bool) -> dict:
     from ..core import camera_raw_kind
 
-    report = inspect_bytes(data)
+    report = inspect_isolated(data)  # a hostile file is parsed in the sandbox, not in the process that holds the session
     findings = list(report.findings)
     notes: list[str] = []
     size = report.info.get("size")
@@ -754,7 +765,7 @@ def inspect_payload(data: bytes, deep: bool) -> dict:
     credential = None
     if any(credentials.is_c2pa_finding(f) for f in findings) and credentials.available():
         try:
-            credential = credentials.read_credential(data).as_dict()
+            credential = credentials.read_credential_isolated(data).as_dict()
         except Exception:  # the extra verdict is informational; the scan stands without it
             credential = None
     return {
@@ -943,6 +954,43 @@ def zip_results(session: Session, ids: list[str]) -> dict:
     return {"id": rid, "filename": name, "bytes": session.get(rid).size}
 
 
+_SYSTEM_FOLDERS = (
+    "/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/proc", "/run", "/sbin", "/sys", "/usr",
+    "/var/lib", "/var/spool", "/var/run", "/System", "/Library", "/private/etc", "/Applications",
+)  # fmt: skip
+_STARTUP_NAMES = {"startup", "launchagents", "launchdaemons", "autostart", "appdata"}
+
+
+def refused_folder(target: str) -> str | None:
+    """Why the app will not save into ``target`` (an absolute path), or None.
+
+    Cleaned files are pictures, but a folder is also where programs, shells and desktops look for things to run or
+    trust.  The app therefore refuses the system's own folders, hidden folders and the places that start programs
+    (``~/.ssh``, ``~/.config/autostart``, ``~/Library/LaunchAgents``, a Windows ``Startup`` folder), and it checks
+    the real location of a folder that is a link as well as the name it was given.
+    """
+    home = os.path.realpath(os.path.expanduser("~"))
+    for path in dict.fromkeys((os.path.abspath(target), os.path.realpath(target))):
+        norm = os.path.normcase(path)
+        for system in _SYSTEM_FOLDERS:
+            system = os.path.normcase(system)
+            if norm == system or norm.startswith(system + os.sep):
+                return "That is a system folder."
+        try:
+            relative = os.path.relpath(path, home)
+        except ValueError:  # another drive (Windows)
+            relative = path
+        inside = not relative.startswith("..") and not os.path.isabs(relative)
+        parts = Path(relative if inside else path).parts
+        if inside and any(part.startswith(".") and part not in (".", "..") for part in parts):
+            return "That is a hidden folder in your home folder."
+        if any(part.lower() in _STARTUP_NAMES for part in parts):
+            return "That is a folder where programs are started from."
+        if os.path.dirname(path) == path:
+            return "That is the top of a disk; choose a folder in it."
+    return None
+
+
 def save_results(session: Session, ids: list[str], folder: str) -> dict:
     if not isinstance(folder, str) or not folder.strip():
         raise ApiError(400, "Choose a folder to save into.")
@@ -950,6 +998,9 @@ def save_results(session: Session, ids: list[str], folder: str) -> dict:
     if not target.is_absolute():
         raise ApiError(400, "Use a full folder path, such as ~/Pictures/clean.")
     target = Path(os.path.abspath(target))
+    why = refused_folder(str(target))
+    if why:
+        raise ApiError(400, f"Cannot save into {display_path(str(target))}. {why}")
     if target.exists() and not target.is_dir():
         raise ApiError(400, f"{display_path(str(target))} is a file, not a folder.")
     try:
@@ -1021,10 +1072,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(length))
-        if status >= 400:
-            # An error may leave part of the request body unread; never parse it as a new request.
-            self.close_connection = True
-            self.send_header("Connection", "close")
+        # One request per connection: an error may leave part of the request body unread, and a body the client
+        # sized differently from the server (a request-smuggling attempt) must never be parsed as a new request.
+        self.close_connection = True
+        self.send_header("Connection", "close")
         self._security_headers()
         for k, v in (extra or {}).items():
             self.send_header(k, v)
@@ -1062,12 +1113,10 @@ class Handler(BaseHTTPRequestHandler):
     def _body(self, limit: int) -> bytes:
         if self.headers.get("Transfer-Encoding"):
             raise ApiError(411, "Chunked uploads are not supported.")
-        try:
-            length = int(self.headers.get("Content-Length") or "0")
-        except ValueError:
+        lengths = self.headers.get_all("Content-Length") or ["0"]
+        if len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,18}", lengths[0]):  # digits only: int() takes "+5", " 5", "5_0"
             raise ApiError(400, "Bad Content-Length.")
-        if length < 0:
-            raise ApiError(400, "Bad Content-Length.")
+        length = int(lengths[0])
         if length > limit:
             raise ApiError(413, f"Too large: the limit is {limit >> 20} MB per file.")
         # Grow with what the client actually sends (a lying Content-Length reserves nothing), and hand back the
@@ -1160,7 +1209,10 @@ class Handler(BaseHTTPRequestHandler):
             if route == ("POST", "/api/inspect"):
                 deep = query.get("deep", ["0"])[0] == "1"
                 with self.session.jobs:
-                    return self._json(200, inspect_payload(self._upload(), deep))
+                    try:
+                        return self._json(200, inspect_payload(self._upload(), deep))
+                    except StripError as exc:  # the sandbox could not read the file
+                        raise ApiError(422, str(exc))
             if route == ("POST", "/api/preview"):
                 with self.session.jobs:
                     data = self._upload()
@@ -1244,6 +1296,7 @@ class Handler(BaseHTTPRequestHandler):
             "credentials": credentials_info(),
             "identity": self._identity_state(),
             "receipts": len(self.session.receipts()),
+            "sandbox": _sandbox_state(),
         }
 
     def _identity_state(self) -> dict | None:
@@ -1260,14 +1313,47 @@ class Handler(BaseHTTPRequestHandler):
         self._send_file(item.path, item.size, item.mime, {"Content-Disposition": disposition})
 
 
+def peer_uid(client_address, server_port: int) -> int | None:
+    """The user id that owns the other end of a loopback connection, from the kernel's TCP table (Linux), or None when
+    that cannot be found out (another system, an address that is not IPv4 loopback, a connection already gone)."""
+    try:
+        host, port = client_address[:2]
+        local = "%08X:%04X" % (int.from_bytes(socket.inet_aton(host), "little"), port)
+        remote = "%08X:%04X" % (int.from_bytes(socket.inet_aton("127.0.0.1"), "little"), server_port)
+        with open("/proc/net/tcp", encoding="ascii") as fh:
+            for line in fh:
+                fields = line.split()
+                if len(fields) > 7 and fields[1] == local and fields[2] == remote:
+                    return int(fields[7])
+    except (OSError, ValueError, TypeError, IndexError):
+        pass
+    return None
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     max_connections = MAX_CONNECTIONS
+    any_user = False  # --any-user: serve connections from other users of this computer too
+
+    def verify_request(self, request, client_address):
+        """Only the user who started the app may talk to it.  Binding to 127.0.0.1 keeps other computers out, but every
+        user of this one can connect to the port; the launch key and token keep them from doing anything, and this
+        refuses their connections outright (Linux; elsewhere the kernel offers no cheap way to ask)."""
+        if self.any_user or not hasattr(os, "getuid"):
+            return True
+        uid = peer_uid(client_address, self.server_address[1])
+        return uid is None or uid == os.getuid()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._slots = threading.BoundedSemaphore(self.max_connections)
+
+    def handle_error(self, request, client_address):
+        """A browser that closes a connection mid-request is not an error worth a stack trace in the terminal."""
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
 
     def process_request(self, request, client_address):
         # One idle socket per thread would otherwise let a local process starve the server of threads.
@@ -1305,6 +1391,28 @@ def launch_url(httpd: Server, key: str) -> str:
 # --------------------------------------------------------------------------
 
 
+def load_startup_identity(session: Session, args, parser: argparse.ArgumentParser) -> None:
+    """Load the signing identity named on the command line (the same files and rules as ``imgstrip --c2pa``)."""
+    from .. import cli
+
+    if not args.c2pa_cert:
+        parser.error("--c2pa-key, --c2pa-passphrase-file and --c2pa-trust-anchors need --c2pa-cert")
+    if not credentials.available():
+        parser.error(credentials.INSTALL_HINT)
+    try:
+        identity = cli.load_signing_identity(args)
+        anchors = cli.load_anchors(args)
+        assessment = credentials.assess(identity, anchors)
+    except cli._Usage as exc:
+        parser.error(str(exc))
+    except credentials.CredentialError as exc:
+        parser.error(str(exc))
+    blocking = [n for n in assessment.notices if n.severity == "error"]
+    if blocking:
+        parser.error(blocking[0].message)
+    session.set_identity(identity, assessment, anchors)
+
+
 def _stop_on_signal(signum, frame):  # signal handler signature
     raise KeyboardInterrupt
 
@@ -1326,16 +1434,45 @@ def main(argv: list[str] | None = None) -> int:
         help="decode uploads in this process instead of a separate, restricted one (a decoder bug triggered by a "
         "hostile file then runs with everything this process holds, including the signing identity)",
     )
+    p.add_argument(
+        "--require-sandbox",
+        action="store_true",
+        help="refuse to decode unless the decoder sandbox can confine its workers completely (Linux 5.13 or later "
+        "with Landlock and seccomp); the default is to warn and go on with what the system offers",
+    )
+    p.add_argument(
+        "--any-user",
+        action="store_true",
+        help="accept connections from other users of this computer too (by default only yours are served)",
+    )
+    sign = p.add_argument_group(
+        "signing identity (loaded now instead of through the page, so the key never travels through the browser)"
+    )
+    sign.add_argument("--c2pa-cert", metavar="FILE", help="your signing certificate (PEM, or a .p12/.pfx bundle)")
+    sign.add_argument("--c2pa-key", metavar="FILE", help="the private key (PEM), if it is not in the certificate file")
+    sign.add_argument(
+        "--c2pa-passphrase-file", metavar="FILE", help="a file holding the key's passphrase (or set IMGSTRIP_C2PA_PASSPHRASE)"
+    )
+    sign.add_argument("--c2pa-trust-anchors", metavar="FILE", help="trusted root certificates (PEM), to judge your own chain")
     p.add_argument("--version", action="version", version=f"imgstrip {__version__}")
     args = p.parse_args(argv)
     if not 0 <= args.port <= 65535:
         p.error("--port must be between 0 and 65535")
-    if args.no_sandbox:
-        from .. import sandbox
+    from .. import sandbox
 
+    sandbox.harden_process()
+    if args.no_sandbox and (args.require_sandbox or sandbox.required()):
+        p.error("--no-sandbox and --require-sandbox (or IMGSTRIP_REQUIRE_SANDBOX) contradict each other")
+    if args.no_sandbox:
         sandbox.set_default(False)
+    if args.require_sandbox:
+        sandbox.set_require(True)
+    sandbox.announce_degraded()
     sweep_stale_sessions()
     httpd, session = make_server(args.port)
+    httpd.any_user = args.any_user
+    if args.c2pa_cert or args.c2pa_key or args.c2pa_passphrase_file or args.c2pa_trust_anchors:
+        load_startup_identity(session, args, p)
     atexit.register(session.close)
     # Closing the terminal (SIGHUP) or `kill` (SIGTERM) must still delete the cleaned files.
     for name in ("SIGTERM", "SIGHUP"):

@@ -944,7 +944,7 @@ def read_source_credentials(source: bytes, result: Result) -> dict | None:
         return None
     info: dict = {"present": True, "readable": False, "valid": None, "signer": None, "declared_ai": False}
     try:
-        cred = read_credential(source)
+        cred = read_credential_isolated(source)
     except CredentialsUnavailable:
         raise
     except Exception:  # the original's credentials are only reported, never trusted
@@ -1486,6 +1486,16 @@ def _declares_ai(manifest: dict) -> bool:
     return any(t in text for t in _AI_SOURCE_TYPES)
 
 
+def read_credential_isolated(data: bytes, anchors: bytes | None = None, sandboxed: bool | None = None) -> Credential:
+    """``read_credential`` for a file somebody else made: read in the decoder sandbox (where the parsers of the file and
+    the C2PA library cannot reach a signing key or anything else of this process), unless that is switched off."""
+    from . import sandbox
+
+    if sandbox.enabled(sandboxed):
+        return sandbox.credential(data, anchors)
+    return read_credential(data, anchors)
+
+
 def read_credential(data: bytes, anchors: bytes | None = None) -> Credential:
     """Read and judge the Content Credential of any image file, without touching the network.
 
@@ -1668,7 +1678,7 @@ def audit(
     from (using the secret salt in the receipt), and (3) whether its claim about the pixels
     (identical, equivalent, altered) is true, by comparing the two files afresh.
     """
-    credential = read_credential(signed, anchors)
+    credential = read_credential_isolated(signed, anchors)
     result = Audit(credential)
     if not credential.imgstrip:
         result.problems.append("the file has no valid imgstrip credential")

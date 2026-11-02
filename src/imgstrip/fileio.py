@@ -76,7 +76,43 @@ def default_mode() -> int:
     return 0o666 & ~umask
 
 
-def _temporary(directory: str, data: bytes | os.PathLike, mode: int | None) -> str:
+def _same_content(tmp: str, data: bytes | os.PathLike) -> bool:
+    """Whether the file ``tmp`` holds exactly ``data`` (bytes, or the content of the file at that path)."""
+    import hashlib
+
+    def digest(fh) -> tuple[str, int]:
+        h, n = hashlib.sha256(), 0
+        while chunk := fh.read(1 << 20):
+            h.update(chunk)
+            n += len(chunk)
+        return h.hexdigest(), n
+
+    with open(tmp, "rb") as written:
+        if isinstance(data, os.PathLike):
+            with open(data, "rb") as want:
+                return digest(written) == digest(want)
+        return digest(written) == (hashlib.sha256(data).hexdigest(), len(data))
+
+
+def _inherit(tmp: str, like: str) -> None:
+    """Give ``tmp`` the owner, group and access-control attributes of the file it replaces (best effort: a plain user
+    cannot hand a file to somebody else, and not every file system has them).  Other extended attributes (a download's
+    origin, tags) are deliberately not carried over: they are metadata."""
+    try:
+        st = os.stat(like)
+        os.chown(tmp, st.st_uid, st.st_gid)
+    except (OSError, AttributeError):
+        pass
+    for name in ("system.posix_acl_access", "security.selinux", "security.SMACK64"):
+        try:
+            os.setxattr(tmp, name, os.getxattr(like, name))
+        except (OSError, AttributeError):
+            pass
+
+
+def _temporary(
+    directory: str, data: bytes | os.PathLike, mode: int | None, like: str | None = None, verify: bool = False
+) -> str:
     """A complete, flushed temporary file in ``directory`` holding ``data`` (removed again on any failure).
 
     ``data`` is the content, or the path of a file to copy it from (so a large file is never held in memory).
@@ -91,6 +127,10 @@ def _temporary(directory: str, data: bytes | os.PathLike, mode: int | None) -> s
                 fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
+        if verify and not _same_content(tmp, data):  # read back before anything is replaced
+            raise OSError(errno.EIO, "what was written does not read back identically")
+        if like is not None:
+            _inherit(tmp, like)
         os.chmod(tmp, mode if mode is not None else default_mode())
     except BaseException:
         _remove(tmp)
@@ -125,11 +165,20 @@ def _directory_of(dest: str) -> str:
     return directory
 
 
-def replace_atomic(dest: str | os.PathLike, data: bytes | os.PathLike, mode: int | None = None) -> None:
-    """Write ``data`` (bytes, or the path of a file to copy) to ``dest``, replacing whatever is there in one rename."""
+def replace_atomic(
+    dest: str | os.PathLike,
+    data: bytes | os.PathLike,
+    mode: int | None = None,
+    like: str | os.PathLike | None = None,
+    verify: bool = False,
+) -> None:
+    """Write ``data`` (bytes, or the path of a file to copy) to ``dest``, replacing whatever is there in one rename.
+
+    ``verify`` reads the new file back and compares it before the rename; ``like`` names a file whose owner, group and
+    access-control attributes the new file takes over."""
     dest = os.fspath(dest)
     directory = _directory_of(dest)
-    tmp = _temporary(directory, data, mode)
+    tmp = _temporary(directory, data, mode, os.fspath(like) if like is not None else None, verify)
     try:
         os.replace(tmp, dest)
     except BaseException:

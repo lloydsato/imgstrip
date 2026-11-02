@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 import struct
+import threading
+import time
 import zlib
 from dataclasses import dataclass, field
 
@@ -23,7 +25,31 @@ HIDDEN = "hidden"  # payload that is not part of the visible image
 COLOR = "color"  # colour-management data (ICC profiles, gamma, ...)
 STRUCTURE = "structure"  # anomalies: bad checksums, unknown structures
 
-_MAX_TEXT_INFLATE = 64 << 20
+_MAX_TEXT_INFLATE = 64 << 20  # one compressed text chunk, inflated
+_TEXT_BUDGET = 256 << 20  # all the compressed text and profile chunks of one file together
+_BASE_SECONDS, _SECONDS_PER_MB = 60.0, 2.0  # how long the parse of one file may take: this, plus this per MB of file
+
+# A hostile file can be built to make a parser work for hours (a million tiny chunks, thousands of small bombs).  Each
+# parse gets a budget of inflated bytes and of time; running out of either ends it as a malformed file, which every
+# caller treats as "do not trust this file" (the cleaner refuses it, the verifier rejects an output that would do it).
+_budget = threading.local()
+
+
+def _tick() -> None:
+    """Called once per chunk, box or marker: stops a parse that has used up its time."""
+    deadline = getattr(_budget, "deadline", None)
+    if deadline is not None:
+        _budget.ticks += 1
+        if not _budget.ticks & 255 and time.monotonic() > deadline:
+            raise _Malformed("the structure takes too long to parse (a crafted file?)")
+
+
+def _charge(produced: int) -> None:
+    """Count inflated bytes against the budget of the parse in progress."""
+    if getattr(_budget, "deadline", None) is not None:
+        _budget.inflated += produced
+        if _budget.inflated > _TEXT_BUDGET:
+            raise _Malformed("too much compressed text and profile data in one file")
 
 # Every container reports an embedded C2PA manifest store with this text in its label, so the
 # credential code can tell "the credential we just wrote" from every other kind of metadata.
@@ -130,12 +156,17 @@ def inspect_bytes(data: bytes) -> Report:
     if parser is None:
         report.error = "unrecognised container format"
         return report
+    outer = getattr(_budget, "deadline", None), getattr(_budget, "ticks", 0), getattr(_budget, "inflated", 0)
+    _budget.deadline = time.monotonic() + _BASE_SECONDS + _SECONDS_PER_MB * len(data) / (1 << 20)
+    _budget.ticks = _budget.inflated = 0
     try:
         parser(data, report)
     except _Malformed as exc:
         report.error = f"malformed {fmt}: {exc}"
     except (struct.error, IndexError, ValueError, OverflowError) as exc:
         report.error = f"malformed {fmt}: truncated or inconsistent structure ({exc})"
+    finally:
+        _budget.deadline, _budget.ticks, _budget.inflated = outer
     return report
 
 
@@ -168,6 +199,7 @@ def canonical_form_problems(data: bytes, fmt: str) -> list[str]:
 def _png_canonical(d: bytes) -> list[str]:
     sizes, pos = [], 8
     while pos + 12 <= len(d):
+        _tick()
         length, ctype = struct.unpack_from(">I4s", d, pos)
         if ctype == b"IDAT":
             sizes.append(length)
@@ -183,6 +215,7 @@ def _jpeg_canonical(d: bytes) -> list[str]:
     ids = None
     pos, n = 2, len(d)
     while pos + 4 <= n:
+        _tick()
         if d[pos] != 0xFF:
             pos += 1
             continue
@@ -517,6 +550,7 @@ def _inspect_jpeg(d: bytes, r: Report) -> None:
     restart_interval = 0  # the last DRI value, and whether any restart marker ever appears in the scans
     restarts_seen = False
     while True:
+        _tick()
         if pos >= n:
             raise _Malformed("missing end-of-image marker")
         if d[pos] != 0xFF:
@@ -600,6 +634,7 @@ def _skip_entropy(d: bytes, pos: int) -> tuple[int, tuple[int, int] | None]:
     n = len(d)
     fill = first = 0
     while True:
+        _tick()
         i = d.find(b"\xff", pos)
         if i < 0 or i + 1 >= n:
             raise _Malformed("truncated entropy-coded data")
@@ -767,6 +802,7 @@ def _inflate_measure(data, limit: int) -> tuple[int, bool, int]:
     for buf in _slices(pieces, 1 << 16):
         remaining -= len(buf)
         while buf and not dobj.eof:
+            _tick()
             out = dobj.decompress(buf, 1 << 22)
             total += len(out)
             buf = dobj.unconsumed_tail
@@ -805,6 +841,7 @@ def _slices(pieces: list, step: int):
 def _inflate_limited(data: bytes, limit: int = _MAX_TEXT_INFLATE) -> bytes:
     dobj = zlib.decompressobj()
     out = dobj.decompress(data, limit)
+    _charge(len(out))
     return out
 
 
@@ -821,6 +858,7 @@ def _inspect_png(d: bytes, r: Report) -> None:
     ended = False
     first = True
     while pos < n:
+        _tick()
         if pos + 12 > n:
             raise _Malformed("truncated chunk header")
         length, ctype = struct.unpack_from(">I4s", d, pos)
@@ -985,6 +1023,7 @@ def _inspect_webp(d: bytes, r: Report) -> None:
     pos = 12
     image_chunks = 0
     while pos < end:
+        _tick()
         if pos + 8 > end:
             raise _Malformed("truncated chunk header")
         fourcc, size = struct.unpack_from("<4sI", d, pos)
@@ -1031,6 +1070,7 @@ def _inspect_webp(d: bytes, r: Report) -> None:
 def _webp_frame(body: bytes, r: Report) -> None:
     pos = 16
     while pos < len(body):
+        _tick()
         if pos + 8 > len(body):
             raise _Malformed("truncated animation frame")
         fourcc, size = struct.unpack_from("<4sI", body, pos)
@@ -1049,6 +1089,7 @@ def _webp_frame(body: bytes, r: Report) -> None:
 def _gif_subblocks(d: bytes, pos: int) -> tuple[bytes, int]:
     out = bytearray()
     while True:
+        _tick()
         size = d[pos]
         pos += 1
         if size == 0:
@@ -1081,6 +1122,7 @@ def _inspect_gif(d: bytes, r: Report) -> None:
     global_used = global_shown = 0
     global_known = True  # False once a frame drawing with it cannot be read
     while True:
+        _tick()
         if pos >= len(d):
             raise _Malformed("missing trailer")
         block = d[pos]
@@ -1412,6 +1454,7 @@ def _inspect_tiff(d: bytes, r: Report) -> None:
     page = 0
     off = first
     while off:
+        _tick()
         if off in seen:
             raise _Malformed("IFD loop")
         seen.add(off)
@@ -1501,6 +1544,7 @@ def _tiff_deflate_strip(strip: bytes, r: Report) -> None:
     data, produced = strip, 0
     try:
         while data and not inflater.eof and produced < (2 << 30):
+            _tick()
             produced += len(inflater.decompress(data, 1 << 20))
             data = inflater.unconsumed_tail
     except zlib.error:
@@ -1793,6 +1837,7 @@ _MOOV_LEAVES = {
 def _boxes(d: bytes, start: int, end: int, top: bool = False):
     pos = start
     while pos < end:
+        _tick()
         if pos + 8 > end:
             raise _Malformed("truncated box header")
         size, typ = struct.unpack_from(">I4s", d, pos)

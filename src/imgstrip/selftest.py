@@ -19,7 +19,7 @@ import functools
 import json
 import os
 import re
-import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -54,7 +54,7 @@ _JFIF_DEFAULTS = {"JFIF:XResolution", "JFIF:YResolution", "JFIF:ResolutionUnit"}
 
 @functools.lru_cache(maxsize=1)
 def _exiftool() -> str | None:
-    return shutil.which("exiftool")
+    return oracles.which("exiftool")
 
 
 def exiftool_findings(data: bytes, suffix: str, allow_icc: bool = False) -> list[str] | None:
@@ -66,7 +66,14 @@ def exiftool_findings(data: bytes, suffix: str, allow_icc: bool = False) -> list
         fh.write(data)
         path = fh.name
     try:
-        proc = subprocess.run([exe, "-j", "-a", "-G1", "-u", path], capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(
+            [exe, "-j", "-a", "-G1", "-u", path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+            env=oracles.clean_environment(),
+        )
         try:
             tags = json.loads(proc.stdout)[0]
         except (ValueError, IndexError):  # exiftool printed no report: it could not read the file at all
@@ -228,37 +235,58 @@ def _credential_self_test(fx: dict, verbose: bool) -> tuple[int, list[str]]:
     return runs, problems
 
 
+def _init_worker(sandboxed: bool, require: bool) -> None:
+    sandbox.set_default(sandboxed)
+    sandbox.set_require(require)
+
+
 def _sandbox_self_test() -> list[str]:
-    """With the decoder sandbox on: a worker must not be able to write, create or delete a file."""
+    """With the decoder sandbox on: what a hostile decoder could still do from inside a worker (a worker that is
+    confined completely must fail every one of these; the first two checks hold wherever the sandbox runs)."""
     if not sandbox.enabled():
         print("  decoder sandbox: off (--no-sandbox); inputs are decoded in this process")
         return []
     with tempfile.TemporaryDirectory(prefix="imgstrip-selftest-") as tmp:
-        victim = os.path.join(tmp, "victim")
-        with open(victim, "wb") as fh:
-            fh.write(b"keep")
+        victim, secret, unix = (os.path.join(tmp, name) for name in ("victim", "secret", "unix"))
+        for path, content in ((victim, b"keep"), (secret, b"secret")):
+            with open(path, "wb") as fh:
+                fh.write(content)
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        local = socket.socket(socket.AF_UNIX)
         try:
-            limits = sandbox.probe_limits(tmp, victim)
-        except StripError as exc:
+            local.bind(unix)
+            local.listen()
+            limits = sandbox.probe_limits(tmp, victim, listener.getsockname()[1], secret, unix)
+        except (StripError, OSError) as exc:
             return [f"decoder sandbox: {exc}"]
+        finally:
+            listener.close()
+            local.close()
         problems = []
         if limits["fsize"] is None:  # Windows
             print("  decoder sandbox: on (a separate process; Windows offers no further limits here)")
             return []
         if not limits["write"].startswith("no") or os.path.exists(os.path.join(tmp, "written")):
             problems.append("decoder sandbox: a worker could write a file")
-        if limits["landlock"] and not (limits["create"].startswith("no") and limits["remove"].startswith("no")):
-            problems.append("decoder sandbox: a worker could create or delete a file despite Landlock")
-        if not os.path.exists(victim):
-            problems.append("decoder sandbox: a worker deleted a file")
-    extra = (
-        f"Landlock ABI {limits['landlock']}: no file changes, no programs, no access to other processes"
-        + (", no TCP" if limits["landlock"] >= 4 else "")
-        if limits["landlock"]
-        else "no Landlock on this system: a worker cannot write to files, but could still create empty files or "
-        "delete them"
-    )
-    print(f"  decoder sandbox: on ({extra})")
+        tier = limits["tier"] or {}
+        if tier.get("landlock") and not all(limits[k].startswith("no") for k in ("create", "remove", "map_write")):
+            problems.append("decoder sandbox: a worker could create, change or delete a file despite Landlock")
+        if tier.get("full"):
+            for what in ("connect", "datagram", "unix", "netlink", "read", "fork", "signal", "memfd", "peek", "environ"):
+                if not limits[what].startswith("no"):
+                    problems.append(f"decoder sandbox: a worker could do this despite its filters: {what}")
+        with open(victim, "rb") as fh:
+            if fh.read() != b"keep":
+                problems.append("decoder sandbox: a worker changed or deleted a file")
+    if tier.get("full"):
+        print(f"  decoder sandbox: on, fully confined ({sandbox.describe(tier)})")
+    else:
+        print(
+            f"  decoder sandbox: on, reduced ({sandbox.describe(tier)}); a decoder exploited by a hostile file could "
+            "read your files or use the network (--require-sandbox refuses to run like this)"
+        )
     return problems
 
 
@@ -266,7 +294,7 @@ def run_self_test(verbose: bool = False) -> int:
     start = time.time()
     print("imgstrip self test: building fixtures ...")
     fx = fixtures.all_fixtures()
-    exiftool = shutil.which("exiftool") is not None
+    exiftool = oracles.which("exiftool") is not None
     print(
         f"  {len(fx)} fixtures; exiftool cross-check {'enabled' if exiftool else 'not available'}; "
         f"HEIF {'enabled' if heif_available() else 'not available'}"
@@ -285,7 +313,7 @@ def run_self_test(verbose: bool = False) -> int:
     # Each check strips, inspects and spawns external readers; run them side by side, reported in a fixed order.
     if workers > 1:
         with concurrent.futures.ProcessPoolExecutor(
-            max_workers=workers, initializer=sandbox.set_default, initargs=(sandbox.enabled(),)
+            max_workers=workers, initializer=_init_worker, initargs=(sandbox.enabled(), sandbox.required())
         ) as pool:
             results = list(pool.map(_run_variant, jobs, chunksize=4))
     else:

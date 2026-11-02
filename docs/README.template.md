@@ -138,7 +138,7 @@ flowchart LR
     E -->|no| X
 ```
 
-If either check fails, **nothing is written**. Failing safe is the whole point. The decoding runs in a fresh process for every file, which hands back only pixels and a few checked values and, on Linux (with Landlock), cannot create, change or delete files (on macOS and older kernels it is limited to not writing data), so a hostile file that exploits a decoder bug is cut off from imgstrip's own memory and from the file it writes ([what it does and does not stop](docs/REFERENCE.md#decoding-in-a-sandbox); `--no-sandbox` turns it off).
+If either check fails, **nothing is written**. Failing safe is the whole point. The decoding runs in a fresh process for every file, which hands back only pixels and a few checked values and, on Linux 5.13 or later (with Landlock and seccomp), can read only the Python installation and write nothing at all, no file, socket or program (elsewhere it is a separate process with resource limits and says so; `--require-sandbox` refuses to run with less), so a hostile file that exploits a decoder bug is cut off from imgstrip's own memory and from the file it writes ([what it does and does not stop](docs/REFERENCE.md#decoding-in-a-sandbox); `--no-sandbox` turns it off).
 
 (If you're reading this on PyPI and the diagram shows as plain text, the [GitHub page](https://github.com/lloydsato/imgstrip#how-it-works) renders it.)
 

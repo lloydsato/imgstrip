@@ -134,11 +134,13 @@ def test_a_worker_cannot_write_and_keeps_nothing_of_this_process(tmp_path, monke
     assert limits["pid"] != os.getpid()
     assert "IMGSTRIP_TEST_SECRET" not in limits["environment"]
     assert victim.read_text() == "keep me" and not (tmp_path / "written").exists()
-    if limits["landlock"]:  # Linux 5.13 and later
+    tier = limits["tier"]
+    if tier["landlock"]:  # Linux 5.13 and later
         assert limits["create"].startswith("no") and limits["remove"].startswith("no"), limits
+        assert limits["map_write"].startswith("no"), limits
         assert limits["peek"].startswith("no"), limits
         assert not (tmp_path / "created").exists()
-    if limits["landlock"] >= 4:
+    if tier["landlock"] >= 4:
         assert limits["connect"].startswith("no"), limits
 
 
@@ -150,7 +152,7 @@ def test_landlock_is_used_where_the_kernel_has_it(tmp_path):
     libc.syscall.restype = ctypes.c_long
     abi = libc.syscall(444, None, ctypes.c_size_t(0), ctypes.c_uint32(1))
     limits = sandbox.probe_limits(str(tmp_path), str(tmp_path / "none"))
-    assert limits["landlock"] == max(0, abi)
+    assert limits["tier"]["landlock"] == max(0, abi)
 
 
 # -- failures ----------------------------------------------------------------------------------------------------

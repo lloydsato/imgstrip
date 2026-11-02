@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from c2pa_support import Pki, foreign_credential, key_der, key_pem, pem_chain, photo_bytes, self_signed
-from imgstrip import credentials, fixtures
+from imgstrip import credentials, fixtures, sandbox
 from imgstrip.web import server as web
 from test_web import Client
 
@@ -349,11 +349,24 @@ def test_scanning_a_signed_file_shows_its_credential(app, signer, creds):
     assert json.loads(body)["credential"] is None
 
 
-def test_a_credential_that_cannot_be_read_does_not_break_scanning(app, signer, monkeypatch):
+def test_a_credential_that_cannot_be_read_does_not_break_scanning(app, signer, monkeypatch, in_process):
     load(app, signer)
     r = clean_signed(app, photo_bytes("PNG"))
     _, data = app.request("GET", f"/api/result/{r['id']}")
     monkeypatch.setattr(credentials, "read_credential", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    res, body = app.upload("/api/inspect", data, "signed.png")
+    assert res.status == 200 and json.loads(body)["credential"] is None
+
+
+def test_a_sandbox_that_cannot_read_the_credential_does_not_break_scanning(app, signer, monkeypatch):
+    load(app, signer)
+    r = clean_signed(app, photo_bytes("PNG"))
+    _, data = app.request("GET", f"/api/result/{r['id']}")
+
+    def refuse(*a, **k):
+        raise sandbox.SandboxError("the decoder sandbox is not available")
+
+    monkeypatch.setattr(credentials, "read_credential_isolated", refuse)
     res, body = app.upload("/api/inspect", data, "signed.png")
     assert res.status == 200 and json.loads(body)["credential"] is None
 

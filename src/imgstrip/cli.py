@@ -19,7 +19,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__, sandbox, stego
-from .core import DEFAULT_MAX_PIXELS, EXTENSIONS, OUTPUT_FORMATS, Options, StripError, strip_image
+from .core import (
+    DEFAULT_MAX_PIXELS,
+    EXTENSIONS,
+    OUTPUT_FORMATS,
+    Options,
+    StripError,
+    check_accepted,
+    inspect_isolated,
+    set_accepted,
+    strip_image,
+)
 from .fileio import replace_atomic, write_new
 from .inspect import inspect_bytes
 
@@ -288,6 +298,31 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="decode inputs in this process instead of a separate, restricted one (faster for many small files; "
         "a decoder bug triggered by a hostile file then runs with everything this process holds)",
+    )
+    proc.add_argument(
+        "--require-sandbox",
+        action="store_true",
+        help="refuse to decode unless the decoder sandbox confines its workers completely (Linux 5.13 or later with "
+        "Landlock and seccomp; also IMGSTRIP_REQUIRE_SANDBOX=1); the default is to warn once and go on",
+    )
+    proc.add_argument(
+        "--max-bytes",
+        type=_positive_int,
+        default=_MAX_BYTES,
+        metavar="N",
+        help=f"refuse input files (and standard input) larger than N bytes (default: {_MAX_BYTES >> 20} MB)",
+    )
+    proc.add_argument(
+        "--accept",
+        metavar="FORMATS",
+        help="decode only these input formats, a comma-separated list such as jpeg,png (default: all supported); "
+        "the others are refused before any decoder sees them",
+    )
+    proc.add_argument(
+        "--backup-suffix",
+        metavar="SUFFIX",
+        help="with --in-place, keep each original next to its replacement under this suffix (the backup still holds "
+        "all the metadata)",
     )
     proc.add_argument(
         "--max-pixels",
@@ -598,11 +633,31 @@ def _peak_estimate(tasks: list, max_pixels: int) -> int | None:
     return peak
 
 
+_MAX_BYTES = 1 << 30  # --max-bytes: the largest input file read
+
+
 def _read(source: str) -> bytes:
+    """An input file's bytes: a regular file (not a device, a pipe or a directory) or standard input, no larger than
+    ``--max-bytes``; and, with ``--accept``, of a format that is accepted."""
     if source == STDIO:
-        return sys.stdin.buffer.read()
-    with open(source, "rb") as fh:
-        return fh.read()
+        data = sys.stdin.buffer.read(_MAX_BYTES + 1)
+    else:
+        # O_NONBLOCK: opening a named pipe must not wait for a writer that never comes (it does nothing to a file).
+        fd = os.open(source, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise OSError(errno.EINVAL, "not a regular file (to read a pipe or a device, give - and use standard input)")
+            if st.st_size > _MAX_BYTES:
+                raise OSError(errno.EFBIG, f"larger than --max-bytes ({_MAX_BYTES >> 20} MB)")
+            data = fh.read(_MAX_BYTES + 1)
+    if len(data) > _MAX_BYTES:
+        raise OSError(errno.EFBIG, f"larger than --max-bytes ({_MAX_BYTES >> 20} MB)")
+    try:
+        check_accepted(data)
+    except StripError as exc:
+        raise OSError(errno.EPERM, str(exc)) from None
+    return data
 
 
 def _findings_payload(findings) -> list[dict]:
@@ -628,7 +683,10 @@ def check_one(task: Task, deep: bool) -> Outcome:
         return Outcome(task, "failed", message=exc.strerror or str(exc))
     if not data:
         return Outcome(task, "failed", message="file is empty")
-    report = inspect_bytes(data)
+    try:
+        report = inspect_isolated(data)
+    except StripError as exc:
+        return Outcome(task, "failed", message=str(exc))
     findings = list(report.findings)
     notes = []
     if report.format is None:
@@ -654,7 +712,7 @@ def check_one(task: Task, deep: bool) -> Outcome:
             from . import credentials
 
             if credentials.available():
-                payload["credential"] = credentials.read_credential(data).as_dict()
+                payload["credential"] = credentials.read_credential_isolated(data).as_dict()
         except Exception as exc:  # the extra verdict is informational
             notes.append(f"credential could not be read: {exc}")
     return Outcome(task, "checked", payload=payload)
@@ -764,12 +822,18 @@ def _write_outcome(outcome: Outcome, args, planned: set[str]) -> None:
     try:
         # A new file never replaces anything, even one that appears while this file is being written; --force and
         # --in-place replace the destination with one rename.  Neither ever writes into an existing file.
+        if args.in_place and args.backup_suffix:
+            backup = dest + args.backup_suffix
+            os.link(dest, backup)  # the original's data lives on under this name; it is not copied, so not changed
         if args.in_place or args.force:
-            replace_atomic(dest, data, mode)
+            replace_atomic(dest, data, mode, like=dest if args.in_place else None, verify=True)
         else:
             write_new(dest, data, mode)
-    except FileExistsError:
-        outcome.status, outcome.message = "failed", f"{dest} already exists (use --force)"
+    except FileExistsError as exc:
+        if args.in_place and args.backup_suffix and exc.filename and exc.filename.endswith(args.backup_suffix):
+            outcome.status, outcome.message = "failed", f"{exc.filename} already exists; nothing was replaced"
+        else:
+            outcome.status, outcome.message = "failed", f"{dest} already exists (use --force)"
     except OSError as exc:
         outcome.status, outcome.message = "failed", f"cannot write {dest}: {exc.strerror or exc}"
 
@@ -829,6 +893,7 @@ def _warn_key_permissions(path: str) -> None:
 def load_signing_identity(args):
     from . import credentials
 
+    sandbox.harden_process()  # a key is about to live in this process's memory
     if not args.c2pa_cert:
         raise _Usage(
             "--c2pa needs your signing certificate: --c2pa-cert FILE (and --c2pa-key FILE if the key is separate)"
@@ -1009,7 +1074,7 @@ def verify_one(task: Task, args, anchors: bytes | None) -> Outcome:
     if not data:
         return Outcome(task, "failed", message="file is empty")
     try:
-        cred = credentials.read_credential(data, anchors)
+        cred = credentials.read_credential_isolated(data, anchors)
     except credentials.CredentialError as exc:
         return Outcome(task, "failed", message=str(exc))
     if not cred.present and task.from_walk and credentials.sniff_format(data) is None:
@@ -1264,11 +1329,52 @@ def _check_credential_options(args, parser) -> None:
             parser.error("an audit compares one signed file with its original: give exactly one signed file")
 
 
+def _accept_names(text: str) -> list[str]:
+    """The format names in a --accept list (case does not matter; the usual short names are understood)."""
+    names = [n.strip().upper() for n in text.split(",") if n.strip()]
+    return ["JPEG" if n == "JPG" else "TIFF" if n == "TIF" else "HEIF" if n == "HEIC" else n for n in names]
+
+
+def _init_worker(sandboxed: bool, require: bool, max_bytes: int, accept: str | None) -> None:
+    """Settings of the main process that a worker started with spawn (macOS, Windows) would not inherit."""
+    global _MAX_BYTES
+    sandbox.set_default(sandboxed)
+    sandbox.set_require(require)
+    _MAX_BYTES = max_bytes
+    if accept is not None:
+        names = _accept_names(accept)
+        set_accepted(names)
+        sandbox.set_accepted(names)
+    sandbox.announce_degraded()
+
+
+def _configure_input(args, parser) -> None:
+    """The process-wide settings the command line makes: the sandbox, the input size limit and the accepted formats."""
+    global _MAX_BYTES
+    if args.no_sandbox and (args.require_sandbox or sandbox.required()):
+        parser.error("--no-sandbox and --require-sandbox (or IMGSTRIP_REQUIRE_SANDBOX) contradict each other")
+    if args.no_sandbox:
+        sandbox.set_default(False)
+    if args.require_sandbox:
+        sandbox.set_require(True)
+    if args.max_bytes:
+        _MAX_BYTES = args.max_bytes
+    if args.accept is not None:  # an empty list is an error, not "no restriction"
+        names = _accept_names(args.accept)
+        bad = [n for n in names if n not in OUTPUT_FORMATS]
+        if bad or not names:
+            parser.error(
+                f"--accept: unknown format(s) {', '.join(bad) or '(none given)'}; choose from {', '.join(OUTPUT_FORMATS)}"
+            )
+        set_accepted(names)
+        sandbox.set_accepted(names)
+    sandbox.announce_degraded()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.no_sandbox:
-        sandbox.set_default(False)
+    _configure_input(args, parser)
     if args.self_test:
         from .selftest import run_self_test
 
@@ -1281,6 +1387,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.paths:
         parser.error("no input files given")
     _check_credential_options(args, parser)
+    if args.backup_suffix and not args.in_place:
+        parser.error("--backup-suffix only applies with --in-place")
+    if args.backup_suffix and (os.sep in args.backup_suffix or (os.altsep and os.altsep in args.backup_suffix)):
+        parser.error("--backup-suffix is a suffix for the file name, not a path")
     if args.in_place and args.output:
         parser.error("--in-place and --output are mutually exclusive")
     if args.in_place and (args.random_name or STDIO in args.paths):
@@ -1396,7 +1506,7 @@ def main(argv: list[str] | None = None) -> int:
     if parallel:
         # Workers started with spawn (macOS, Windows) do not inherit --no-sandbox, so it is passed on.
         with concurrent.futures.ProcessPoolExecutor(
-            max_workers=jobs, initializer=sandbox.set_default, initargs=(sandbox.enabled(),)
+            max_workers=jobs, initializer=_init_worker, initargs=(sandbox.enabled(), sandbox.required(), _MAX_BYTES, args.accept)
         ) as pool:
             # A bounded window keeps finished results (each carries the cleaned bytes) from piling up
             # in memory behind one slow early file; outcomes are still reported in input order.

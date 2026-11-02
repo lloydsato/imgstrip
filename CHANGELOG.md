@@ -3,6 +3,93 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
+## [2.0.3]
+
+A review of the attack surface of 2.0.2, and the fixes for what it found. The engine's output is unchanged (the
+fixtures are byte-identical to 2.0.2 in every deterministic mode); what changed is how much a hostile file or a hostile
+local process can do while imgstrip works. Every item has a test (`tests/test_confinement.py`,
+`tests/test_hardening_203.py`).
+
+### Security
+
+- **The decoder sandbox now confines reads, not only writes.** The worker could read any file the user can read (and,
+  without Landlock's network rules, use the network). On Linux 5.13 or later it now gets a Landlock rule set that lets it
+  read only the Python installation, the libraries it has mapped and a few device and information files, and write
+  nothing, plus a seccomp filter (`imgstrip/_seccomp.py`, a small BPF assembler; x86-64 and arm64) that refuses sockets
+  of every kind, new processes, `ptrace`, `io_uring`, `bpf`, `memfd_create`, signals to other processes and every call
+  that opens a file for writing, creates, removes, renames or truncates one. The filter and the Landlock rules cannot be
+  lifted by code in the worker. Landlock is asked only for the rights the kernel's ABI knows (1 to 7).
+- **The sandbox says what it did, and can refuse to run with less.** The worker reports its *tier* (Landlock ABI, reads
+  limited, filter installed) before it looks at the input. `imgstrip --self-test` and the web app's `/api/info` show it;
+  imgstrip warns once on standard error when the tier is not full; and the new `--require-sandbox` (also
+  `IMGSTRIP_REQUIRE_SANDBOX=1`, also on `imgstrip-web`) makes the worker refuse before it touches a byte.
+- **The parsers of the input moved into the sandbox.** The structural inspector (`--check` and the web app's scan) and the reader of an input's own Content Credentials (the c2pa library) used to run in
+  the main process, next to the signing key. They now run in the worker and their answers are checked field by field
+  like the decoders'. Before, the main process parsed the hostile bytes with nothing between them and the key.
+- **The inspector has a budget.** A file made of millions of tiny chunks or boxes, or of many small compression bombs in
+  text chunks, could keep the pure-Python parser busy for hours or fill memory. A parse now has a time budget (60 s plus
+  2 s per MB) and a limit on inflated text and profile data (256 MB); running out is a malformed file, which is refused.
+- **Nothing of one file stays in the process that reads the next.** The zygote wipes the buffers that held an input
+  and an answer when a job ends, and is replaced after any job whose worker did not exit cleanly and after 64 jobs.
+  (Memory the wipe does not reach, such as the allocator's free lists, is not claimed to be clean.)
+- **Time and memory limits follow the size of the file.** A fixed 15-minute and fixed-memory limit was both too loose
+  for a small file and too tight for a huge TIFF. The wall-clock limit is 60 s + 2 s per megapixel + 5 s per MB of
+  input (never more than 15 minutes) and the address-space limit is the zygote's own size plus 64 bytes per allowed
+  pixel plus 512 MiB plus four times the input.
+- **The web app checks who is connecting.** Every user of the computer can reach `127.0.0.1`. On Linux the app now asks
+  the kernel who owns the other end of each connection and drops connections from other users (`--any-user` turns that
+  off; elsewhere the launch key and the token remain the gate). `Content-Length` must be plain digits, once (`+5`,
+  ` 5`, `5_0`, repeated headers and absurd lengths are a 400), every response closes the connection, and
+  `/api/inspect` says 422 when the sandbox cannot read a file instead of falling back to the main process.
+- **The web app will not save into places that start programs.** It refuses system folders, hidden folders in the home
+  folder (`~/.ssh`, `~/.config/autostart`), `LaunchAgents`, `LaunchDaemons`, `Startup` and similar, judging both the name
+  given and where a link really points. A key and certificate can be given on the command line
+  (`--c2pa-cert`, `--c2pa-key`, `--c2pa-passphrase-file`, `--c2pa-trust-anchors`) so they never travel through the
+  browser. The process refuses core dumps and `ptrace` (`PR_SET_DUMPABLE 0`) in the web app and whenever a key is loaded.
+- **`--in-place` is safer.** The new file is read back and compared before it replaces the original (a failed
+  read-back leaves the original and no temporary file), takes over the original's owner, group and access-control
+  attributes, and `--backup-suffix SUFFIX` keeps the original as a hard link that is never overwritten.
+- **Input limits on the command line.** `--max-bytes` (default 1 GiB) bounds a file or standard input; only regular
+  files are read (a named pipe no longer blocks, a device is refused); `--accept jpeg,png` refuses every other format
+  before a decoder sees it, in the main process and in the zygote. An empty `--accept ""` is a usage error, not "no restriction".
+- **The independent readers get a clean environment.** `exiftool`, `ffmpeg` and the other checking programs run with no
+  stdin and with only the variables a program needs to start, not the passphrase or the token in the environment, and a
+  program found only in the current directory is never used.
+- **The release workflow is pinned.** The publishing action is pinned to a commit, `build` to a version, and the upload
+  carries build attestations. A weekly `pip-audit` run (`audit.yml`) only reports; it changes nothing and proposes
+  nothing.
+
+### Fixed
+
+- `--no-sandbox` together with `--require-sandbox` (or `IMGSTRIP_REQUIRE_SANDBOX`) is a usage error, in the command
+  line and in the web app; the first used to win silently.
+- A browser that closed a connection in the middle of a request printed a stack trace in the web app's terminal; it
+  is now ignored. Other errors still print one.
+- A test of the web app patched `read_credential` in the test process, which cannot reach the reader once it runs in the
+  sandbox; it patches the right function, and a second test covers a sandbox that fails.
+- `imgstrip --self-test` now probes each confinement from inside a worker and prints the tier, instead of a single
+  yes or no.
+
+### Corrected statements
+
+The README, the reference and the source said or implied that nothing survives between files, that the worker "cannot
+write data to files" and that it cannot read other processes' memory. The first is true of input bytes (wiped) but not of
+every byte of memory; the second holds only with Landlock and seccomp, and `RLIMIT_FSIZE` alone stops data but not
+the creation of empty files; the third needs Landlock or Yama. The documents now say what each tier gives.
+
+### Known limits (not changed in this release)
+
+- macOS has no confinement beyond the process and its limits (Seatbelt is not used, and `--require-sandbox` refuses to
+  run there). Windows has none beyond a fresh process.
+- The arm64 filter was checked against the system-call tables and the kernel's BPF rules, not on an Arm computer.
+  A Python on an unknown architecture or a 32-bit Python runs in the degraded tier (and says so).
+- The verification re-decode of the file imgstrip has just written still runs in the main process.
+- Settings only GitHub can enforce (reviewers on the release environment, tag protection, two-factor authentication)
+  are not set by code. Apply them in the repository settings.
+- `pillow-heif` is still installed by default; an extra for HEIC users is planned for 2.1.0 because moving it now would
+  break existing installs.
+- The peer check is Linux-only. `--accept` filters in the zygote only when the sandbox is on.
+
 ## [2.0.2]
 
 Fixes and hardening found in a line-by-line review of 2.0.1. No change to what the engine writes, to the verifier or to

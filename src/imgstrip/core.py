@@ -293,9 +293,35 @@ def _register_plugins() -> None:
         pillow_heif.register_heif_opener()
 
 
+_ACCEPT: frozenset[str] | None = None  # --accept: the only formats a decoder may open (None: all that are supported)
+
+
+def set_accepted(formats) -> None:
+    """Restrict the formats the decoder opens to ``formats`` (names such as "JPEG"), or lift the restriction (None)."""
+    global _ACCEPT
+    _ACCEPT = None if formats is None else frozenset(canonical_format(f) for f in formats)
+
+
+def check_accepted(data: bytes) -> None:
+    """Refuse a file whose container is not among the formats --accept names (raises StripError)."""
+    if _ACCEPT is None:
+        return
+    from .inspect import sniff_format
+
+    fmt = sniff_format(data)
+    if fmt not in _ACCEPT:
+        raise StripError(
+            f"{fmt or 'this kind of file'} is not accepted here (--accept {','.join(sorted(_ACCEPT))}); "
+            "nothing was decoded"
+        )
+
+
 def _input_formats() -> list[str]:
     Image.init()
-    return [f for f in INPUT_FORMATS if f in Image.OPEN]
+    formats = [f for f in INPUT_FORMATS if f in Image.OPEN]
+    if _ACCEPT is not None:
+        formats = [f for f in formats if canonical_format(f) in _ACCEPT]
+    return formats
 
 
 # Pillow's decompression-bomb limit and the warning filters are process-wide, while the web app runs several jobs
@@ -2405,6 +2431,17 @@ def _canonical_array(frame: Frame) -> np.ndarray:
     rgba = _rgba_array(frame).copy()
     rgba[rgba[..., 3] == 0] = 0
     return rgba
+
+
+def inspect_isolated(data: bytes, sandboxed: bool | None = None):
+    """``inspect_bytes`` for a file somebody else made, run in the decoder sandbox unless it is switched off: the
+    parsers read hostile bytes, so they do not run in a process that holds a signing key or a web session.  Returns
+    a Report whose ``info`` holds at most the ``size``; raises StripError when the sandbox fails."""
+    from . import sandbox
+
+    if sandbox.enabled(sandboxed):
+        return sandbox.inspect(data)
+    return inspect_bytes(data)
 
 
 def canonical_frames(data: bytes, max_pixels: int = DEFAULT_MAX_PIXELS, sandboxed: bool | None = None) -> list[np.ndarray]:

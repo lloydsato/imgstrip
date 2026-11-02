@@ -35,6 +35,17 @@ released as a new version and described in [CHANGELOG.md](CHANGELOG.md) once it 
 Only the latest release gets fixes. imgstrip requires a Pillow version without the known decoder flaws that matter
 to it (see the changelog entry for 2.0.1); if you must run an older one, keep the decoder sandbox on.
 
+## Running it on files you do not trust
+
+The decoders run in a separate, restricted process. How restricted depends on the system: on Linux 5.13 or later with
+Landlock and seccomp it can read only the Python installation and write nothing, open no sockets and start no
+programs; on older kernels, macOS and Windows it is a separate process with resource limits only, and imgstrip says
+so once on standard error. To refuse to run with less than the full confinement, use `--require-sandbox` (or set
+`IMGSTRIP_REQUIRE_SANDBOX=1`). `imgstrip --self-test` and the web app's `/api/info` show what your system gives.
+`--accept jpeg,png` limits the formats that reach a decoder at all. On a computer shared with other users, start the
+web app with `--no-browser`; it serves only your own user's connections unless you give `--any-user`. See
+[Decoding in a sandbox](docs/REFERENCE.md#decoding-in-a-sandbox) for what each level does and does not stop.
+
 ## Out of scope
 
 * Channels the documentation says imgstrip does not remove by default, such as pixel steganography without
@@ -43,3 +54,5 @@ to it (see the changelog entry for 2.0.1); if you must run an older one, keep th
 * Flaws in a library imgstrip uses (Pillow, libjpeg, libwebp, libheif and the like) that imgstrip cannot contain.
   Please report those to the library as well; tell me too if the sandbox does not stop them.
 * Problems that need the attacker to be able to run code as the user already.
+  (The app makes itself harder to read for such a process: no core dumps and no `ptrace` of the web app or of a
+  process holding a signing key. That is a mitigation, not a boundary.)
