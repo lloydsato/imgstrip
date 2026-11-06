@@ -3,6 +3,37 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
+## [2.0.5]
+
+The web app's options are reorganised so they stop crowding the screen. The engine, the sandbox, the checks and the
+command line are untouched, and the cleaned files are byte-identical to 2.0.4 in every mode.
+
+### Changed
+
+- **Options opens on three presets instead of a wall of switches.** *Sharing* is the standard cleaning, *Evidence* is
+  the standard cleaning plus a signed processing record (with the case, operator and signing key right under it), and
+  *Custom* shows the full list, as before. Sharing and Evidence put every option back to its standard value; Custom
+  keeps what is set. The *Deep scan* switch and the case and operator text are not part of a preset. The choice is
+  remembered between launches, except Evidence, which signs and so is never carried over (it comes back as Sharing); a
+  save made by an older version with changed options opens as Custom. The Options button names the preset when it is not
+  Sharing.
+- **Check a record has its own window**, opened from the header, instead of sitting at the bottom of the tray. The
+  verdict is a headline (Trusted, Signed with the key not checked, Not signed, Cannot be trusted) with one line for each
+  thing checked, each with its own icon, then the case, operator, time, key and both fingerprints.
+- **The records have their own button** (*Record*, or *Records (n)*) in the bar at the bottom, beside *Save to folder*,
+  so they no longer need the tray to be open. They are still never in the images' ZIP or *Save to folder*.
+- The record panel is shorter: one paragraph, no repeated warning, no checker.
+- On a phone the header buttons shorten (*Check*, *Options*) and the local-only note keeps only its dot.
+
+### Added
+
+- **Check a record against the image.** The new window also takes the image, and says whether it is the original or the
+  cleaned file the record describes, or reports a problem when it is neither. Only the image's SHA-256 is computed, in the
+  browser, and sent: the picture never leaves the page. `/api/record/verify` accepts `image_sha256` and answers `image`.
+- `tests/test_preset_ui.py`, a real browser driving the presets, their persistence, the migration of an older save and
+  the rule that Evidence is never believed from storage; new cases in `tests/test_record_web.py` and
+  `tests/test_record_ui.py`.
+
 ## [2.0.4]
 
 A signed **processing record**, for people who must be able to show later what was done to a file: the new, optional

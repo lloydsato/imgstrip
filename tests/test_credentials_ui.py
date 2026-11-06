@@ -84,7 +84,7 @@ SCRIPT = textwrap.dedent(
       await page.goto(url);
       await page.waitForSelector('#optionsToggle');
       await page.waitForFunction(() => document.querySelector('#credIdentity').children.length > 0);  // the page has finished starting: it draws the saved identity only after it has loaded its settings
-      await page.click('#optionsToggle');
+      await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
       out.initial = { checked: await page.isChecked('#c2paSwitch input'), panelOpen: await open('#credentials') };
 
       await flipSwitch();
@@ -127,7 +127,7 @@ SCRIPT = textwrap.dedent(
       await page.reload();
       await page.waitForFunction(() => document.querySelector('#credIdentity').children.length > 0);  // the page has finished starting: it draws the saved identity only after it has loaded its settings
       await page.waitForSelector('#optionsToggle');
-      await page.click('#optionsToggle');
+      await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
       out.reloaded = { checked: await page.isChecked('#c2paSwitch input'), panelOpen: await open('#credentials') };
       await flipSwitch();
       await page.waitForSelector('.cred-card');

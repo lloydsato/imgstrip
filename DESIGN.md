@@ -113,6 +113,8 @@ Nothing is boxed in a card and nothing floats. Parts are separated by hairlines 
 
 The signature is the engraved seal: a guilloché rosette computed from the cleaned file's SHA-256, so the same file always earns the same seal. Theme follows the operating system with no toggle.
 
+The Options tray opens on one segmented choice, **Sharing / Evidence / Custom**: three joined cells with a hairline between them, the chosen one filled with the selected tone and underlined in ink (never the plate, which belongs to the next action). Custom reveals the full list of selects and switches; Evidence reveals only the record's own fields. *Check a record* is a modal window of the same plain ground, with a hairline-bordered verdict (teal, amber or vermilion with its own icon, never colour alone) and one line per check.
+
 **Key characteristics**
 - Two panes from 900px up (list, then a 340 to 460px detail). Below 900px one column; the detail opens as a full-screen sheet.
 - One family (Schibsted Grotesk) for every word, 12 to 17px, plus a 24px step for the detail's heading and the empty state. System mono for hashes and coordinates only.

@@ -41,13 +41,26 @@
         <span class="local-text"><span class="local-long">Runs on this computer only</span><span class="local-short">Local only</span></span>
         <span class="local-addr" id="localAddr"></span>
       </span>
-      <button class="btn btn-outline" id="optionsToggle" type="button" aria-expanded="false" aria-controls="options">Options</button>
+      <button class="btn btn-outline" id="checkOpen" type="button" aria-haspopup="dialog" aria-label="Check a record" hidden>Check<span class="lbl-extra"> a record</span></button>
+      <button class="btn btn-outline" id="optionsToggle" type="button" aria-expanded="false" aria-controls="options" hidden>Options</button>
     </div>
   </header>
 
   <div class="reveal" id="options" data-open="false">
     <div class="reveal-inner">
       <form class="options" id="optionsForm" autocomplete="off">
+        <fieldset class="preset" id="preset">
+          <legend class="group-label">Clean for</legend>
+          <div class="seg">
+            <label class="seg-opt"><input type="radio" name="preset" value="sharing"><span>Sharing</span></label>
+            <label class="seg-opt"><input type="radio" name="preset" value="evidence"><span>Evidence</span></label>
+            <label class="seg-opt"><input type="radio" name="preset" value="custom"><span>Custom</span></label>
+          </div>
+          <p class="preset-sum" id="presetSum" aria-live="polite"></p>
+        </fieldset>
+        <div class="reveal" id="custom" data-open="false">
+        <div class="reveal-inner">
+        <div class="custom-grid">
         <div class="field">
           <label for="opt-format">Save as</label>
           <span class="select"><select id="opt-format" name="format">
@@ -186,6 +199,9 @@
             </div>
           </div>
         </div>
+        </div>
+        </div>
+        </div>
       </form>
       <section class="reveal" id="credentials" data-open="false" aria-labelledby="credTitle">
         <div class="reveal-inner">
@@ -253,7 +269,7 @@
         <div class="reveal-inner">
           <div class="cred">
             <h3 class="cred-title" id="recTitle">Processing record</h3>
-            <p class="cred-lede">For each cleaned image you get a small text file listing the SHA-256 of the original and of the cleaned file, the versions and options used, what was removed and the checks that passed. Sign it with your own key and any later edit is detectable. It names the original file, so keep it with your evidence and never share it with the image. Nothing here leaves this computer, and your key is kept in memory only.</p>
+            <p class="cred-lede">A separate signed text file for each image: the SHA-256 of the original and of the cleaned file, what was done, and the checks that passed. It names the original file, so keep it with your evidence, never with the image.</p>
             <div class="cred-settings rec-fields">
               <div class="field">
                 <label for="rec-case">Case reference <span class="hint">optional</span></label>
@@ -291,26 +307,9 @@
                 <button class="btn btn-quiet btn-small" id="recNewCancel" type="button">Cancel</button>
               </div>
             </form>
-            <div class="cred-hints" id="recHints"></div>
             <div class="cred-receipts" id="recHeld" hidden>
               <p class="note"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg><span id="recHeldText"></span></p>
-              <button class="btn btn-secondary btn-small" id="recDownload" type="button"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-download"/></svg><span>Download records</span></button>
             </div>
-            <form class="cred-load rec-check" id="recCheckForm" autocomplete="off">
-              <h4 class="group-label" id="recCheckTitle">Check a record</h4>
-              <div class="field">
-                <label for="rec-file">Record file <span class="hint">.imgstrip-record.json</span></label>
-                <input type="file" id="rec-file" accept=".json,application/json">
-              </div>
-              <div class="field">
-                <label for="rec-pub">Public key <span class="hint">optional; otherwise the key loaded here</span></label>
-                <input type="file" id="rec-pub" accept=".pem,.pub">
-              </div>
-              <div class="cred-actions">
-                <button class="btn btn-secondary btn-small" id="recCheck" type="submit">Check record</button>
-              </div>
-              <div id="recVerdict" aria-live="polite"></div>
-            </form>
           </div>
         </div>
       </section>
@@ -398,6 +397,7 @@
         </div>
         <p class="foot-summary" id="summary"></p>
         <div class="foot-actions">
+          <button class="btn btn-secondary" id="recDownload" type="button" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-key"/></svg><span></span></button>
           <button class="btn btn-secondary" id="saveToggle" type="button" aria-expanded="false" aria-controls="save"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-folder"/></svg><span>Save to folder</span></button>
           <button class="btn btn-secondary" id="downloadSome" type="button"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-download"/></svg><span></span></button>
           <button class="btn btn-plate" id="primary" type="button"><span></span></button>
@@ -425,6 +425,32 @@
       <div class="detail" id="detailContent" tabindex="-1"></div>
     </aside>
   </div>
+
+  <dialog class="rc-dialog" id="checkDialog" aria-labelledby="checkTitle">
+    <form class="rc-form" id="recCheckForm" autocomplete="off">
+      <div class="rc-head">
+        <h2 class="rc-title" id="checkTitle">Check a record</h2>
+        <button class="btn btn-quiet" id="checkClose" type="button" aria-label="Close"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-x"/></svg></button>
+      </div>
+      <p class="cred-lede">For anyone who receives a cleaned image and its record: is the record intact, who signed it, and does it describe this image? Nothing leaves this computer.</p>
+      <div class="field">
+        <label for="rec-file">Record file <span class="hint">.imgstrip-record.json</span></label>
+        <input type="file" id="rec-file" accept=".json,application/json">
+      </div>
+      <div class="field">
+        <label for="rec-image">Image <span class="hint">optional; confirms it is the one the record describes</span></label>
+        <input type="file" id="rec-image" accept="image/*,.heic,.heif,.avif,.tif,.tiff,.psd,.tga,.qoi,.jp2,.j2k,.dds,.icns,.pcx,.sgi,.ppm,.pgm,.pbm,.pnm">
+      </div>
+      <div class="field">
+        <label for="rec-pub">Public key <span class="hint">optional; otherwise the key loaded here</span></label>
+        <input type="file" id="rec-pub" accept=".pem,.pub">
+      </div>
+      <div class="cred-actions">
+        <button class="btn btn-plate btn-small" id="recCheck" type="submit">Check record</button>
+      </div>
+      <div id="recVerdict" aria-live="polite"></div>
+    </form>
+  </dialog>
 
   <div class="drop-veil" id="veil" aria-hidden="true"><p>Drop to scan</p></div>
   <div class="info-tip" id="infoTip" role="status"></div>

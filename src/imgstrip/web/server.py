@@ -654,6 +654,21 @@ def verify_record_payload(session: Session, payload: dict) -> dict:
     out = verdict.as_dict()
     out["short"] = record.short_id(verdict.key_id) if verdict.key_id else None
     out["trusted_by"] = basis
+    out["image"] = None
+    image = payload.get("image_sha256")
+    if image not in (None, ""):
+        # The page fingerprints the image itself; only the 64 hex digits come here, never the picture.
+        if not isinstance(image, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", image):
+            raise ApiError(400, "The image fingerprint must be 64 hexadecimal digits.")
+        image = image.lower()
+        if verdict.status != record.INVALID:
+            for which, key in (("cleaned", "output"), ("original", "input")):
+                if image == ((verdict.body or {}).get(key) or {}).get("sha256"):
+                    out["image"] = which
+                    break
+            if out["image"] is None:
+                out["ok"] = False
+                out["problems"].append("the image you gave does not match the record (SHA-256 differs)")
     return out
 
 

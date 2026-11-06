@@ -132,7 +132,7 @@ SCRIPT = textwrap.dedent(
       for (const [label, width] of [['wide', 1280], ['phone', 320]]) {
         const page = await open('info-' + label, { width, height: label === 'phone' ? 700 : 900 });
         await add(page, ['plain.png']);
-        await page.click('#optionsToggle');
+        await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
         if (await page.$eval('#opt-c2pa', (e) => !e.disabled)) { await page.click('#c2paSwitch'); await page.waitForTimeout(400); }
         const keys = await page.$$eval('button.info[data-info]', (els) => els.filter((e) => e.offsetParent).map((e) => e.dataset.info));
         const rows = [];
@@ -409,7 +409,7 @@ SCRIPT = textwrap.dedent(
           await add(page, ['plain.png', 'photo.jpg', 'tiny.jpg', 'junk.bin']);
           row.states.list = await probe(page);
           if (scheme === 'light') await page.screenshot({ path: `${shotDir}/list-${w}.png` });
-          await page.click('#optionsToggle');
+          await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
           await page.waitForTimeout(350);
           row.states.options = await probe(page);
           const last = page.locator('#options button.info[data-info="optimize"]');
@@ -420,7 +420,7 @@ SCRIPT = textwrap.dedent(
           row.bubbleRect = await page.$eval('#infoTip .info-bubble', (e) => { const r = e.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom, vw: innerWidth, vh: innerHeight }; });
           if (scheme === 'light') await page.screenshot({ path: `${shotDir}/bubble-${w}.png` });
           await page.keyboard.press('Escape');
-          await page.click('#optionsToggle');
+          await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
           await page.waitForTimeout(350);
           await cleanAll(page);
           row.states.cleaned = await probe(page);
@@ -438,7 +438,7 @@ SCRIPT = textwrap.dedent(
       {
         const page = await open('touch', { width: 390, height: 800, touch: true });
         await add(page, ['plain.png', 'photo.jpg']);
-        await page.click('#optionsToggle');
+        await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
         await page.waitForTimeout(350);
         const small = () => page.evaluate(() => {
           const out = [];
@@ -465,7 +465,7 @@ SCRIPT = textwrap.dedent(
       for (const scheme of ['light', 'dark']) {
         const page = await open('contrast-' + scheme, { width: 1280, height: 900, scheme });
         await add(page, ['plain.png', 'photo.jpg', 'tiny.jpg', 'junk.bin', 'exif.jpg']);
-        await page.click('#optionsToggle');
+        await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
         await page.waitForTimeout(350);
         const measure = () => page.evaluate(() => {
           const parse = (c) => { const m = c.match(/rgba?\(([^)]+)\)/); if (!m) return [0, 0, 0, 0]; const p = m[1].split(/[ ,/]+/).filter(Boolean).map(Number); return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1]; };
@@ -508,7 +508,7 @@ SCRIPT = textwrap.dedent(
           return { checked, bad };
         });
         out.contrast[scheme + '_options'] = await measure();
-        await page.click('#optionsToggle');
+        await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
         await page.waitForTimeout(350);
         await page.click('.file:nth-child(5) .file-head');
         await page.waitForTimeout(200);

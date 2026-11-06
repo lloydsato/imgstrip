@@ -88,7 +88,7 @@ SCRIPT = textwrap.dedent(
         });
         await page.goto(url);
         await page.waitForSelector('#optionsToggle');
-        await page.click('#optionsToggle');
+        await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
         for (const s of switches) await page.click(`label.switch:has(input[name=${s}])`);
         if (format) await page.selectOption('#opt-format', format);
         return page;

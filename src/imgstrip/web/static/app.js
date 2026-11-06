@@ -17,6 +17,14 @@
     deep: false, jpeg_lossless: false, scrub_lsb: false, scrub_alpha: false, scrub_dct: false, jpeg_canonical: false, scrub_prnu: false, auto_orient: true, optimize: false, random_name: false,
     c2pa: false, c2pa_date: 'day', c2pa_detail: 'minimal', c2pa_commit: false,
     record: false, record_case: '', record_operator: '',
+    preset: 'sharing',
+  };
+  // Sharing and Evidence set every option; Custom shows them all. Evidence is never carried to the next launch
+  // (it signs, and a signing key lives in memory for one run only), so it is saved as Sharing.
+  const PRESET_TEXT = {
+    sharing: 'Standard cleaning: every label removed and the file rebuilt from its pixels. Choose Custom for credentials, scrubbing and JPEG options.',
+    evidence: 'Standard cleaning, plus a signed record for each image, kept apart from the images. Fill in the case and sign below.',
+    custom: 'Every option is shown below.',
   };
   // Never carried from one launch to the next: signing needs an identity loaded in this very run,
   // committing to the original is a deliberate act each time, and a record carries a case reference and an
@@ -107,9 +115,10 @@
     record: $('#record'), recordSwitch: $('#recordSwitch'), recKey: $('#recKey'), recKeyForm: $('#recKeyForm'),
     recKeyFile: $('#rec-keyfile'), recPass: $('#rec-pass'), recKeyError: $('#recKeyError'), recKeyLoad: $('#recKeyLoad'),
     recNewForm: $('#recNewForm'), recNewPass: $('#rec-newpass'), recNewError: $('#recNewError'), recNewMake: $('#recNewMake'),
-    recCase: $('#rec-case'), recOperator: $('#rec-operator'), recHints: $('#recHints'), recHeld: $('#recHeld'),
+    recCase: $('#rec-case'), recOperator: $('#rec-operator'), recHeld: $('#recHeld'),
     recHeldText: $('#recHeldText'), recCheckForm: $('#recCheckForm'), recFile: $('#rec-file'), recPub: $('#rec-pub'),
-    recCheck: $('#recCheck'), recVerdict: $('#recVerdict'),
+    recCheck: $('#recCheck'), recVerdict: $('#recVerdict'), recImage: $('#rec-image'), recDownload: $('#recDownload'),
+    checkOpen: $('#checkOpen'), checkDialog: $('#checkDialog'), checkClose: $('#checkClose'), custom: $('#custom'), presetSum: $('#presetSum'),
     review: $('#review'), reviewToggle: $('#reviewToggle'), reviewTitle: $('#reviewTitle'), reviewPanel: $('#reviewPanel'),
     reviewGroups: $('#reviewGroups'), reviewLive: $('#reviewLive'),
   };
@@ -189,6 +198,9 @@
       for (const k of Object.keys(OPTION_DEFAULTS)) {
         if (!VOLATILE.includes(k) && saved && typeof saved[k] === typeof OPTION_DEFAULTS[k]) out[k] = saved[k];
       }
+      // An older save has no preset: any changed option means the person had set things up themselves.
+      const changed = Object.keys(OPTION_DEFAULTS).some((k) => !['preset', 'deep'].includes(k) && !VOLATILE.includes(k) && out[k] !== OPTION_DEFAULTS[k]);
+      out.preset = changed || (saved && saved.preset === 'custom') ? 'custom' : 'sharing';
       return out;
     } catch {
       return { ...OPTION_DEFAULTS };
@@ -1859,27 +1871,61 @@
 
   // ---------------------------------------------------------------- options
 
-  function initOptions(info) {
-    const select = $('#opt-format');
-    for (const f of info.formats) select.append(h('option', { value: f, text: formatName(f) }));
-    const form = els.optionsForm;
+  // Put every option's value into its control (a select the engine cannot offer falls back to its default).
+  function writeOptionFields() {
     for (const [k, v] of Object.entries(state.options)) {
-      const field = form.elements.namedItem(k);
+      const field = els.optionsForm.elements.namedItem(k);
       if (!field) continue;
       if (field.type === 'checkbox') field.checked = !!v;
       else field.value = v;
       if (field.tagName === 'SELECT' && field.value !== String(v)) { field.value = OPTION_DEFAULTS[k]; state.options[k] = OPTION_DEFAULTS[k]; }
     }
+  }
+
+  function syncPreset() {
+    const p = state.options.preset;
+    for (const radio of els.optionsForm.elements.namedItem('preset')) radio.checked = radio.value === p;
+    setOpen(els.custom, null, p === 'custom');
+    els.presetSum.textContent = PRESET_TEXT[p];
+    els.optionsToggle.replaceChildren(...['Options', p === 'sharing' ? null : h('span', { class: 'lbl-extra', text: ` · ${p === 'evidence' ? 'Evidence' : 'Custom'}` })].filter(Boolean));
+  }
+
+  // Sharing and Evidence start from the standard settings (Evidence adds the record); Custom keeps what is set.
+  // The Deep scan switch and the case and operator text are not part of a preset, so they stay as they are.
+  function applyPreset(name) {
+    if (name === 'custom') {
+      state.options.preset = 'custom';
+    } else {
+      const keep = { deep: state.options.deep, record_case: state.options.record_case, record_operator: state.options.record_operator };
+      Object.assign(state.options, OPTION_DEFAULTS, keep, { preset: name, record: name === 'evidence' });
+    }
+    writeOptionFields();
+    syncPreset();
+    syncCredentials();
+    syncRecord();
+    local.set(OPTIONS_KEY, JSON.stringify(persistable()));
+  }
+
+  function initOptions(info) {
+    const select = $('#opt-format');
+    for (const f of info.formats) select.append(h('option', { value: f, text: formatName(f) }));
+    const form = els.optionsForm;
+    writeOptionFields();
+    syncPreset();
     // A switch can sit outside the form and still belong to it (Deep scan, in the action bar), so listen on the page.
     document.addEventListener('change', (e) => {
       const f = e.target;
       if (!f.name || f.form !== form) return;
       const beforeKey = keysSignature();
       const beforeDeep = state.options.deep;
-      state.options[f.name] = f.type === 'checkbox' ? f.checked : f.value;
-      local.set(OPTIONS_KEY, JSON.stringify(persistable()));
-      if (f.name === 'c2pa') syncCredentials({ focus: state.options.c2pa });
-      if (f.name === 'record') syncRecord({ focus: state.options.record });
+      if (f.name === 'preset') {
+        applyPreset(f.value);
+      } else {
+        state.options[f.name] = f.type === 'checkbox' ? f.checked : f.value;
+        local.set(OPTIONS_KEY, JSON.stringify(persistable()));
+        if (f.name === 'c2pa') syncCredentials({ focus: state.options.c2pa });
+        if (f.name === 'record') syncRecord({ focus: state.options.record });
+      }
       if (f.name === 'deep' && beforeDeep !== state.options.deep) {
         // Files still waiting re-check the setting when their scan returns (see scan()).
         for (const item of state.items) if (item.state === 'scanned' || item.state === 'scanfailed') scan(item);
@@ -1895,7 +1941,10 @@
 
   // ---------------------------------------------------------------- content credentials
 
-  const persistable = () => Object.fromEntries(Object.entries(state.options).filter(([k]) => !VOLATILE.includes(k)));
+  const persistable = () => ({
+    ...Object.fromEntries(Object.entries(state.options).filter(([k]) => !VOLATILE.includes(k))),
+    preset: state.options.preset === 'custom' ? 'custom' : 'sharing',
+  });
 
   function openCredentials() {
     setOpen(els.options, els.optionsToggle, true);
@@ -2234,17 +2283,12 @@
       note('Give the public key to everyone who checks your records. The private key stays in memory here and is lost when you stop imgstrip-web; to keep it between runs start imgstrip-web with --record-key.')));
   }
 
-  function renderRecordHints() {
-    const hints = [];
-    const caps = state.info && state.info.record;
-    if (state.options.record && !state.recordKey) hints.push(note('Records will be unsigned: they describe the work but cannot show that they were left unedited.', 'warn'));
-    if (caps && caps.available) hints.push(note('The record names the original file and its fingerprint. Keep it with your evidence, apart from the cleaned images, and never publish it.'));
-    els.recHints.replaceChildren(...hints);
-  }
-
   function renderRecordHeld() {
     const n = withRecord().length;
     els.recHeld.hidden = !n;
+    els.recDownload.hidden = !n;
+    $('span', els.recDownload).textContent = state.packing ? 'Packing…' : n > 1 ? `Records (${n})` : 'Record';
+    setBusy(els.recDownload, state.packing);
     if (n) els.recHeldText.textContent = `${plural(n, 'record')} ready. They are separate from the images and are lost when you stop imgstrip-web, so download them with your evidence.`;
   }
 
@@ -2270,12 +2314,58 @@
     }
   }
 
+  const VERDICT_HEAD = { trusted: 'Trusted', signed: 'Signed, key not checked', unsigned: 'Not signed', invalid: 'Cannot be trusted' };
   const VERDICT_TEXT = {
     trusted: ['ok', 'The signature is valid and the key is the one you trust. This record has not been edited since it was signed.'],
     signed: ['', 'The signature is intact, but it was not compared with a key you trust, so anyone could have made it. Load your key here, or choose its public key, to be sure.'],
     unsigned: ['warn', 'This record is not signed, so nothing shows that it was left unedited.'],
     invalid: ['error', 'This record cannot be trusted.'],
   };
+
+  const sentence = (text) => { const t = String(text).trim(); return t.charAt(0).toUpperCase() + t.slice(1) + (/[.!?]$/.test(t) ? '' : '.'); };
+
+  function checkRow(kind, text) {
+    const glyph = kind === 'ok' ? 'check' : kind === 'warn' ? 'alert' : kind === 'error' ? 'x' : 'info';
+    return h('li', { class: `rc-row${kind ? ` is-${kind}` : ''}` }, icon(glyph), h('span', { text }));
+  }
+
+  // What was checked, one line each, then who and when. A line never relies on colour alone: each has its own icon.
+  function verdictView(res, imageGiven) {
+    const [kind, text] = VERDICT_TEXT[res.status] || ['error', 'This record cannot be checked.'];
+    const rows = [];
+    if (res.status === 'trusted' || res.status === 'signed') rows.push(checkRow('ok', `The signature is valid${res.short ? ` (key ${res.short})` : ''}.`));
+    if (res.status === 'trusted') rows.push(checkRow('ok', 'The signer is the key you trust.'));
+    if (res.status === 'signed') rows.push(checkRow('warn', 'The signer is not confirmed: no public key was given.'));
+    if (res.status === 'unsigned') rows.push(checkRow('warn', 'There is no signature to check.'));
+    for (const problem of res.problems) rows.push(checkRow('error', sentence(problem)));
+    if (imageGiven) {
+      if (res.image === 'cleaned' || res.image === 'original') rows.push(checkRow('ok', `The image is the ${res.image} file this record describes.`));
+    } else if (res.status !== 'invalid') {
+      rows.push(checkRow('', 'No image was given, so the record was not compared with a file.'));
+    }
+    const out = [
+      h('p', { class: `verdict is-${kind || 'plain'}` }, h('strong', { text: VERDICT_HEAD[res.status] || 'Cannot be checked' }), h('span', { text })),
+      h('ul', { class: 'rc-rows' }, ...rows),
+    ];
+    if (res.status !== 'invalid' || res.created) {
+      const facts = [];
+      const add = (label, value, mono = false) => { if (value) facts.push(h('dt', { text: label }), h('dd', { class: mono ? 'mono' : '', text: value })); };
+      add('Case', res.case);
+      add('Operator', res.operator);
+      add('Recorded', res.created);
+      add('Key', res.short, true);
+      if (res.input) { add('Original', res.input.name); add('Original SHA-256', res.input.sha256, true); }
+      if (res.output) { add('Cleaned', res.output.name); add('Cleaned SHA-256', res.output.sha256, true); }
+      if (facts.length) out.push(h('dl', { class: 'cred-facts' }, ...facts));
+    }
+    return out;
+  }
+
+  async function sha256Hex(file) {
+    if (!window.crypto || !window.crypto.subtle) throw new Error('This browser cannot fingerprint a file here. Check the record without the image.');
+    const digest = await window.crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+    return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+  }
 
   async function submitRecordCheck(event) {
     event.preventDefault();
@@ -2289,25 +2379,35 @@
     setBusy(els.recCheck, true);
     try {
       const pub = els.recPub.files[0];
-      const res = await api('/api/record/verify', {
-        json: { record: await fileToBase64(file, 'a record'), pubkey: pub ? await fileToBase64(pub, 'a public key') : null },
-      });
-      const [kind, text] = VERDICT_TEXT[res.status] || ['error', 'This record cannot be checked.'];
-      const out = [note(text, kind)];
-      for (const p of res.problems) out.push(note(p, res.ok ? '' : 'error'));
-      if (res.status !== 'invalid' || res.created) {
-        const who = [res.case && `case ${res.case}`, res.operator && `operator ${res.operator}`].filter(Boolean).join(', ');
-        if (res.created) out.push(h('p', { class: 'credential-line', text: `Recorded ${res.created}${who ? ` (${who})` : ''}${res.short ? ` · key ${res.short}` : ''}` }));
-        if (res.input) out.push(h('p', { class: 'rec-fp', text: `Original  ${res.input.sha256}  ${res.input.name}` }));
-        if (res.output) out.push(h('p', { class: 'rec-fp', text: `Cleaned   ${res.output.sha256}  ${res.output.name}` }));
-      }
-      els.recVerdict.replaceChildren(...out);
-      announce(`${res.ok ? 'Record checked' : 'Record problem'}: ${text}`);
+      const image = els.recImage.files[0];
+      const json = { record: await fileToBase64(file, 'a record'), pubkey: pub ? await fileToBase64(pub, 'a public key') : null };
+      if (image) json.image_sha256 = await sha256Hex(image); // the image itself never leaves the page, only its fingerprint
+      const res = await api('/api/record/verify', { json });
+      els.recVerdict.replaceChildren(...verdictView(res, !!image));
+      announce(`Record checked: ${VERDICT_HEAD[res.status] || 'cannot be checked'}${res.problems.length ? `. ${res.problems.length === 1 ? 'One problem' : `${res.problems.length} problems`} found` : ''}.`);
     } catch (err) {
       els.recVerdict.replaceChildren(note(err.message, 'error'));
     } finally {
       setBusy(els.recCheck, false);
     }
+  }
+
+  function openCheck() {
+    if (typeof els.checkDialog.showModal === 'function') els.checkDialog.showModal();
+    else els.checkDialog.setAttribute('open', '');
+    els.recFile.focus();
+  }
+
+  function closeCheck() {
+    if (typeof els.checkDialog.close === 'function') els.checkDialog.close();
+    else els.checkDialog.removeAttribute('open');
+    resetCheck();
+  }
+
+  // Nothing is kept between checks: the chosen files and the answer are dropped when the window closes.
+  function resetCheck() {
+    els.recCheckForm.reset();
+    els.recVerdict.replaceChildren();
   }
 
   function syncRecord({ focus = false } = {}) {
@@ -2316,7 +2416,6 @@
     input.checked = on;
     setOpen(els.record, null, on);
     renderRecordKey();
-    renderRecordHints();
     renderRecordHeld();
     if (on && focus) window.setTimeout(() => els.recCase.focus(), 120);
   }
@@ -2336,6 +2435,11 @@
     els.recKeyForm.addEventListener('submit', submitRecordKey);
     els.recNewForm.addEventListener('submit', submitNewRecordKey);
     els.recCheckForm.addEventListener('submit', submitRecordCheck);
+    els.checkOpen.hidden = !(info.record && info.record.available);
+    els.checkOpen.addEventListener('click', openCheck);
+    els.checkClose.addEventListener('click', closeCheck);
+    els.checkDialog.addEventListener('close', resetCheck); // Escape closes it too
+    els.checkDialog.addEventListener('click', (e) => { if (e.target === els.checkDialog) closeCheck(); }); // the dim area around it
     $('#recKeyCancel').addEventListener('click', () => closeRecordForms('load'));
     $('#recNewCancel').addEventListener('click', () => closeRecordForms('new'));
     $('#recDownload').addEventListener('click', downloadRecords);
@@ -2504,6 +2608,7 @@
     initOptions(state.info);
     initCredentials(state.info);
     initRecord(state.info);
+    els.optionsToggle.hidden = false; // the options are wired up: only now can they be opened
     render();
   }
 

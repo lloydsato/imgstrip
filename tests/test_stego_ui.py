@@ -67,7 +67,7 @@ SCRIPT = textwrap.dedent(
 
       await page.goto(url);
       await page.waitForSelector('#optionsToggle');
-      await page.click('#optionsToggle');
+      await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
 
       // Without Deep scan the pixels are not scanned, and the row says so
       await page.setInputFiles('#picker', [small]);
@@ -187,7 +187,7 @@ UNAPPLIED_SCRIPT = textwrap.dedent(
       });
       await page.goto(url);
       await page.waitForSelector('#optionsToggle');
-      await page.click('#optionsToggle');
+      await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
       await page.click('label.switch:has(input[name=scrub_lsb])');
       await page.setInputFiles('#picker', [mask]);
       await page.waitForSelector('.file[data-state="scanned"]');

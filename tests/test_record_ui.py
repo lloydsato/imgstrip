@@ -1,8 +1,9 @@
 """A real browser drives the processing-record UI (skipped when Node, Playwright or Chromium are missing).
 
-It checks what static tests cannot: that the switch reveals the panel, that a key can be made and its file saved,
-that the case, operator and passphrase never reach browser storage, that the record is offered apart from the image,
-and that a downloaded record can be checked on the page, and an edited one cannot.
+It checks what static tests cannot: that the Evidence preset reveals the panel, that a key can be made and its file
+saved, that the case, operator and passphrase never reach browser storage, that the record is offered apart from the
+image, and that a downloaded record can be checked in the Check a record window (with and without the image), and an
+edited one cannot.
 """
 
 from __future__ import annotations
@@ -51,6 +52,8 @@ SCRIPT = textwrap.dedent(
       page.on('console', (m) => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
       const open = async (selector) => (await page.getAttribute(selector, 'data-open')) === 'true';
       const flip = () => page.locator('#recordSwitch input').dispatchEvent('click');
+      const pick = (v) => page.locator('input[name=preset][value=' + v + ']').dispatchEvent('click');
+      const preset = () => page.evaluate(() => document.querySelector('input[name=preset]:checked').value);
       const stored = () => page.evaluate(() => JSON.stringify([localStorage, sessionStorage].map((s) => Object.fromEntries(Object.entries(s)))));
       const text = async (sel) => (await page.textContent(sel)).replace(/\s+/g, ' ').trim();
       const saveDownload = async (trigger, name) => {
@@ -64,11 +67,11 @@ SCRIPT = textwrap.dedent(
       await page.waitForSelector('#optionsToggle');
       await page.waitForFunction(() => document.querySelector('#recKey').children.length > 0);
       await page.click('#optionsToggle');
-      out.initial = { checked: await page.isChecked('#recordSwitch input'), panelOpen: await open('#record') };
+      out.initial = { preset: await preset(), checked: await page.isChecked('#recordSwitch input'), panelOpen: await open('#record'), customOpen: await open('#custom'), toggle: await text('#optionsToggle') };
 
-      await flip();
+      await pick('evidence');
       await page.waitForTimeout(300);
-      out.ticked = { checked: await page.isChecked('#recordSwitch input'), panelOpen: await open('#record'), key: await text('#recKey'), hints: await text('#recHints') };
+      out.ticked = { preset: await preset(), checked: await page.isChecked('#recordSwitch input'), panelOpen: await open('#record'), customOpen: await open('#custom'), toggle: await text('#optionsToggle'), summary: await text('#presetSum'), key: await text('#recKey') };
 
       await page.fill('#rec-case', 'CASE-2026-114');
       await page.fill('#rec-operator', 'Det. Example');
@@ -94,28 +97,40 @@ SCRIPT = textwrap.dedent(
       out.stale = await text('.file-side');
       await page.click('#primary');
       await page.waitForFunction(() => document.querySelector('.credential') && document.querySelector('.credential').textContent.includes('Signed with key'), null, { timeout: 30000 });
-      out.signed = { block: await text('.credential'), held: await text('#recHeld') };
+      out.signed = { block: await text('.credential'), held: await text('#recHeld'), button: await text('#recDownload'), buttonVisible: await page.isVisible('#recDownload') };
       out.storage = await stored();
 
       // the record is its own download, and the image has none of it
-      const rec = await saveDownload(() => page.click('[data-key="download-record"]'), 'record.json');
+      const rec = await saveDownload(() => page.click('#recDownload'), 'record.json');
       const img = await saveDownload(() => page.click('[data-key="download"]'), 'clean.jpg');
       out.files = { recName: rec.suggested, imgName: img.suggested, imgHasCase: fs.readFileSync(img.path).includes('CASE-2026-114') };
 
-      // check it on the page: intact, then edited
-      await page.setInputFiles('#rec-file', rec.path);
-      await page.click('#recCheck');
-      await page.waitForFunction(() => document.querySelector('#recVerdict').textContent.length > 0);
-      out.checkOk = await text('#recVerdict');
+      // check it in its own window: intact (no image, then the cleaned image, then the original), a wrong image, edited
+      await page.click('#checkOpen');
+      out.dialogOpen = await page.evaluate(() => document.querySelector('#checkDialog').open);
+      out.dialogFocus = await page.evaluate(() => document.activeElement.id);
+      const checkWith = async (record, image) => {
+        await page.setInputFiles('#rec-file', record || []);
+        await page.setInputFiles('#rec-image', image || []);
+        await page.evaluate(() => { document.querySelector('#recVerdict').replaceChildren(); });
+        await page.click('#recCheck');
+        await page.waitForFunction(() => document.querySelector('#recVerdict').textContent.length > 0);
+        return text('#recVerdict');
+      };
+      out.checkOk = await checkWith(rec.path, null);
+      out.checkClean = await checkWith(rec.path, img.path);
+      out.checkOriginal = await checkWith(rec.path, photo);
+      out.checkWrongImage = await checkWith(rec.path, rec.path);
       const edited = workdir + '/edited.json';
       fs.writeFileSync(edited, rec.text.replace('CASE-2026-114', 'CASE-2026-999'));
-      await page.setInputFiles('#rec-file', edited);
-      await page.click('#recCheck');
-      await page.waitForFunction(() => document.querySelector('#recVerdict').textContent.includes('cannot be trusted'));
-      out.checkBad = await text('#recVerdict');
-      await page.setInputFiles('#rec-file', []);
-      await page.click('#recCheck');
-      out.checkNone = await text('#recVerdict');
+      out.checkBad = await checkWith(edited, null);
+      out.checkNone = await checkWith(null, null);
+      // Escape closes it and drops what was chosen
+      await page.setInputFiles('#rec-file', rec.path);
+      await page.keyboard.press('Escape');
+      // the page resets the form in the dialog's close event, which the browser delivers a moment after the key
+      await page.waitForFunction(() => !document.querySelector('#checkDialog').open && document.querySelector('#rec-file').files.length === 0 && document.querySelector('#recVerdict').children.length === 0);
+      out.dialogClosed = { open: await page.evaluate(() => document.querySelector('#checkDialog').open), file: await page.evaluate(() => document.querySelector('#rec-file').files.length), verdict: await page.evaluate(() => document.querySelector('#recVerdict').children.length) };
 
       // the key can be removed; the next clean is stale again and unsigned
       await page.locator('#record [data-key="remove"]').dispatchEvent('click');
@@ -140,12 +155,18 @@ SCRIPT = textwrap.dedent(
       await page.waitForSelector('#optionsToggle');
       await page.waitForFunction(() => document.querySelector('#recKey').children.length > 0);
       await page.click('#optionsToggle');
-      out.reloaded = { checked: await page.isChecked('#recordSwitch input'), panelOpen: await open('#record'), caseValue: await page.inputValue('#rec-case'), operatorValue: await page.inputValue('#rec-operator') };
-      await flip();
+      out.reloaded = { preset: await preset(), checked: await page.isChecked('#recordSwitch input'), panelOpen: await open('#record'), caseValue: await page.inputValue('#rec-case'), operatorValue: await page.inputValue('#rec-operator') };
+      // the arrow keys move through the presets and leave the focus on the choice
+      await page.focus('input[name=preset][value=sharing]');
+      await page.keyboard.press('ArrowRight');
       await page.waitForSelector('.cred-card');
+      out.arrow = { preset: await preset(), focus: await page.evaluate(() => document.activeElement.name + ':' + document.activeElement.value) };
       out.afterReload = await text('#recKey');
 
-      // keyboard
+      // Custom keeps the record on and shows its switch; the space bar toggles it
+      await pick('custom');
+      await page.waitForTimeout(300);
+      out.custom = { customOpen: await open('#custom'), panelOpen: await open('#record'), checked: await page.isChecked('#recordSwitch input') };
       await page.focus('#recordSwitch input');
       await page.keyboard.press('Space');
       out.keyboard = await page.isChecked('#recordSwitch input');
@@ -179,9 +200,11 @@ def test_the_record_ui_end_to_end(app, tmp_path):
     assert proc.returncode == 0, proc.stderr
     got = json.loads(proc.stdout.strip().splitlines()[-1])
 
-    assert got["initial"] == {"checked": False, "panelOpen": False}, "off by default, panel hidden"
-    assert got["ticked"]["checked"] and got["ticked"]["panelOpen"]
-    assert "No signing key loaded" in got["ticked"]["key"] and "unsigned" in got["ticked"]["hints"]
+    assert got["initial"] == {"preset": "sharing", "checked": False, "panelOpen": False, "customOpen": False, "toggle": "Options"}
+    assert got["ticked"]["preset"] == "evidence" and got["ticked"]["checked"] and got["ticked"]["panelOpen"]
+    assert got["ticked"]["customOpen"] is False, "Evidence hides the full list of options"
+    assert got["ticked"]["toggle"] == "Options · Evidence" and "signed record" in got["ticked"]["summary"]
+    assert "No signing key loaded" in got["ticked"]["key"] and "unsigned" in got["ticked"]["key"]
 
     assert "Not signed" in got["unsigned"]["block"] and "never share it with the image" in got["unsigned"]["block"]
     assert "1 record ready" in got["unsigned"]["held"]
@@ -192,11 +215,18 @@ def test_the_record_ui_end_to_end(app, tmp_path):
 
     assert "Signed with key" in got["signed"]["block"] and "Not signed" not in got["signed"]["block"]
     assert "1 record ready" in got["signed"]["held"]
+    assert got["signed"]["buttonVisible"] and got["signed"]["button"] == "Record", "the record has its own button in the action bar"
 
     assert got["files"]["recName"].endswith(record.SUFFIX) and got["files"]["imgName"].endswith(".jpg")
     assert got["files"]["imgHasCase"] is False
 
-    assert "has not been edited" in got["checkOk"] and "CASE-2026-114" in got["checkOk"] and "Det. Example" in got["checkOk"]
+    assert got["dialogOpen"] is True and got["dialogFocus"] == "rec-file"
+    assert "Trusted" in got["checkOk"] and "has not been edited" in got["checkOk"] and "CASE-2026-114" in got["checkOk"] and "Det. Example" in got["checkOk"]
+    assert "No image was given" in got["checkOk"]
+    assert "cleaned file this record describes" in got["checkClean"] and "No image was given" not in got["checkClean"]
+    assert "original file this record describes" in got["checkOriginal"]
+    assert "does not match the record" in got["checkWrongImage"] and "describes" not in got["checkWrongImage"]
+    assert got["dialogClosed"] == {"open": False, "file": 0, "verdict": 0}
     assert "cannot be trusted" in got["checkBad"] and "changed after it was signed" in got["checkBad"]
     assert "Choose a record file first" in got["checkNone"]
 
@@ -209,7 +239,9 @@ def test_the_record_ui_end_to_end(app, tmp_path):
         assert secret not in got["storage"] and secret not in got["storageAfter"], secret
     assert 'record\\":true' not in got["storageAfter"]
 
-    assert got["reloaded"] == {"checked": False, "panelOpen": False, "caseValue": "", "operatorValue": ""}
+    assert got["reloaded"] == {"preset": "sharing", "checked": False, "panelOpen": False, "caseValue": "", "operatorValue": ""}
+    assert got["arrow"] == {"preset": "evidence", "focus": "preset:evidence"}
+    assert got["custom"] == {"customOpen": True, "panelOpen": True, "checked": True}, "Evidence then Custom keeps the record on"
     assert "Ed25519" in got["afterReload"], "the server still holds the key"
     assert got["keyboard"] is False, "the space bar toggles the switch"
     assert "never share it with the picture" in got["info"]

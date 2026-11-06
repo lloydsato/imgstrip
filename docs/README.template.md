@@ -232,7 +232,7 @@ Drop photos onto the window and each one shows what it gives away, with its SHA-
   <img src="https://raw.githubusercontent.com/lloydsato/imgstrip/main/docs/screenshots/web-app.png" alt="The imgstrip web app after four photos were dropped on it. The list on the left shows each photo with what it gives away and its SHA-256 and MD5. The pane on the right is open on the first photo and says it shows where it was taken, which camera took it and when. A button at the bottom reads Clean 4 images." width="760">
 </div>
 
-Open **Options** for the same switches as the command line (*Deep scan* sits next to the Clean button), and press the (i) beside any of them for an explanation in plain words: *Deep scan*, *Keep JPEG data bit-exact*, *Scrub least-significant bits*, *Clean transparency channel*, *Disrupt camera fingerprint*, *Sign with Content Credentials*, *Keep a processing record*, plus the output format, quality and colour profile.
+Open **Options** and choose *Sharing* (the standard settings), *Evidence* (adds a signed processing record, with fields for the case, operator and key) or *Custom*, which shows the same switches as the command line (*Deep scan* sits next to the Clean button). *Check a record* in the header checks a record, and an image against it. Press the (i) beside any switch for an explanation in plain words: *Deep scan*, *Keep JPEG data bit-exact*, *Scrub least-significant bits*, *Clean transparency channel*, *Disrupt camera fingerprint*, *Sign with Content Credentials*, *Keep a processing record*, plus the output format, quality and colour profile.
 
 Options that do not apply to the images you added are greyed out, and ones that cannot be done for them are greyed out with a yellow warning triangle and the reason.
 

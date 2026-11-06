@@ -735,7 +735,9 @@ def test_every_option_in_the_page_reaches_the_server():
     names = set(re.findall(r'<(?:input|select)[^>]*\bname="(\w+)"', form))
     assert {"scrub_lsb", "scrub_prnu", "jpeg_lossless", "auto_orient", "optimize", "icc", "format", "quality"} <= names
     send = js[js.index("function cleanOptions") : js.index("const optionsKey")]
-    for name in names - {"deep"}:  # the deep scan is a scan setting, not a clean option
+    assert "preset" in names and re.search(r"\bpreset\b", js[: js.index("const OPTIONS_KEY")]), "the preset has a default"
+    # The deep scan is a scan setting, and the preset only chooses values for the other options: neither is sent.
+    for name in names - {"deep", "preset"}:
         assert re.search(rf"\b{name}\b", send), f"{name} is in the page but never sent to /api/clean"
         assert re.search(rf"\b{name}\b", js[: js.index("const OPTIONS_KEY")]), f"{name} has no default"
 

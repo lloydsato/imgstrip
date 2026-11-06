@@ -57,9 +57,9 @@ SCRIPT = textwrap.dedent(
         await page.waitForTimeout(200);
       };
       const options = async (page, names) => {
-        await page.click('#optionsToggle');
+        await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
         for (const s of names) await page.click(`label.switch:has(input[name=${s}])`);
-        await page.click('#optionsToggle');
+        await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
         await page.waitForTimeout(300);
       };
 
@@ -170,7 +170,7 @@ SCRIPT = textwrap.dedent(
       {
         const page = await open('tray', { width: 375, height: 700 });
         await add(page, many);
-        await page.click('#optionsToggle');
+        await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
         for (const s of ['scrub_lsb', 'scrub_dct', 'scrub_prnu']) await page.click(`label.switch:has(input[name=${s}])`);
         await page.waitForTimeout(300);
         out.tray = { box: await box(page, '#options > .reveal-inner'), vh: 700, breaks: await breaks(page) };

@@ -227,13 +227,30 @@ code, .mono { font-family: var(--mono); font-size: 0.92em; font-feature-settings
   max-height: min(76vh, 720px);
   background: var(--pane);
 }
-.options {
+.options { padding: 18px var(--gutter) 20px; background: var(--pane); }
+.custom-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px 20px;
-  padding: 20px var(--gutter);
-  background: var(--pane);
+  padding-top: 16px;
 }
+
+/* ---- the three presets: one segmented choice, no plate (the plate is the next action) ---- */
+.preset { min-width: 0; margin: 0; padding: 0; border: 0; display: grid; gap: 8px; }
+.preset .group-label { padding: 0; float: none; }
+.seg { display: inline-flex; justify-self: start; max-width: 100%; border: 1px solid var(--control); border-radius: var(--r-ctl); overflow: hidden; background: var(--bg); }
+.seg-opt { position: relative; display: block; }
+.seg-opt + .seg-opt { border-left: 1px solid var(--control); }
+.seg-opt input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.seg-opt span {
+  display: grid; place-items: center; min-width: 96px; height: 38px; padding: 0 18px;
+  font-size: var(--t-sm); font-weight: 600; color: var(--ink-2);
+  transition: background-color var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+.seg-opt input:checked + span { background: var(--selected); color: var(--ink); font-weight: 720; box-shadow: inset 0 -3px 0 var(--ink); }
+.seg-opt input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: -3px; }
+@media (hover: hover) { .seg-opt input:not(:checked):hover + span { background: var(--hover); color: var(--ink); } }
+.preset-sum { max-width: 64ch; font-size: var(--t-xs); line-height: 1.5; color: var(--ink-2); }
 .field { display: grid; gap: 6px; align-content: start; min-width: 0; }
 .field label, .save label { font-size: var(--t-xs); font-weight: 640; color: var(--ink-2); }
 .hint { font-weight: 400; color: var(--ink-3); }
@@ -802,12 +819,36 @@ input[type="file"]:focus-visible { outline: 2px solid var(--focus); outline-offs
 
 /* processing record (optional): it reuses the credentials panel's pieces */
 #record[data-open="true"] { border-top: 1px solid var(--line); }
-.rec-check { padding-top: 12px; border-top: 1px solid var(--line); }
-.rec-check .group-label, .rec-check #recVerdict { grid-column: 1 / -1; }
-#recVerdict { display: grid; gap: 6px; }
+
+/* ---- Check a record: a window of its own ---------------------------------------- */
+.rc-dialog {
+  width: min(560px, calc(100vw - 24px)); max-height: calc(100vh - 24px); padding: 0; overflow: auto;
+  border: 1px solid var(--control); border-radius: var(--r-box); background: var(--bg); color: var(--ink);
+}
+.rc-dialog::backdrop { background: rgb(8 14 12 / 0.5); }
+.rc-form { display: grid; gap: 14px; padding: 18px var(--gutter) 22px; }
+.rc-form > * { min-width: 0; }
+.rc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.rc-title { font-size: 1.0625rem; font-weight: 700; letter-spacing: -0.01em; }
+.rc-form .cred-actions { padding-top: 2px; }
+#recVerdict { display: grid; gap: 12px; }
 #recVerdict:empty { display: none; }
 #recVerdict .note { font-size: var(--t-xs); max-width: none; }
-.rec-fp { font-family: var(--mono); font-size: 0.6875rem; overflow-wrap: anywhere; color: var(--ink-2); }
+.verdict { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid var(--line); border-left-width: 4px; border-radius: var(--r-ctl); background: var(--pane); font-size: var(--t-sm); line-height: 1.45; }
+.verdict strong { font-size: 0.9375rem; font-weight: 720; }
+.verdict.is-ok { border-color: var(--verified-line); border-left-color: var(--verified); background: var(--verified-bg); }
+.verdict.is-ok strong { color: var(--verified); }
+.verdict.is-warn { border-color: var(--warn-line); border-left-color: var(--warn); background: var(--warn-bg); }
+.verdict.is-warn strong { color: var(--warn); }
+.verdict.is-error { border-color: var(--leak-line); border-left-color: var(--leak); background: var(--leak-bg); }
+.verdict.is-error strong { color: var(--leak); }
+.rc-rows { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.rc-row { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; align-items: start; font-size: var(--t-sm); line-height: 1.45; color: var(--ink-2); }
+.rc-row .icon { width: 18px; height: 18px; margin-top: 1px; }
+.rc-row.is-ok .icon { color: var(--verified); }
+.rc-row.is-warn .icon { color: var(--warn); }
+.rc-row.is-error .icon { color: var(--leak); }
+.rc-row.is-error { color: var(--ink); }
 
 /* a signed file's credential, in its detail */
 .credential {
@@ -845,7 +886,7 @@ input[type="file"]:focus-visible { outline: 2px solid var(--focus); outline-offs
 
 @media (max-width: 899.98px) {
   :root { --gutter: 20px; }
-  .options { grid-template-columns: minmax(0, 1fr); }
+  .custom-grid { grid-template-columns: minmax(0, 1fr); }
   .switches { grid-template-columns: minmax(0, 1fr); }
   .switch-group:first-child { grid-row: auto; }
   .cred-load, .cred-settings { grid-template-columns: minmax(0, 1fr); }
@@ -873,9 +914,11 @@ input[type="file"]:focus-visible { outline: 2px solid var(--focus); outline-offs
   .verified { grid-template-columns: 56px minmax(0, 1fr); gap: 12px; }
   .verified .seal { width: 56px; height: 56px; }
 }
-@media (max-width: 340px) {
+@media (max-width: 480px) {
+  .lbl-extra { display: none; }
   .local-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .brand { gap: 8px; }
+  .bar-end { gap: 8px; }
 }
 
 /* A row is laid out by the width of the list, not the screen, so it holds wherever the list sits. */
@@ -904,6 +947,7 @@ input[type="file"]:focus-visible { outline: 2px solid var(--focus); outline-offs
 @media (pointer: coarse) {
   .btn, select, input[type="text"], input[type="password"] { min-height: 44px; }
   .btn-quiet, .btn-small, .btn-outline { min-height: 44px; }
+  .seg-opt span { height: 44px; }
   .list-tools .btn { min-height: 44px; }
   .info { width: 44px; height: 44px; margin: -12px 0 -12px -8px; }
   .copy { width: 44px; height: 44px; margin: -8px -8px -8px -12px; }
@@ -925,7 +969,9 @@ input[type="file"]:focus-visible { outline: 2px solid var(--focus); outline-offs
   .switch-track::after { background: CanvasText; }
   .switch input:checked + .switch-track { background: Highlight; }
   .switch input:checked + .switch-track::after { background: HighlightText; }
-  .verified, .credential, .cred-card, .review, .foot-note, .support.is-warn, .info-bubble { outline: 1px solid CanvasText; }
+  .verified, .credential, .cred-card, .review, .foot-note, .support.is-warn, .info-bubble, .verdict { outline: 1px solid CanvasText; }
+  .seg { border-color: CanvasText; }
+  .seg-opt input:checked + span { outline: 2px solid Highlight; outline-offset: -2px; box-shadow: none; }
   .file[data-selected="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
   .drop { border-color: CanvasText; }
   .tag::before { background: CanvasText; }

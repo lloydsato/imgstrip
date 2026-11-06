@@ -36,7 +36,7 @@ SCRIPT = textwrap.dedent(
         page.on('console', (m) => { if (m.type() === 'error') errors.push(name + ' console: ' + m.text()); });
         await page.goto(url);
         await page.waitForSelector('#optionsToggle');
-        await page.click('#optionsToggle');
+        await page.click('#optionsToggle'); await page.locator('input[name=preset][value=custom]').dispatchEvent('click');
         if (name === 'default') {
           out.switches = {};
           for (const n of ['scrub_dct', 'jpeg_canonical', 'jpeg_lossless', 'scrub_lsb']) {

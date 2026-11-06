@@ -353,6 +353,49 @@ def test_a_private_key_given_as_the_public_key_is_refused(app):
     assert status == 422 and "PRIVATE" in res["error"]
 
 
+def test_an_image_fingerprint_is_matched_to_the_cleaned_or_the_original_file(app):
+    new_key(app)
+    original = photo()
+    result = app.clean(original, options=KEEP)
+    document = download(app, result["record"]["id"])
+    cleaned = download(app, result["id"])
+    payload = {"record": b64(document)}
+    status, res = app.json("POST", "/api/record/verify", {**payload, "image_sha256": sha(cleaned)})
+    assert status == 200 and res["status"] == "trusted" and res["ok"] is True and res["image"] == "cleaned"
+    status, res = app.json("POST", "/api/record/verify", {**payload, "image_sha256": sha(original).upper()})
+    assert status == 200 and res["ok"] is True and res["image"] == "original", "upper-case hex is accepted"
+    status, res = app.json("POST", "/api/record/verify", payload)
+    assert res["image"] is None and res["problems"] == [], "no image given: nothing said about one"
+
+
+def test_an_image_that_is_not_the_one_in_the_record_is_a_problem_even_when_the_record_is_sound(app):
+    new_key(app)
+    document = download(app, app.clean(photo(), options=KEEP)["record"]["id"])
+    status, res = app.json("POST", "/api/record/verify", {"record": b64(document), "image_sha256": sha(b"some other picture")})
+    assert status == 200 and res["status"] == "trusted", "the signature is still good"
+    assert res["ok"] is False and res["image"] is None
+    assert any("does not match the record" in p for p in res["problems"])
+
+
+def test_an_invalid_record_is_not_also_blamed_for_an_image_it_cannot_describe(app):
+    status, res = app.json("POST", "/api/record/verify", {"record": b64(b"just some text"), "image_sha256": sha(b"x")})
+    assert status == 200 and res["status"] == "invalid" and res["image"] is None
+    assert not any("does not match" in p for p in res["problems"])
+
+
+@pytest.mark.parametrize("bad", ["abc", "z" * 64, "0" * 63, "0" * 65, 7, ["0" * 64], {"a": 1}])
+def test_a_malformed_image_fingerprint_is_refused(app, bad):
+    status, res = app.json("POST", "/api/record/verify", {"record": b64(b"{}"), "image_sha256": bad})
+    assert status == 400 and "64 hexadecimal digits" in res["error"]
+
+
+def test_the_image_itself_is_never_sent_only_its_fingerprint():
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = js[js.index("async function submitRecordCheck") : js.index("function openCheck")]
+    assert "image_sha256" in body and "sha256Hex(image)" in body
+    assert "fileToBase64(image" not in body and "arrayBuffer" not in body, "the file is hashed in sha256Hex, not uploaded"
+
+
 # --------------------------------------------------------------------------
 # The gates still apply
 # --------------------------------------------------------------------------
@@ -382,6 +425,30 @@ def test_the_page_has_the_record_switch_the_panel_and_the_forms():
     ids = re.findall(r'\bid="([^"]+)"', html)
     assert len(ids) == len(set(ids)), "duplicate ids"
     assert re.search(r'aria-controls="record"', html)
+
+
+def test_the_tray_opens_on_three_presets_and_keeps_the_full_list_behind_custom():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    form = html[html.index('id="optionsForm"') : html.index("</form>", html.index('id="optionsForm"'))]
+    radios = re.findall(r'<input type="radio" name="preset" value="(\w+)"', form)
+    assert radios == ["sharing", "evidence", "custom"]
+    custom = form[form.index('id="custom"') :]
+    for name in ("format", "quality", "icc", "scrub_lsb", "scrub_prnu", "jpeg_lossless", "auto_orient", "optimize", "record", "c2pa"):
+        assert f'name="{name}"' in custom, f"{name} lives under Custom"
+    assert 'name="preset"' not in custom
+    assert len(re.findall(r'role="switch"', form)) == 11, "the eleven option switches (Deep scan is in the action bar, the credentials one in its own panel)"
+
+
+def test_checking_a_record_has_a_window_of_its_own_not_a_place_in_the_tray():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    dialog = html[html.index("<dialog") : html.index("</dialog>")]
+    for needle in ('id="recCheckForm"', 'id="rec-file"', 'id="rec-image"', 'id="rec-pub"', 'id="recVerdict"', 'id="checkClose"'):
+        assert needle in dialog, needle
+    options = html[html.index('id="options"') : html.index('id="body"')]
+    assert "recCheckForm" not in options and "rec-file" not in options, "the tray no longer holds the checker"
+    assert 'id="checkOpen"' in html[: html.index('id="options"')], "the button is in the header"
+    assert re.search(r'id="recDownload"[^>]*hidden', html), "the records button sits in the action bar, hidden until there are records"
+    assert html.index('id="recDownload"') > html.index('id="foot"')
 
 
 def test_every_label_in_the_record_panel_points_at_a_field():
