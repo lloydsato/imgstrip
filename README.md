@@ -5,7 +5,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-2.0.3-2fbf8f?style=flat-square)](https://pypi.org/project/imgstrip/)
+[![Version](https://img.shields.io/badge/version-2.0.4-2fbf8f?style=flat-square)](https://pypi.org/project/imgstrip/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://pypi.org/project/imgstrip/)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-blue?style=flat-square)](https://github.com/lloydsato/imgstrip/blob/main/LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/lloydsato/imgstrip/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/lloydsato/imgstrip/actions/workflows/ci.yml)
@@ -98,7 +98,7 @@ Check which version you have:
 
 ```console
 $ imgstrip --version
-imgstrip 2.0.3
+imgstrip 2.0.4
 ```
 
 Want to be sure the install works? Run `imgstrip --self-test`. It builds 21 booby-trapped test images, cleans them in every mode, and has independent image readers confirm the results.
@@ -116,6 +116,12 @@ Signing cleaned images with a Content Credential (C2PA) is optional and needs an
 
 ```console
 pip install 'imgstrip[c2pa]'
+```
+
+Signing the optional processing record (see below) needs a smaller one, the `cryptography` library:
+
+```console
+pip install 'imgstrip[record]'
 ```
 
 </details>
@@ -152,6 +158,7 @@ The defaults already remove metadata, hidden containers and appended data. The s
 | A photo being linked to your specific camera (sensor fingerprint) | `--scrub-prnu` | Moves parts of the picture by a few pixels. Strong reduction, never proof |
 | Colours that must stay exact | `--icc sanitize` | Embeds a rebuilt, anonymous colour profile |
 | Showing readers the image was sanitised, not altered | `--c2pa` | Needs `pip install 'imgstrip[c2pa]'` and a signing certificate |
+| Being able to show later exactly what was done to a file (evidence work) | `--record DIR` | A separate signed text file with both hashes and what was done. Sign it with your own key (`pip install 'imgstrip[record]'`). It names the original, so it stays with the evidence |
 | File names that leak dates (`IMG_20240517_133700.jpg`) | `--random-name` | None |
 
 ## Everyday use
@@ -220,7 +227,7 @@ Drop photos onto the window and each one shows what it gives away, with its SHA-
   <img src="https://raw.githubusercontent.com/lloydsato/imgstrip/main/docs/screenshots/web-app.png" alt="The imgstrip web app after four photos were dropped on it. The list on the left shows each photo with what it gives away and its SHA-256 and MD5. The pane on the right is open on the first photo and says it shows where it was taken, which camera took it and when. A button at the bottom reads Clean 4 images." width="760">
 </div>
 
-Open **Options** for the same switches as the command line (*Deep scan* sits next to the Clean button), and press the (i) beside any of them for an explanation in plain words: *Deep scan*, *Keep JPEG data bit-exact*, *Scrub least-significant bits*, *Clean transparency channel*, *Disrupt camera fingerprint*, *Sign with Content Credentials*, plus the output format, quality and colour profile.
+Open **Options** for the same switches as the command line (*Deep scan* sits next to the Clean button), and press the (i) beside any of them for an explanation in plain words: *Deep scan*, *Keep JPEG data bit-exact*, *Scrub least-significant bits*, *Clean transparency channel*, *Disrupt camera fingerprint*, *Sign with Content Credentials*, *Keep a processing record*, plus the output format, quality and colour profile.
 
 Options that do not apply to the images you added are greyed out, and ones that cannot be done for them are greyed out with a yellow warning triangle and the reason.
 
@@ -262,6 +269,7 @@ The full technical reference covers every option, the exact list of what gets re
 | 🧬 [JPEG steganography workflow](https://github.com/lloydsato/imgstrip/blob/main/docs/DCT_WORKFLOW.md) | When and how to use `--jpeg-canonical` and `--scrub-dct` |
 | 🛰 [Sensor fingerprint (PRNU)](https://github.com/lloydsato/imgstrip/blob/main/docs/REFERENCE.md#camera-sensor-fingerprint-prnu) | What `--scrub-prnu` does and how well it works, measured |
 | 🪪 [Content Credentials (C2PA)](https://github.com/lloydsato/imgstrip/blob/main/docs/REFERENCE.md#content-credentials-c2pa-optional) | Signing sanitised images, trust, and what a credential can and cannot say |
+| 🗂 [Processing record](https://github.com/lloydsato/imgstrip/blob/main/docs/REFERENCE.md#processing-record-optional) | A signed account of what was done to a file, kept with the evidence, and how to check it |
 
 ## Development
 

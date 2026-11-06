@@ -62,13 +62,13 @@ def test_every_switch_has_an_info_button_right_beside_it():
         assert m, row[:300]
         names.append(m.group(1))
         assert row.index('class="info"') < row.index('class="hint"'), m.group(1)
-    assert len(names) == len(set(names)) == len(re.findall(r'role="switch"', HTML)) == 12, names
+    assert len(names) == len(set(names)) == len(re.findall(r'role="switch"', HTML)) == 13, names
 
 
 def test_every_info_button_has_a_plain_words_explanation():
     infos = _info_texts()
     keys = re.findall(r'data-info="(\w+)"', HTML)
-    assert len(keys) == len(set(keys)) == 12
+    assert len(keys) == len(set(keys)) == 13
     assert set(keys) == set(infos), set(keys) ^ set(infos)
     for key, text in infos.items():
         assert 40 <= len(text) <= 520, (key, len(text))

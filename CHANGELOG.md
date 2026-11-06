@@ -3,6 +3,56 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
+## [2.0.4]
+
+A signed **processing record**, for people who must be able to show later what was done to a file: the new, optional
+`--record` (and *Keep a processing record* in the web app). Nothing changes unless you ask for it: the cleaned files are
+byte-identical to 2.0.3 in every mode, with or without a record, and the engine, the sandbox and the checks are untouched.
+
+### Added
+
+- **A record of each cleaning, kept beside the evidence and never inside the image.** After a file is cleaned, imgstrip
+  writes a small JSON file with the SHA-256 of the original and of the cleaned file (and their sizes and formats), the
+  versions of imgstrip, Python, Pillow and numpy, the options used, what was removed, the actions taken, the warnings,
+  the checks that passed, the time (UTC, to the second) and an optional case reference and operator name. It holds no host
+  or user name. It is named after the cleaned file and a stretch of its hash (`photo.jpg.<12 hex>.imgstrip-record.json`),
+  written private to its owner (mode 0600, in a folder made 0700) and never replaces an earlier record unless `--force`
+  is given. `--record DIR` turns it on; `--case TEXT` and `--operator TEXT` fill the two optional fields.
+- **Signed with your own key, so an edit shows.** The record is signed with an Ed25519 key you make with
+  `--new-record-key FILE` (private key mode 0600, optionally protected by a passphrase, and `FILE.pub` to hand to
+  whoever checks your records) and name with `--record-key FILE`. The signature covers the *canonical form* of the record
+  (sorted keys, no spaces, ASCII escapes; the record holds no floating-point numbers) so any JSON library can check it;
+  the format is written down in `docs/REFERENCE.md`. Passphrases are taken from `IMGSTRIP_RECORD_PASSPHRASE`, from
+  `--record-passphrase-file` or typed, and never from the command line. Signing needs the new optional extra
+  `pip install 'imgstrip[record]'` (the `cryptography` library; it is the only thing the extra adds, and it is unrelated to
+  the C2PA extra). Without a key the record is still written, is labelled **unsigned** everywhere and says that nothing
+  shows it was left unedited.
+- **`--verify-record`** checks records and changes nothing: is the signature intact, is it made by the key you trust
+  (`--record-pubkey FILE`), and, with `--record-original` and `--record-cleaned`, are these the very files the record
+  names. Exit 0 only for a signed record that passes, 3 for an edited, unsigned or non-matching one, 1 for one it could not
+  read. A signature that is intact but was not compared with a key you trust is reported as exactly that: anyone can sign
+  a record of their own.
+- **In the web app**: *Options → Keep a processing record* opens a panel with case and operator fields, the signing key
+  (load a PEM file, or create one: the private key is downloaded once and kept in memory only, like the Content Credentials
+  identity), a download of the public key, and *Check a record*, which tells you whether a record is intact and made by
+  the key loaded here (or one you choose). Each cleaned image's detail shows its record with a download button, and
+  *Download records* gives them all, as one file or a ZIP that holds only records. They are never in the images' ZIP and
+  never saved into the images' folder. `imgstrip-web --record-key FILE` loads the key at start-up so it never travels
+  through the browser. The switch, the case and the operator are never kept in browser storage.
+- The record is as sensitive as the original it names. imgstrip refuses to put it in the folder the cleaned files go to,
+  the web app keeps it apart, and `SECURITY.md` and the reference say so.
+
+### Fixed
+
+- Nothing in the existing features; the one defect found while writing this (a passphrase set in the environment made an
+  unprotected key look "protected") was in the new code and never released.
+
+### Not claimed
+
+- A record is the tool's own account of its work. It shows that the account was not edited since it was signed; it does
+  not show that the original was untouched before imgstrip saw it, that the clock was right (the time is the computer's,
+  not a trusted timestamp), or that the key belongs to who they say: that is for whoever holds the public key to settle.
+
 ## [2.0.3]
 
 A review of the attack surface of 2.0.2, and the fixes for what it found. The engine's output is unchanged (the

@@ -49,7 +49,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import __version__
-from .. import credentials, stego
+from .. import credentials, record, stego
 from ..cli import RAW_EXTENSIONS, output_extension
 from ..core import EXTENSIONS, OUTPUT_FORMATS, Options, StripError, heif_available, inspect_isolated, strip_image
 from ..fileio import write_new
@@ -288,7 +288,7 @@ class Session:
         self._lock_fd = _hold_lock(self.dir / PID_FILE)
         self._items: dict[str, Stored] = {}
         self._lock = threading.Lock()
-        self._last_zip: str | None = None
+        self._last_zip: dict[str, str] = {}  # the one ZIP held per kind (images, records)
         self._retired: set[str] = set()
         self.jobs = threading.BoundedSemaphore(max(1, min(4, (os.cpu_count() or 2) // 2)))
         # Content Credentials.  The signing key lives here, in memory only: it is never written to
@@ -298,6 +298,23 @@ class Session:
         self._assessment = None
         self._anchors: bytes | None = None
         self._receipts: list[dict] = []
+        # The processing-record key (Ed25519), in memory only like the identity.  None means records are unsigned.
+        self._record_signer = None
+
+    def set_record_signer(self, signer) -> None:
+        from .. import sandbox
+
+        sandbox.harden_process()  # a key is about to live in this process's memory
+        with self._lock:
+            self._record_signer = signer
+
+    def forget_record_signer(self) -> None:
+        with self._lock:
+            self._record_signer = None
+
+    def record_signer(self):
+        with self._lock:
+            return self._record_signer
 
     def set_identity(self, identity, assessment, anchors: bytes | None) -> None:
         from .. import sandbox
@@ -347,10 +364,11 @@ class Session:
             return False
         return hashlib.sha256(token.encode("utf-8", "surrogateescape")).hexdigest() in self._retired
 
-    def replace_zip(self, rid: str) -> None:
-        """Keep one ZIP at a time: each one is a full copy of the batch."""
+    def replace_zip(self, rid: str, kind: str = "clean") -> None:
+        """Keep one ZIP of each kind at a time: each one is a full copy of the batch."""
         with self._lock:
-            old, self._last_zip = self._last_zip, rid
+            old = self._last_zip.get(kind)
+            self._last_zip[kind] = rid
         if old:
             self.delete(old)
 
@@ -392,6 +410,7 @@ class Session:
     def close(self) -> None:
         self.reset()
         self.forget_identity()
+        self.forget_record_signer()
         with self._lock:
             self._receipts = []
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -551,6 +570,93 @@ def parse_credentials(raw, anchors: bytes | None) -> credentials.Config | None:
     return credentials.Config(date_precision=date, detail=detail, commit_source=commit, anchors=anchors)
 
 
+@dataclass(frozen=True)
+class RecordRequest:
+    case: str | None
+    operator: str | None
+
+
+def parse_record(raw) -> RecordRequest | None:
+    """The page's processing-record request, or None when the switch is off."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ApiError(400, "record must be an object")
+    keep = raw.get("keep", False)
+    if not isinstance(keep, bool):
+        raise ApiError(400, "record.keep must be true or false")
+    if not keep:
+        return None
+    fields = []
+    for name, label in (("case", "case reference"), ("operator", "operator name")):
+        value = raw.get(name)
+        if value is not None and not isinstance(value, str):
+            raise ApiError(400, f"The {label} must be text.")
+        try:
+            fields.append(record.clean_text(value, label))
+        except record.RecordError as exc:
+            raise ApiError(400, str(exc)[:1].upper() + str(exc)[1:])
+    return RecordRequest(*fields)
+
+
+def record_key_state(signer) -> dict | None:
+    """What the page may know about the loaded record key: its public half, never the private key."""
+    if signer is None:
+        return None
+    return {"key_id": signer.key_id, "short": record.short_id(signer.key_id), "public_pem": signer.public_pem().decode("ascii")}
+
+
+def load_record_key_payload(session: Session, payload: dict) -> dict:
+    if not record.available():
+        raise ApiError(501, record.INSTALL_HINT)
+    pem = _b64(payload.get("key"), "signing key")
+    passphrase = payload.get("passphrase")
+    if passphrase is not None and not isinstance(passphrase, str):
+        raise ApiError(400, "The passphrase must be text.")
+    try:
+        signer = record.load_signer(pem, passphrase.encode("utf-8") if passphrase else None)
+    except record.PassphraseRequired as exc:
+        raise ApiError(422, str(exc)[:1].upper() + str(exc)[1:] + ".", code="passphrase")
+    except record.RecordError as exc:
+        raise ApiError(422, str(exc)[:1].upper() + str(exc)[1:] + ".")
+    session.set_record_signer(signer)
+    return {"key": record_key_state(signer)}
+
+
+def new_record_key_payload(session: Session, payload: dict) -> dict:
+    """Make a signing key here.  The private half goes back once, to be saved by the person; it is also kept in memory."""
+    if not record.available():
+        raise ApiError(501, record.INSTALL_HINT)
+    passphrase = payload.get("passphrase")
+    if passphrase is not None and not isinstance(passphrase, str):
+        raise ApiError(400, "The passphrase must be text.")
+    private_pem, public_pem, _ = record.generate_key(passphrase.encode("utf-8") if passphrase else None)
+    signer = record.load_signer(private_pem, passphrase.encode("utf-8") if passphrase else None)
+    session.set_record_signer(signer)
+    return {"key": record_key_state(signer), "private_pem": private_pem.decode("ascii"), "protected": bool(passphrase)}
+
+
+def verify_record_payload(session: Session, payload: dict) -> dict:
+    """Check a record file.  The key to trust is the one given, or else the one loaded here."""
+    if not record.available():
+        raise ApiError(501, record.INSTALL_HINT)
+    document = _b64(payload.get("record"), "record file", limit=512 << 10)
+    pubkey = _b64(payload.get("pubkey"), "public key", required=False)
+    trusted, basis = None, None
+    try:
+        if pubkey is not None:
+            trusted, basis = record.load_public(pubkey), "given"
+        elif session.record_signer() is not None:
+            trusted, basis = session.record_signer().public_raw, "loaded"
+    except record.RecordError as exc:
+        raise ApiError(422, str(exc)[:1].upper() + str(exc)[1:] + ".")
+    verdict = record.verify(document, trusted)
+    out = verdict.as_dict()
+    out["short"] = record.short_id(verdict.key_id) if verdict.key_id else None
+    out["trusted_by"] = basis
+    return out
+
+
 def _b64(value, what: str, *, required: bool = True, limit: int = 256 << 10) -> bytes | None:
     if value in (None, ""):
         if required:
@@ -563,7 +669,7 @@ def _b64(value, what: str, *, required: bool = True, limit: int = 256 << 10) -> 
     except (binascii.Error, ValueError):
         raise ApiError(400, f"The {what} could not be decoded.")
     if len(data) > limit:
-        raise ApiError(413, f"The {what} is too large to be a certificate or key.")
+        raise ApiError(413, f"The {what} is too large.")
     return data
 
 
@@ -860,6 +966,7 @@ def clean_payload(
     config: credentials.Config | None = None,
     scan_state: str | None = None,
     random_name: bool = False,
+    keep_record: RecordRequest | None = None,
 ) -> dict:
     """Clean one file.  ``scan_state`` is what the page's pixel scan found in the original, if it ran."""
     if Path(filename).suffix.lower() in RAW_EXTENSIONS:
@@ -900,7 +1007,7 @@ def clean_payload(
     verdict = stego.for_output(source, result.lsb_scrub, copied=result.verified_exact)
     rid = session.put(final, name, _MIME.get(result.output_format, "application/octet-stream"))
     after = fingerprints(final)
-    return {
+    payload = {
         "id": rid,
         "filename": name,
         "input_format": result.input_format,
@@ -928,10 +1035,49 @@ def clean_payload(
         "actions": result.actions,
         "warnings": list(result.warnings) + extra_warnings,
         "credentials": cred_payload,
+        "record": None,
+    }
+    if keep_record is not None:
+        try:
+            payload["record"] = _keep_record(session, keep_record, data, filename, name, options, payload, final)
+        except BaseException:
+            session.delete(rid)  # a cleaned file whose record failed is not offered
+            raise
+    return payload
+
+
+def _keep_record(session, request: RecordRequest, data, filename, name, options, payload, final) -> dict:
+    """Write the processing record of a file just cleaned and store it beside it.  Unsigned when no key is loaded."""
+    signer = session.record_signer()
+    try:
+        body = record.build(
+            input_name=filename,
+            input_data_sha256=payload["before"]["sha256"],
+            input_bytes=len(data),
+            input_format=payload["input_format"],
+            output_name=name,
+            output_data=final,
+            output_format=payload["output_format"],
+            options=options,
+            result=record.result_facts(payload),
+            case=request.case,
+            operator=request.operator,
+        )
+        document = record.seal(body, signer)
+    except (record.RecordError, MemoryError):
+        raise ApiError(422, "The record for this image could not be made.")
+    record_name = record.file_name(name, body["output"]["sha256"])
+    rrid = session.put(document, record_name, "application/json")
+    return {
+        "id": rrid,
+        "filename": record_name,
+        "signed": signer is not None,
+        "key_id": signer.key_id if signer else None,
+        "short": record.short_id(signer.key_id) if signer else None,
     }
 
 
-def zip_results(session: Session, ids: list[str]) -> dict:
+def zip_results(session: Session, ids: list[str], records: bool = False) -> dict:
     items = [session.get(i) for i in ids]
     if not items or any(item is None for item in items):
         raise ApiError(404, "Some cleaned files are no longer available. Clean them again.")
@@ -948,9 +1094,9 @@ def zip_results(session: Session, ids: list[str]) -> dict:
                 with item.path.open("rb") as src, zf.open(info, "w") as dst:
                     shutil.copyfileobj(src, dst, 1 << 20)
 
-    name = "imgstrip-clean.zip"
+    name = "imgstrip-records.zip" if records else "imgstrip-clean.zip"
     rid = session.put_with(name, "application/zip", write)
-    session.replace_zip(rid)
+    session.replace_zip(rid, "records" if records else "clean")
     return {"id": rid, "filename": name, "bytes": session.get(rid).size}
 
 
@@ -1232,12 +1378,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(random_name, bool):
                     raise ApiError(400, "random_name must be true or false")
                 config = parse_credentials(raw.get("credentials") if isinstance(raw, dict) else None, None)
+                keep_record = parse_record(raw.get("record") if isinstance(raw, dict) else None)
                 scan_state = self.headers.get("X-Scan")
                 if scan_state not in (None, stego.DETECTED, stego.NOT_DETECTED):
                     raise ApiError(400, "X-Scan must be detected or not_detected.")
                 with self.session.jobs:
                     data = self._upload()
-                    return self._json(200, clean_payload(self.session, data, filename, options, config, scan_state, random_name))
+                    return self._json(200, clean_payload(self.session, data, filename, options, config, scan_state, random_name, keep_record))
             if route == ("POST", "/api/identity"):
                 return self._json(200, load_identity_payload(self.session, self._json_body()))
             if route == ("POST", "/api/identity/test"):
@@ -1246,6 +1393,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._body(MAX_JSON)
                 self.session.forget_identity()
                 return self._json(200, {"ok": True})
+            if route == ("POST", "/api/record/key"):
+                return self._json(200, load_record_key_payload(self.session, self._json_body()))
+            if route == ("POST", "/api/record/key/new"):
+                return self._json(200, new_record_key_payload(self.session, self._json_body()))
+            if route == ("DELETE", "/api/record/key"):
+                self._body(MAX_JSON)
+                self.session.forget_record_signer()
+                return self._json(200, {"ok": True})
+            if route == ("POST", "/api/record/verify"):
+                return self._json(200, verify_record_payload(self.session, self._json_body()))
             if route == ("POST", "/api/receipts"):
                 self._body(MAX_JSON)
                 receipts = self.session.receipts()
@@ -1254,7 +1411,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.dumps(credentials.receipts_document(receipts), indent=2).encode()
                 return self._send(200, body, "application/json")
             if route == ("POST", "/api/zip"):
-                return self._json(200, zip_results(self.session, self._ids(self._json_body())))
+                payload = self._json_body()
+                return self._json(200, zip_results(self.session, self._ids(payload), records=payload.get("records") is True))
             if route == ("POST", "/api/save"):
                 payload = self._json_body()
                 return self._json(200, save_results(self.session, self._ids(payload), payload.get("folder")))
@@ -1296,6 +1454,11 @@ class Handler(BaseHTTPRequestHandler):
             "credentials": credentials_info(),
             "identity": self._identity_state(),
             "receipts": len(self.session.receipts()),
+            "record": {
+                "available": record.available(),
+                "hint": record.INSTALL_HINT,
+                "key": record_key_state(self.session.record_signer()),
+            },
             "sandbox": _sandbox_state(),
         }
 
@@ -1413,6 +1576,17 @@ def load_startup_identity(session: Session, args, parser: argparse.ArgumentParse
     session.set_identity(identity, assessment, anchors)
 
 
+def load_startup_record_key(session: Session, args, parser: argparse.ArgumentParser) -> None:
+    """Load the record-signing key named on the command line (the same rules as ``imgstrip --record-key``)."""
+    from .. import cli
+
+    try:
+        signer = cli.load_record_signer(args)
+    except cli._Usage as exc:
+        parser.error(str(exc))
+    session.set_record_signer(signer)
+
+
 def _stop_on_signal(signum, frame):  # signal handler signature
     raise KeyboardInterrupt
 
@@ -1454,8 +1628,18 @@ def main(argv: list[str] | None = None) -> int:
         "--c2pa-passphrase-file", metavar="FILE", help="a file holding the key's passphrase (or set IMGSTRIP_C2PA_PASSPHRASE)"
     )
     sign.add_argument("--c2pa-trust-anchors", metavar="FILE", help="trusted root certificates (PEM), to judge your own chain")
+    rec = p.add_argument_group("processing-record key (loaded now so the key never travels through the browser)")
+    rec.add_argument("--record-key", metavar="FILE", help="your Ed25519 record-signing key (PEM, made by imgstrip --new-record-key)")
+    rec.add_argument(
+        "--record-passphrase-file", metavar="FILE", help="a file holding the key's passphrase (or set IMGSTRIP_RECORD_PASSPHRASE)"
+    )
+    rec.add_argument("--record-passphrase", metavar="TEXT", help=argparse.SUPPRESS)  # only to refuse it
     p.add_argument("--version", action="version", version=f"imgstrip {__version__}")
     args = p.parse_args(argv)
+    if args.record_passphrase is not None:
+        p.error("a passphrase is never accepted on the command line: set IMGSTRIP_RECORD_PASSPHRASE or use --record-passphrase-file")
+    if args.record_passphrase_file and not args.record_key:
+        p.error("--record-passphrase-file needs --record-key")
     if not 0 <= args.port <= 65535:
         p.error("--port must be between 0 and 65535")
     from .. import sandbox
@@ -1473,6 +1657,8 @@ def main(argv: list[str] | None = None) -> int:
     httpd.any_user = args.any_user
     if args.c2pa_cert or args.c2pa_key or args.c2pa_passphrase_file or args.c2pa_trust_anchors:
         load_startup_identity(session, args, p)
+    if args.record_key:
+        load_startup_record_key(session, args, p)
     atexit.register(session.close)
     # Closing the terminal (SIGHUP) or `kill` (SIGTERM) must still delete the cleaned files.
     for name in ("SIGTERM", "SIGHUP"):

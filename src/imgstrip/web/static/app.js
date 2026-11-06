@@ -16,10 +16,12 @@
     format: '', quality: '', icc: 'convert',
     deep: false, jpeg_lossless: false, scrub_lsb: false, scrub_alpha: false, scrub_dct: false, jpeg_canonical: false, scrub_prnu: false, auto_orient: true, optimize: false, random_name: false,
     c2pa: false, c2pa_date: 'day', c2pa_detail: 'minimal', c2pa_commit: false,
+    record: false, record_case: '', record_operator: '',
   };
   // Never carried from one launch to the next: signing needs an identity loaded in this very run,
-  // and committing to the original is a deliberate act each time.
-  const VOLATILE = ['c2pa', 'c2pa_commit'];
+  // committing to the original is a deliberate act each time, and a record carries a case reference and an
+  // operator name that belong to one piece of work.
+  const VOLATILE = ['c2pa', 'c2pa_commit', 'record', 'record_case', 'record_operator'];
   const PIXELS = {
     identical: 'The pixels are identical to the file you received.',
     equivalent: 'The picture is the same, but it was re-encoded, so pixel values are not bit-identical.',
@@ -31,7 +33,7 @@
     deep: 'Deep scan', jpeg_lossless: 'Keep JPEG data bit-exact', scrub_lsb: 'Scrub least-significant bits', scrub_alpha: 'Clean transparency channel',
     scrub_dct: 'Scrub JPEG coefficients', jpeg_canonical: 'Rebuild JPEG data canonically', scrub_prnu: 'Disrupt camera fingerprint',
     c2pa: 'Sign with Content Credentials', quality: 'Quality', icc: 'Colour profile', auto_orient: 'Apply orientation',
-    optimize: 'Smaller PNGs', random_name: 'Random file names', c2pa_commit: 'Make it auditable later',
+    optimize: 'Smaller PNGs', random_name: 'Random file names', c2pa_commit: 'Make it auditable later', record: 'Keep a processing record',
   };
   // What each switch does, in plain words, for its (i) button. Written for someone who has never heard of the jargon.
   const INFO = {
@@ -42,6 +44,7 @@
     random_name: 'File names like IMG_20240517_133700 can tell people when a photo was taken. This gives each cleaned file a random name instead.',
     c2pa: 'Adds a signed note to the cleaned file. The note says you removed the hidden information and whether the picture itself is unchanged. It does not say who took the photo or that it is real. You need your own certificate to sign.',
     c2pa_commit: 'Locks a secret fingerprint of the original photo inside the note, so that later you can prove which original a cleaned photo came from. Only the receipt you download can open it, and it is lost when you close imgstrip unless you save it.',
+    record: 'Writes a small separate file for your evidence: a fingerprint of the original and of the cleaned picture, what was removed, which checks passed, the date, and the case and operator you type. If you sign it with your own key, anyone can tell if it was edited later. It names the original file, so keep it with the evidence and never share it with the picture.',
     jpeg_lossless: 'Keeps the JPEG’s picture data exactly as it is and only strips the labels around it. Nothing is re-saved, so quality stays the same. But anything hidden inside the picture data stays too, and the picture can’t be turned upright.',
     scrub_dct: 'For JPEG photos. Slightly changes the numbers JPEG uses to store the picture, which destroys most messages hidden there. The photo may lose a little quality, and the result tells you how much.',
     jpeg_canonical: 'For JPEG photos. Writes the file again in one standard, tidy way, which removes anything tucked into odd corners, padding or spare bits. The picture stays exactly the same. Messages hidden in the picture’s own numbers are not removed.',
@@ -77,6 +80,8 @@
     testRoot: null, // PEM of the test CA when a test identity was made here
     receipts: 0,
     loadingIdentity: false,
+    recordKey: null, // the loaded record-signing key as the server describes it (its public half only)
+    recordBusy: false,
     review: { open: false, expanded: new Set(), signature: '', announced: '' },
     selected: null, // the item whose details are shown
     sheet: false, // narrow screens: the detail is open as a full-screen sheet
@@ -99,6 +104,12 @@
     credDate: $('#cred-date'), credDetail: $('#cred-detail'), credCommit: $('#cred-commit'),
     credHints: $('#credHints'), credReceipts: $('#credReceipts'), receiptText: $('#receiptText'),
     c2paSwitch: $('#c2paSwitch'), c2paHint: $('#c2paHint'),
+    record: $('#record'), recordSwitch: $('#recordSwitch'), recKey: $('#recKey'), recKeyForm: $('#recKeyForm'),
+    recKeyFile: $('#rec-keyfile'), recPass: $('#rec-pass'), recKeyError: $('#recKeyError'), recKeyLoad: $('#recKeyLoad'),
+    recNewForm: $('#recNewForm'), recNewPass: $('#rec-newpass'), recNewError: $('#recNewError'), recNewMake: $('#recNewMake'),
+    recCase: $('#rec-case'), recOperator: $('#rec-operator'), recHints: $('#recHints'), recHeld: $('#recHeld'),
+    recHeldText: $('#recHeldText'), recCheckForm: $('#recCheckForm'), recFile: $('#rec-file'), recPub: $('#rec-pub'),
+    recCheck: $('#recCheck'), recVerdict: $('#recVerdict'),
     review: $('#review'), reviewToggle: $('#reviewToggle'), reviewTitle: $('#reviewTitle'), reviewPanel: $('#reviewPanel'),
     reviewGroups: $('#reviewGroups'), reviewLive: $('#reviewLive'),
   };
@@ -215,10 +226,15 @@
       random_name: !!o.random_name,
     };
     if (o.c2pa) out.credentials = { sign: true, date: o.c2pa_date, detail: o.c2pa_detail, commit: !!o.c2pa_commit };
+    if (o.record) out.record = { keep: true, case: (o.record_case || '').trim() || null, operator: (o.record_operator || '').trim() || null };
     return out;
   }
-  // A different identity is a different result, so it is part of the key.
-  const optionsKey = (item) => JSON.stringify([cleanOptions(optionsFor(item)), item && signingFor(item) && state.identity ? state.identity.fingerprint : null]);
+  // A different identity or record key is a different result, so each is part of the key.
+  const optionsKey = (item) => JSON.stringify([
+    cleanOptions(optionsFor(item)),
+    item && signingFor(item) && state.identity ? state.identity.fingerprint : null,
+    state.options.record && state.recordKey ? state.recordKey.key_id : null,
+  ]);
   const keysSignature = () => state.items.map(optionsKey).join('|');
 
   // ---------------------------------------------------------------- API
@@ -276,6 +292,8 @@
 
   const alive = (item, epoch) => state.epoch === epoch && state.items.includes(item);
   const discard = (id) => api(`/api/result/${id}`, { method: 'DELETE' }).catch(() => {});
+  // A cleaned image and its record go together.
+  const discardResult = (r) => { if (r.record) discard(r.record.id); discard(r.id); };
 
   // ---------------------------------------------------------------- seal
 
@@ -535,8 +553,8 @@
           ? api('/api/clean', { body: item.file, headers: cleanHeaders(item, options) })
           : Promise.reject(GONE)));
         result.key = key;
-        if (!alive(item, epoch)) { discard(result.id); leave(); return; }
-        if (previous) discard(previous.id);
+        if (!alive(item, epoch)) { discardResult(result); leave(); return; }
+        if (previous) discardResult(previous);
         Object.assign(item, { result, state: 'clean', error: null, failedKey: null, justCleaned: true, sealDrawn: false });
         if (result.credentials && result.credentials.committed) { state.receipts += 1; renderReceipts(); }
       } catch (err) {
@@ -570,7 +588,7 @@
   function removeItem(item) {
     const index = state.items.indexOf(item);
     state.items = state.items.filter((i) => i !== item);
-    if (item.result) discard(item.result.id);
+    if (item.result) discardResult(item.result);
     if (item.thumbUrl) URL.revokeObjectURL(item.thumbUrl);
     item.el.remove();
     disarmClear();
@@ -1251,6 +1269,20 @@
     return h('section', { class: 'credential' }, h('h3', { class: 'group-title' }, icon('key'), 'Content Credential'), ...lines);
   }
 
+  // The record kept beside a cleaned file: separate from the image, for the evidence side only.
+  function recordBlock(res) {
+    const r = res.record;
+    const lines = [
+      h('p', { class: 'credential-line' }, h('strong', { text: r.signed ? `Signed with key ${r.short}` : 'Not signed' }), ` · ${r.filename}`),
+      h('p', { class: 'credential-line', text: 'It lists the SHA-256 of the original and of this file, the options, what was removed and which checks passed.' }),
+    ];
+    if (!r.signed) lines.push(note('Without a signing key, nothing shows that this record was left unedited. Load or create a key in Options and clean again.', 'warn'));
+    lines.push(note('It names the original file. Keep it with your evidence and never share it with the image.'));
+    lines.push(h('div', { class: 'd-foot' },
+      h('a', { class: 'btn btn-secondary btn-small', href: `/api/result/${r.id}`, download: r.filename, 'data-key': 'download-record' }, icon('download'), h('span', { text: 'Download record' }))));
+    return h('section', { class: 'credential' }, h('h3', { class: 'group-title' }, icon('key'), 'Processing record'), ...lines);
+  }
+
   // A credential the scanned file already carries (cleaning removes it).
   function foundCredential(c) {
     const lines = [];
@@ -1369,6 +1401,7 @@
     }
 
     if (res.credentials) out.push(credentialBlock(res, o));
+    if (res.record) out.push(recordBlock(res));
     const frames = res.frames > 1 ? ` · ${res.frames} frames` : '';
     out.push(h('p', { class: 'd-meta', text: `${formatName(res.input_format)} ${bytes(res.bytes_in)} → ${formatName(res.output_format)} ${bytes(res.bytes_out)} · ${res.size[0]}×${res.size[1]}${frames} · saved as ${res.filename}` }));
     const stego = stegoOf(item);
@@ -1644,6 +1677,7 @@
   function render() {
     if (state.gate) return;
     syncSupport();
+    renderRecordHeld();
     const items = state.items;
     const any = items.length > 0;
     if (any) renderReview(); else if (!els.review.hidden) renderReview();
@@ -1845,6 +1879,7 @@
       state.options[f.name] = f.type === 'checkbox' ? f.checked : f.value;
       local.set(OPTIONS_KEY, JSON.stringify(persistable()));
       if (f.name === 'c2pa') syncCredentials({ focus: state.options.c2pa });
+      if (f.name === 'record') syncRecord({ focus: state.options.record });
       if (f.name === 'deep' && beforeDeep !== state.options.deep) {
         // Files still waiting re-check the setting when their scan returns (see scan()).
         for (const item of state.items) if (item.state === 'scanned' || item.state === 'scanfailed') scan(item);
@@ -1894,8 +1929,8 @@
     }
   }
 
-  async function fileToBase64(file) {
-    if (file.size > 256 * 1024) throw new Error(`${file.name} is too large to be a certificate or a key.`);
+  async function fileToBase64(file, what = 'a certificate or a key') {
+    if (file.size > 256 * 1024) throw new Error(`${file.name} is too large to be ${what}.`);
     const buf = new Uint8Array(await file.arrayBuffer());
     let bin = '';
     for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
@@ -2078,6 +2113,235 @@
     syncCredentials();
   }
 
+  // ---------------------------------------------------------------- processing record
+
+  const withRecord = () => state.items.filter((i) => i.state === 'clean' && i.result && i.result.record);
+
+  function showRecError(box, text) {
+    box.replaceChildren(icon('alert'), h('span', { text }));
+    box.hidden = false;
+  }
+
+  function closeRecordForms(focusTarget) {
+    els.recKeyForm.reset(); // clears the passphrase and the chosen file
+    els.recNewForm.reset();
+    els.recKeyError.hidden = true;
+    els.recNewError.hidden = true;
+    els.recKeyForm.hidden = true;
+    els.recNewForm.hidden = true;
+    if (focusTarget) {
+      const target = els.recKey.querySelector(`[data-key="${focusTarget}"]`);
+      if (target) target.focus();
+    }
+  }
+
+  function adoptRecordKey(key) {
+    state.recordKey = key;
+    syncRecord();
+    for (const item of state.items) renderItem(item);
+    render();
+  }
+
+  async function submitRecordKey(event) {
+    event.preventDefault();
+    if (state.recordBusy) return;
+    const file = els.recKeyFile.files[0];
+    if (!file) {
+      showRecError(els.recKeyError, 'Choose your signing key file first.');
+      els.recKeyFile.focus();
+      return;
+    }
+    state.recordBusy = true;
+    setBusy(els.recKeyLoad, true);
+    els.recKeyError.hidden = true;
+    let needPassphrase = false;
+    try {
+      const body = { key: await fileToBase64(file, 'a signing key'), passphrase: els.recPass.value || null };
+      const res = await api('/api/record/key', { json: body });
+      closeRecordForms(null);
+      adoptRecordKey(res.key);
+      announce(`Record signing key loaded: ${res.key.short}.`);
+      els.recKey.querySelector('button')?.focus();
+    } catch (err) {
+      showRecError(els.recKeyError, err.message);
+      needPassphrase = err.code === 'passphrase';
+    } finally {
+      els.recPass.value = ''; // never kept longer than the request needs it
+      state.recordBusy = false;
+      setBusy(els.recKeyLoad, false);
+    }
+    if (needPassphrase) els.recPass.focus();
+  }
+
+  async function submitNewRecordKey(event) {
+    event.preventDefault();
+    if (state.recordBusy) return;
+    state.recordBusy = true;
+    setBusy(els.recNewMake, true);
+    els.recNewError.hidden = true;
+    try {
+      const res = await api('/api/record/key/new', { json: { passphrase: els.recNewPass.value || null } });
+      downloadBlob(new Blob([res.private_pem], { type: 'application/x-pem-file' }), 'imgstrip-record-key.pem');
+      closeRecordForms(null);
+      adoptRecordKey(res.key);
+      announce('New record signing key created. Its private key file was downloaded: keep it safe, imgstrip cannot show it again.');
+      showNote(res.protected
+        ? 'Your new private key was downloaded as imgstrip-record-key.pem. Keep it and its passphrase safe: imgstrip cannot show it again.'
+        : 'Your new private key was downloaded as imgstrip-record-key.pem. It has no passphrase, so anyone who gets the file can sign as you. imgstrip cannot show it again.', res.protected ? 'ok' : 'error');
+    } catch (err) {
+      showRecError(els.recNewError, err.message);
+    } finally {
+      els.recNewPass.value = '';
+      state.recordBusy = false;
+      setBusy(els.recNewMake, false);
+    }
+  }
+
+  async function removeRecordKey() {
+    try { await api('/api/record/key', { method: 'DELETE' }); } catch { /* the page forgets it either way */ }
+    adoptRecordKey(null);
+    announce('Record signing key removed from memory.');
+    const target = els.recKey.querySelector('[data-key="load"]');
+    if (target) target.focus();
+  }
+
+  function renderRecordKey() {
+    const box = els.recKey;
+    const caps = state.info && state.info.record;
+    box.replaceChildren();
+    if (!caps || !caps.available) {
+      box.append(note(`${(caps && caps.hint) || "Signing records needs optional support: pip install 'imgstrip[record]'"} Records can still be kept, unsigned.`, 'warn'));
+      return;
+    }
+    const key = state.recordKey;
+    if (!key) {
+      box.append(h('div', { class: 'cred-empty' },
+        h('p', { text: 'No signing key loaded. Records will be unsigned.' }),
+        h('button', { class: 'btn btn-secondary btn-small', type: 'button', 'data-key': 'load', onclick: () => { closeRecordForms(null); els.recKeyForm.hidden = false; els.recKeyFile.focus(); } },
+          icon('key'), h('span', { text: 'Load key' })),
+        h('button', { class: 'btn btn-quiet btn-small', type: 'button', 'data-key': 'new', onclick: () => { closeRecordForms(null); els.recNewForm.hidden = false; els.recNewPass.focus(); } },
+          h('span', { text: 'Create a key' }))));
+      return;
+    }
+    box.append(h('div', { class: 'cred-card' },
+      h('div', { class: 'cred-card-head' },
+        h('p', { class: 'cred-name' }, icon('key'), h('span', { text: 'Record signing key' })),
+        h('button', { class: 'btn btn-quiet btn-small', type: 'button', 'data-key': 'remove', onclick: removeRecordKey, 'aria-label': 'Remove the record signing key from memory' }, h('span', { text: 'Remove' }))),
+      h('dl', { class: 'cred-facts' }, h('dt', { text: 'Key id' }), h('dd', { class: 'mono', text: key.short }), h('dt', { text: 'Type' }), h('dd', { text: 'Ed25519' })),
+      h('div', { class: 'cred-actions' },
+        h('button', { class: 'btn btn-secondary btn-small', type: 'button', 'data-key': 'pub', onclick: () => downloadBlob(new Blob([key.public_pem], { type: 'application/x-pem-file' }), 'imgstrip-record-key.pub.pem') },
+          icon('download'), h('span', { text: 'Download public key' }))),
+      note('Give the public key to everyone who checks your records. The private key stays in memory here and is lost when you stop imgstrip-web; to keep it between runs start imgstrip-web with --record-key.')));
+  }
+
+  function renderRecordHints() {
+    const hints = [];
+    const caps = state.info && state.info.record;
+    if (state.options.record && !state.recordKey) hints.push(note('Records will be unsigned: they describe the work but cannot show that they were left unedited.', 'warn'));
+    if (caps && caps.available) hints.push(note('The record names the original file and its fingerprint. Keep it with your evidence, apart from the cleaned images, and never publish it.'));
+    els.recHints.replaceChildren(...hints);
+  }
+
+  function renderRecordHeld() {
+    const n = withRecord().length;
+    els.recHeld.hidden = !n;
+    if (n) els.recHeldText.textContent = `${plural(n, 'record')} ready. They are separate from the images and are lost when you stop imgstrip-web, so download them with your evidence.`;
+  }
+
+  async function downloadRecords() {
+    const items = withRecord();
+    if (!items.length || state.packing) return;
+    if (items.length === 1) {
+      triggerDownload(`/api/result/${items[0].result.record.id}`, items[0].result.record.filename);
+      announce('Record downloaded. Keep it with your evidence, not with the image.');
+      return;
+    }
+    state.packing = true;
+    render();
+    try {
+      const zip = await api('/api/zip', { json: { ids: items.map((i) => i.result.record.id), records: true } });
+      triggerDownload(`/api/result/${zip.id}`, zip.filename);
+      showNote(`Downloading ${zip.filename} (${bytes(zip.bytes)}). Keep it with your evidence, not with the images.`, 'ok');
+    } catch (err) {
+      showNote(err.message, 'error');
+    } finally {
+      state.packing = false;
+      render();
+    }
+  }
+
+  const VERDICT_TEXT = {
+    trusted: ['ok', 'The signature is valid and the key is the one you trust. This record has not been edited since it was signed.'],
+    signed: ['', 'The signature is intact, but it was not compared with a key you trust, so anyone could have made it. Load your key here, or choose its public key, to be sure.'],
+    unsigned: ['warn', 'This record is not signed, so nothing shows that it was left unedited.'],
+    invalid: ['error', 'This record cannot be trusted.'],
+  };
+
+  async function submitRecordCheck(event) {
+    event.preventDefault();
+    if (isBusy(els.recCheck)) return;
+    const file = els.recFile.files[0];
+    if (!file) {
+      els.recVerdict.replaceChildren(note('Choose a record file first.', 'error'));
+      els.recFile.focus();
+      return;
+    }
+    setBusy(els.recCheck, true);
+    try {
+      const pub = els.recPub.files[0];
+      const res = await api('/api/record/verify', {
+        json: { record: await fileToBase64(file, 'a record'), pubkey: pub ? await fileToBase64(pub, 'a public key') : null },
+      });
+      const [kind, text] = VERDICT_TEXT[res.status] || ['error', 'This record cannot be checked.'];
+      const out = [note(text, kind)];
+      for (const p of res.problems) out.push(note(p, res.ok ? '' : 'error'));
+      if (res.status !== 'invalid' || res.created) {
+        const who = [res.case && `case ${res.case}`, res.operator && `operator ${res.operator}`].filter(Boolean).join(', ');
+        if (res.created) out.push(h('p', { class: 'credential-line', text: `Recorded ${res.created}${who ? ` (${who})` : ''}${res.short ? ` · key ${res.short}` : ''}` }));
+        if (res.input) out.push(h('p', { class: 'rec-fp', text: `Original  ${res.input.sha256}  ${res.input.name}` }));
+        if (res.output) out.push(h('p', { class: 'rec-fp', text: `Cleaned   ${res.output.sha256}  ${res.output.name}` }));
+      }
+      els.recVerdict.replaceChildren(...out);
+      announce(`${res.ok ? 'Record checked' : 'Record problem'}: ${text}`);
+    } catch (err) {
+      els.recVerdict.replaceChildren(note(err.message, 'error'));
+    } finally {
+      setBusy(els.recCheck, false);
+    }
+  }
+
+  function syncRecord({ focus = false } = {}) {
+    const input = els.recordSwitch.querySelector('input');
+    const on = !!state.options.record;
+    input.checked = on;
+    setOpen(els.record, null, on);
+    renderRecordKey();
+    renderRecordHints();
+    renderRecordHeld();
+    if (on && focus) window.setTimeout(() => els.recCase.focus(), 120);
+  }
+
+  function initRecord(info) {
+    state.recordKey = (info.record && info.record.key) || null;
+    els.recCase.value = state.options.record_case;
+    els.recOperator.value = state.options.record_operator;
+    for (const [field, name] of [[els.recCase, 'record_case'], [els.recOperator, 'record_operator']]) {
+      field.addEventListener('input', () => { state.options[name] = field.value; });
+      field.addEventListener('change', () => {
+        state.options[name] = field.value;
+        for (const item of state.items) renderItem(item);
+        render();
+      });
+    }
+    els.recKeyForm.addEventListener('submit', submitRecordKey);
+    els.recNewForm.addEventListener('submit', submitNewRecordKey);
+    els.recCheckForm.addEventListener('submit', submitRecordCheck);
+    $('#recKeyCancel').addEventListener('click', () => closeRecordForms('load'));
+    $('#recNewCancel').addEventListener('click', () => closeRecordForms('new'));
+    $('#recDownload').addEventListener('click', downloadRecords);
+    syncRecord();
+  }
+
   // ---------------------------------------------------------------- the (i) buttons
 
   // Every switch has an (i) button beside it. Pressing it opens a small bubble with the explanation, read out by screen
@@ -2239,6 +2503,7 @@
     }
     initOptions(state.info);
     initCredentials(state.info);
+    initRecord(state.info);
     render();
   }
 

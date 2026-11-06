@@ -46,6 +46,17 @@ so once on standard error. To refuse to run with less than the full confinement,
 web app with `--no-browser`; it serves only your own user's connections unless you give `--any-user`. See
 [Decoding in a sandbox](docs/REFERENCE.md#decoding-in-a-sandbox) for what each level does and does not stop.
 
+## Processing records are sensitive
+
+The optional processing record (`--record`, or *Keep a processing record* in the web app) names the original file and
+holds its SHA-256, and it can list the details of what was removed (a location, say). Treat it as you treat the
+original: keep it with the evidence, never publish it or send it with the cleaned image. imgstrip refuses to write it
+into the folder the cleaned files go to, writes it readable by its owner only, and keeps it out of the web app's ZIP of
+images and out of *Save to folder*. The signing key lives in memory only in the web app and is never written to its
+folder. A record is only as trustworthy as the key that signed it: check records against a public key you know to be
+the signer's (`--verify-record --record-pubkey`). See [Processing record](docs/REFERENCE.md#processing-record-optional)
+for what it does and does not show.
+
 ## Out of scope
 
 * Channels the documentation says imgstrip does not remove by default, such as pixel steganography without

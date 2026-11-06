@@ -8,6 +8,7 @@ import concurrent.futures
 import errno
 import functools
 import getpass
+import hashlib
 import itertools
 import json
 import os
@@ -392,6 +393,44 @@ def build_parser() -> argparse.ArgumentParser:
         "--c2pa-receipt also audits it against the original",
     )
     cred.add_argument("--c2pa-original", metavar="FILE", help="with --c2pa-verify: the original file, for an audit")
+    rec = p.add_argument_group(
+        "processing record (optional)",
+        "Write a small signed JSON record next to each cleaned file's evidence: SHA-256 of the original and of the "
+        "cleaned file, the versions, the options, what was removed, the checks passed, the time, and an optional "
+        "case reference and operator. The record names the original file: keep it with the evidence and never "
+        "publish it with the image. Off unless --record is given. Signing needs: pip install 'imgstrip[record]'",
+    )
+    rec.add_argument(
+        "--record",
+        metavar="DIR",
+        help="write one record per cleaned file into DIR (not the folder the cleaned files go to)",
+    )
+    rec.add_argument(
+        "--record-key",
+        metavar="FILE",
+        help="your Ed25519 signing key (PEM, made by --new-record-key); without it the records are unsigned",
+    )
+    rec.add_argument(
+        "--record-passphrase-file",
+        metavar="FILE",
+        help="read the key passphrase from this file (otherwise IMGSTRIP_RECORD_PASSPHRASE, or you are asked)",
+    )
+    rec.add_argument("--record-passphrase", metavar="TEXT", help=argparse.SUPPRESS)  # only to refuse it
+    rec.add_argument("--case", metavar="TEXT", help="a case or exhibit reference to write into each record")
+    rec.add_argument("--operator", metavar="TEXT", help="the name of the person running imgstrip, for each record")
+    rec.add_argument(
+        "--new-record-key",
+        metavar="FILE",
+        help="create a signing key: the private key in FILE (0600) and the public key in FILE.pub, then exit",
+    )
+    rec.add_argument(
+        "--verify-record",
+        action="store_true",
+        help="check the given record files (changes nothing): is the signature intact, and does it match the key",
+    )
+    rec.add_argument("--record-pubkey", metavar="FILE", help="with --verify-record: the public key you trust")
+    rec.add_argument("--record-original", metavar="FILE", help="with --verify-record: also compare this original")
+    rec.add_argument("--record-cleaned", metavar="FILE", help="with --verify-record: also compare this cleaned file")
     mode = p.add_argument_group("modes")
     mode.add_argument("--check", action="store_true", help="only report metadata/hidden data; write nothing")
     mode.add_argument(
@@ -779,6 +818,8 @@ def strip_one(task: Task, options: Options, args, single: bool) -> Outcome:
         )
     outcome = Outcome(task, "cleaned", destination=dest, payload=payload)
     outcome.payload["_data"] = result.data
+    if args.record:
+        outcome.payload["_record_input"] = {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
     if evidence is not None:
         outcome.payload["_evidence"] = evidence
     return outcome
@@ -1264,6 +1305,10 @@ class Reporter:
             _say(f"           transparency: {al['headline']}: {al['summary']}. {al['caveat']}", file=p)
         for w in pl["warnings"]:
             _say(f"           warning: {w}", file=p)
+        rec = pl.get("record")
+        if rec:
+            how = f"signed, key {rec['key_id'][:16]}" if rec["signed"] else "UNSIGNED"
+            _say(f"           record: {rec['path']} ({how})", file=p)
         cred = pl.get("credentials")
         if cred:
             who = cred["signer"] or "unknown signer"
@@ -1286,6 +1331,281 @@ class Reporter:
             return
         parts = [f"{v} {k}" for k, v in counts.items() if v]
         print("summary: " + ", ".join(parts), file=self.stream)
+
+
+# --------------------------------------------------------------------------
+# Processing record (optional; nothing below runs without --record, --new-record-key or --verify-record)
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Recording:
+    directory: str
+    signer: object | None  # a record.Signer, or None for unsigned records
+
+
+def _record_passphrase(args) -> bytes | None:
+    """The record-key passphrase from a file or the environment, never from the command line."""
+    if args.record_passphrase_file:
+        text = _read_file(args.record_passphrase_file, "passphrase file").decode("utf-8", "replace")
+        return text.rstrip("\r\n").encode("utf-8")
+    env = os.environ.get("IMGSTRIP_RECORD_PASSPHRASE")
+    return env.encode("utf-8") if env else None
+
+
+def _folder_clash(record_dir: str, dest: str) -> bool:
+    """True when the records would sit in the very folder the cleaned file goes to."""
+    return Path(os.path.realpath(record_dir)) == Path(os.path.realpath(dest)).parent
+
+
+_CLASH = (
+    "the record folder is the folder the cleaned files go to: a record names the original file, "
+    "so keep it apart from the images (choose another --record folder)"
+)
+
+
+def load_record_signer(args):
+    """The signing key named by ``--record-key`` (None when there is none); shared with imgstrip-web."""
+    from . import record
+
+    if not args.record_key:
+        return None
+    if not record.available():
+        raise _Usage(record.INSTALL_HINT)
+    sandbox.harden_process()  # a key is about to live in this process's memory
+    _warn_key_permissions(args.record_key)
+    pem = _read_file(args.record_key, "record key")
+    passphrase = _record_passphrase(args)
+    try:
+        try:
+            return record.load_signer(pem, passphrase)
+        except record.PassphraseRequired:
+            if passphrase is not None:
+                raise
+            typed = _tty_prompt("Passphrase for the record key: ")
+            if typed is None:
+                raise _Usage(
+                    "the record key is protected: set IMGSTRIP_RECORD_PASSPHRASE or use --record-passphrase-file "
+                    "(a passphrase is never accepted on the command line)"
+                ) from None
+            return record.load_signer(pem, typed.encode("utf-8"))
+    except record.RecordError as exc:
+        raise _Usage(str(exc)) from None
+
+
+def setup_recording(args) -> Recording:
+    directory = args.record
+    if os.path.lexists(directory) and not os.path.isdir(directory):
+        raise _Usage(f"--record {directory} exists and is not a folder")
+    signer = load_record_signer(args)
+    if args.output and args.output != STDIO and Path(args.output).is_dir():  # a file's own folder is checked per file
+        if _folder_clash(directory, os.path.join(args.output, "x")):
+            raise _Usage(_CLASH)
+    if not args.dry_run:
+        try:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+        except OSError as exc:
+            raise _Usage(f"cannot create the record folder {directory}: {exc.strerror or exc}") from None
+    return Recording(directory, signer)
+
+
+def _record_names(outcome: Outcome) -> tuple[str, str]:
+    task, dest = outcome.task, outcome.destination
+    source = "stdin" if task.source == STDIO else os.path.basename(task.source)
+    return source, "stdout" if dest == STDIO else os.path.basename(dest)
+
+
+def _record_clash(outcome: Outcome, recording: Recording) -> bool:
+    return outcome.destination != STDIO and _folder_clash(recording.directory, outcome.destination)
+
+
+def _write_record(outcome: Outcome, data: bytes, recording: Recording, args, options: Options) -> None:
+    """Write the record of a cleaned file whose bytes have just been written.  A failure is the file's failure."""
+    from . import record
+
+    info = outcome.payload.pop("_record_input", None)
+    if info is None:
+        return
+    source_name, output_name = _record_names(outcome)
+    try:
+        body = record.build(
+            input_name=source_name if outcome.task.source != STDIO else "<stdin>",
+            input_data_sha256=info["sha256"],
+            input_bytes=info["bytes"],
+            input_format=outcome.payload["input_format"],
+            output_name=output_name if outcome.destination != STDIO else "<stdout>",
+            output_data=data,
+            output_format=outcome.payload["output_format"],
+            options=options,
+            result=record.result_facts(outcome.payload),
+            case=args.case,
+            operator=args.operator,
+        )
+        document = record.seal(body, recording.signer)
+        path = os.path.join(recording.directory, record.file_name(output_name, body["output"]["sha256"]))
+        if args.force:
+            replace_atomic(path, document, 0o600)
+        else:
+            write_new(path, document, 0o600)
+    except FileExistsError:
+        outcome.status, outcome.message = "failed", f"cleaned, but its record {path} already exists (use --force)"
+    except (OSError, record.RecordError) as exc:
+        detail = getattr(exc, "strerror", None) or str(exc)
+        outcome.status, outcome.message = "failed", f"cleaned, but its record could not be written: {detail}"
+    else:
+        outcome.payload["record"] = {
+            "path": path,
+            "signed": recording.signer is not None,
+            "key_id": recording.signer.key_id if recording.signer else None,
+            "sha256": record.sha256(document),
+        }
+
+
+def make_record_key_files(args) -> int:
+    from . import record
+
+    if not record.available():
+        raise _Usage(record.INSTALL_HINT)
+    private_path = Path(args.new_record_key)
+    public_path = Path(str(private_path) + ".pub")
+    clash = [str(p) for p in (private_path, public_path) if p.exists() or p.is_symlink()]
+    if clash:
+        raise _Usage("will not overwrite: " + ", ".join(clash))
+    passphrase = _record_passphrase(args)
+    if passphrase is None:
+        typed = _tty_prompt("Passphrase to protect the new key (leave empty for none): ")
+        if typed:
+            if _tty_prompt("Type it again: ") != typed:
+                raise _Usage("the two passphrases differ; no key was made")
+            passphrase = typed.encode("utf-8")
+    private_pem, public_pem, key_id = record.generate_key(passphrase)
+    try:
+        private_path.parent.mkdir(parents=True, exist_ok=True)
+        write_new(private_path, private_pem, 0o600)
+        write_new(public_path, public_pem)
+    except FileExistsError as exc:
+        raise _Usage(f"will not overwrite: {exc.filename}") from None
+    except OSError as exc:
+        raise _Usage(f"cannot write the key: {exc.strerror or exc}") from None
+    _say(f"created a record signing key (Ed25519), id {record.short_id(key_id)}:")
+    _say(f"  {private_path}   private key: keep it secret and backed up  (--record-key)")
+    _say(f"  {public_path}   public key: give it to everyone who checks your records  (--record-pubkey)")
+    if passphrase is None:
+        _say("warning: the private key is not protected by a passphrase", file=sys.stderr)
+    return EXIT_OK
+
+
+def _check_record_options(args, parser) -> None:
+    if args.record_passphrase is not None:
+        parser.error(
+            "a passphrase is never accepted on the command line (it would show in the process list and shell "
+            "history): set IMGSTRIP_RECORD_PASSPHRASE or use --record-passphrase-file"
+        )
+    modes = [
+        name
+        for name, on in (
+            ("--record", args.record),
+            ("--verify-record", args.verify_record),
+            ("--new-record-key", args.new_record_key),
+        )
+        if on
+    ]
+    if len(modes) > 1 and "--verify-record" in modes or args.new_record_key and args.record:
+        parser.error(f"{' and '.join(modes)} cannot be combined")
+    if args.verify_record and (args.check or args.c2pa or args.c2pa_verify):
+        parser.error("--verify-record checks processing records; it cannot be combined with --check, --c2pa or --c2pa-verify")
+    if args.record and (args.check or args.c2pa_verify):
+        parser.error("--record writes a record of cleaning; it cannot be combined with --check or --c2pa-verify")
+    if not args.record:
+        used = [f"--{f.replace('_', '-')}" for f in ("record_key", "case", "operator") if getattr(args, f)]
+        if args.record_passphrase_file and not args.new_record_key:
+            used.append("--record-passphrase-file")
+        if used:
+            parser.error(f"{', '.join(used)} only {'works' if len(used) == 1 else 'work'} with --record")
+    if not args.verify_record:
+        used = [f"--{f.replace('_', '-')}" for f in ("record_pubkey", "record_original", "record_cleaned") if getattr(args, f)]
+        if used:
+            parser.error(f"{', '.join(used)} only {'works' if len(used) == 1 else 'work'} with --verify-record")
+    if args.record_passphrase_file and args.record and not args.record_key:
+        parser.error("--record-passphrase-file needs --record-key")
+    if args.verify_record and (args.record_original or args.record_cleaned) and len(args.paths) != 1:
+        parser.error("comparing files with a record needs exactly one record file")
+
+
+_RECORD_WORDS = {
+    "trusted": "ok",
+    "signed": "ok",
+    "unsigned": "UNSIGNED",
+    "invalid": "PROBLEM",
+}
+
+
+def verify_records(args, parser) -> int:
+    from . import record
+
+    trusted = None
+    if args.record_pubkey:
+        try:
+            trusted = record.load_public(_read_file(args.record_pubkey, "public key"))
+        except record.RecordError as exc:
+            parser.error(str(exc))
+    results: list[dict] = []
+    errors = found = 0
+    for path in args.paths:
+        entry: dict = {"file": path}
+        try:
+            with open(path, "rb") as fh:
+                document = fh.read(record.MAX_RECORD_BYTES + 1)
+        except OSError as exc:
+            errors += 1
+            entry.update(status="failed", message=exc.strerror or str(exc))
+            results.append(entry)
+            continue
+        verdict = record.verify(document, trusted)
+        problems = list(verdict.problems)
+        try:
+            original = _read_file(args.record_original, "original") if args.record_original else None
+            cleaned = _read_file(args.record_cleaned, "cleaned file") if args.record_cleaned else None
+        except _Usage as exc:
+            parser.error(str(exc))
+        mismatches = record.check_files(verdict.body, original=original, cleaned=cleaned) if verdict.body else []
+        ok = verdict.ok and not mismatches
+        if not ok:
+            found += 1
+        entry.update(verdict.as_dict())
+        entry["files_match"] = None if original is None and cleaned is None else not mismatches
+        entry["problems"] = problems + mismatches
+        entry["ok"] = ok
+        results.append(entry)
+    if args.json:
+        json.dump({"records": results}, sys.stdout, indent=2, default=str)
+        print()
+    elif not args.quiet:
+        for e in results:
+            if e.get("status") == "failed":
+                _say(f"FAILED   {e['file']}: {e['message']}", file=sys.stderr)
+                continue
+            word = _RECORD_WORDS[e["status"]] if e["ok"] or e["status"] in ("unsigned", "invalid") else "PROBLEM"
+            kind = {
+                "trusted": "signed with the key you trust",
+                "signed": "signature intact, key not checked",
+                "unsigned": "not signed",
+                "invalid": "invalid",
+            }[e["status"]]
+            _say(f"{word:<8} {e['file']} ({kind}{': ' + record.short_id(e['key_id']) if e['key_id'] else ''})")
+            if e.get("created"):
+                who = ", ".join(f"{k} {e[k]}" for k in ("case", "operator") if e.get(k))
+                _say(f"           recorded {e['created']}{' (' + who + ')' if who else ''}")
+            if e.get("input") and e.get("output"):
+                _say(f"           original  {e['input']['sha256']}  {e['input']['name']}")
+                _say(f"           cleaned   {e['output']['sha256']}  {e['output']['name']}")
+            for problem in e["problems"]:
+                _say(f"           {'problem' if not e['ok'] else 'note'}: {problem}")
+            if e.get("files_match") is True:
+                _say("           the files you gave match the record")
+    if errors:
+        return EXIT_ERROR
+    return EXIT_FOUND if found else EXIT_OK
 
 
 # --------------------------------------------------------------------------
@@ -1384,8 +1704,18 @@ def main(argv: list[str] | None = None) -> int:
             return make_test_identity_files(args)
         except _Usage as exc:
             parser.error(str(exc))
+    _check_record_options(args, parser)
+    if args.new_record_key:
+        if args.paths:
+            parser.error("--new-record-key takes no input files")
+        try:
+            return make_record_key_files(args)
+        except _Usage as exc:
+            parser.error(str(exc))
     if not args.paths:
         parser.error("no input files given")
+    if args.verify_record:
+        return verify_records(args, parser)
     _check_credential_options(args, parser)
     if args.backup_suffix and not args.in_place:
         parser.error("--backup-suffix only applies with --in-place")
@@ -1466,6 +1796,7 @@ def main(argv: list[str] | None = None) -> int:
         reporter.emit(outcome)
     planned: set[str] = set()
     signing: Signing | None = None
+    recording: Recording | None = None
     anchors = None
     try:
         if args.c2pa:
@@ -1478,6 +1809,19 @@ def main(argv: list[str] | None = None) -> int:
                         _say(f"{'warning' if n.severity == 'warning' else 'note'}: {n.message}", file=sys.stderr)
         elif args.c2pa_verify:
             anchors = load_anchors(args)
+        if args.record:
+            recording = setup_recording(args)
+            reporter.extra["record"] = {
+                "folder": args.record,
+                "signed": recording.signer is not None,
+                "key_id": recording.signer.key_id if recording.signer else None,
+            }
+            if recording.signer is None and not args.json and not args.quiet:
+                _say(
+                    "warning: no --record-key given, so the records are UNSIGNED: they document the work but cannot "
+                    "show that they were left unedited",
+                    file=sys.stderr,
+                )
     except _Usage as exc:
         parser.error(str(exc))
 
@@ -1487,8 +1831,17 @@ def main(argv: list[str] | None = None) -> int:
         if signing is not None:
             seal_outcome(outcome, signing, args)
         receipt = outcome.payload.pop("_receipt", None)
+        recorded = None
+        if recording is not None and outcome.status == "cleaned":
+            recorded = outcome.payload.get("_data")
+            if not args.dry_run and _record_clash(outcome, recording):
+                outcome.status, outcome.message = "failed", _CLASH
+                outcome.payload.pop("_data", None)
         if not args.check and not args.c2pa_verify:
             _write_outcome(outcome, args, planned)
+        if recording is not None and outcome.status == "cleaned" and recorded is not None and not args.dry_run:
+            _write_record(outcome, recorded, recording, args, options)
+        outcome.payload.pop("_record_input", None)
         if receipt and outcome.status == "cleaned" and not args.dry_run and signing is not None and signing.receipts:
             signing.receipts.add(receipt)
         reporter.emit(outcome)

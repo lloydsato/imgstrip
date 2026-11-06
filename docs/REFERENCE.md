@@ -33,6 +33,7 @@ Requires Python 3.11+.
 pip install .            # installs Pillow, numpy and pillow-heif (for iPhone HEIC photos)
 imgstrip --self-test     # proves the installation works end to end, with independent readers cross-checking the output
 pip install '.[c2pa]'    # optional: Content Credentials (C2PA) signing, see below
+pip install '.[record]'  # optional: signing processing records, see below
 ```
 
 ## Web app
@@ -49,7 +50,7 @@ The web app is the same engine behind a small window in your browser. It runs on
 
 **Two panes.** The list of files is on the left and the file you pick fills the pane on the right: a plain-language summary of what it gives away, then identifying metadata, hidden data, colour profile, the pixels and the file's fingerprints. On a screen narrower than 900 pixels the page is one column and the detail opens as a full-screen sheet (Escape or *Back to list* closes it and puts the keyboard back on the row). Arrow keys walk the list.
 
-**Options** holds the same switches as the command line: output format, quality, colour profile handling, keeping JPEG data bit-exact, LSB scrubbing, transparency scrubbing, **disrupting the camera's sensor fingerprint**, orientation, extra PNG compression, and the optional **Sign with Content Credentials** switch (see [below](#content-credentials-c2pa-optional)). The **Deep scan** switch that also searches the pixels for steganography sits in the bar at the bottom, beside the Clean button. **Every switch has an (i) button** that explains it in plain words.
+**Options** holds the same switches as the command line: output format, quality, colour profile handling, keeping JPEG data bit-exact, LSB scrubbing, transparency scrubbing, **disrupting the camera's sensor fingerprint**, orientation, extra PNG compression, the optional **Sign with Content Credentials** switch (see [below](#content-credentials-c2pa-optional)) and the optional **Keep a processing record** switch (see [below](#processing-record-optional)). The **Deep scan** switch that also searches the pixels for steganography sits in the bar at the bottom, beside the Clean button. **Every switch has an (i) button** that explains it in plain words.
 
 **File fingerprints.** Every file shows its SHA-256 and MD5. Before cleaning they are those of the file as received; after cleaning each row shows a *Before* and an *After* line, and the detail shows both sets in full with copy buttons. They are computed by the server on the exact bytes (the cleaned file's are those of the download), and the API returns them as `fingerprints` (`/api/inspect`) and `before` and `after` (`/api/clean`, each with `sha256`, `md5` and `bytes`). SHA-256 is the proof; MD5 is only there to match older records and tools that still list it, and it can be forged. *Compare with a hash you already have* takes a pasted SHA-256 or MD5 and says whether it matches the file as added or the cleaned file. *Hash list* downloads `imgstrip-hashes.csv` (file, state, before and after SHA-256 and MD5, saved name), built in the page; names that start with `=`, `+`, `-` or `@` get a leading apostrophe so a spreadsheet does not run them.
 
@@ -61,6 +62,7 @@ The web app is the same engine behind a small window in your browser. It runs on
 | `--no-browser` | Print the link instead of opening the browser. Use it on a computer shared with other users (see below). |
 | `--no-sandbox` | Decode uploads in the app's own process instead of a separate, restricted one (see [Decoding in a sandbox](#decoding-in-a-sandbox)). |
 | `--require-sandbox` | Refuse to decode unless the sandbox confines its workers completely (see [Decoding in a sandbox](#decoding-in-a-sandbox)); without it the app warns on standard error and goes on with what the system offers. |
+| `--record-key FILE`, `--record-passphrase-file FILE` | Load the [processing-record](#processing-record-optional) signing key now, so it never passes through the browser. |
 | `--any-user` | Serve connections from other users of this computer too. By default only the user who started the app is served (Linux; the app asks the kernel who owns the other end of each connection), on top of the launch key and the per-page token. |
 
 How it stays private:
@@ -438,6 +440,87 @@ The receipt holds the secret salt and the hash of the original: keep it as priva
 
 **What a credential cannot do.** It vouches for what *you* did to the file, not for who took the picture or whether it is real; it says so in its own text. It names your organisation in the certificate, so it is not for someone who must stay anonymous. It is only as trustworthy as whoever holds the key. The "pixels identical" statement rests on imgstrip's own measurement, which an auditor can repeat with the original and the receipt, and an `altered` credential says honestly that the pixels were changed on purpose.
 
+## Processing record (optional)
+
+For people who must be able to show later what was done to a file (an examiner, a records office, a newsroom's legal desk). After each file is cleaned imgstrip can write down what it did in a small JSON file, **beside the evidence and never inside the image**, and sign it with a key you hold so that any later edit is detectable. It is **off unless you ask for it**: `--record DIR` on the command line, or *Options → Keep a processing record* in the web app. It is a different thing from the [Content Credentials](#content-credentials-c2pa-optional): a credential travels inside the image for the public to read; a record stays with the evidence for you.
+
+```console
+pip install 'imgstrip[record]'                          # only for signing: adds the cryptography library
+imgstrip --new-record-key ~/keys/lab.pem                # makes lab.pem (private, mode 0600) and lab.pem.pub (public)
+imgstrip photo.jpg -o clean/ --record ~/case-114/records --record-key ~/keys/lab.pem \
+         --case "CASE-2026-114" --operator "A. Examiner"
+imgstrip --verify-record ~/case-114/records/*.json --record-pubkey ~/keys/lab.pem.pub \
+         --record-original photo.jpg --record-cleaned clean/photo.jpg
+```
+
+```console
+$ imgstrip --verify-record photo.jpg.5a18d6a8dd98.imgstrip-record.json --record-pubkey lab.pem.pub
+ok       photo.jpg.5a18d6a8dd98.imgstrip-record.json (signed with the key you trust: 64d6 f20e be28 4e20)
+           recorded 2026-11-06T02:10:10Z (case CASE-2026-114, operator A. Examiner)
+           original  9af6560560bf99ae074ba242180f2b83209cf5da66db114b349a87f14791e2ca  photo.jpg
+           cleaned   5a18d6a8dd9862eb99af1904605c27dc0ee275267a3af93c2953b2dfe29ee5d5  photo.jpg
+```
+
+### What a record holds
+
+| Field | Contents |
+|---|---|
+| `created` | The time, UTC to the second. It is the computer's clock, not a trusted timestamp. |
+| `case`, `operator` | What you typed with `--case` and `--operator`, tidied (runs of spaces and line breaks collapse; at most 200 characters; no control characters), or `null`. |
+| `tool` | The versions of imgstrip, Python, Pillow, numpy and cryptography, and the operating system and processor type. No host name and no user name. |
+| `input` | Name (the file's own name, not its path; `<stdin>` for standard input), SHA-256, size in bytes and format of the file as imgstrip received it. |
+| `output` | The same for the cleaned file exactly as written (after any Content Credential was added). |
+| `options` | Every option the engine ran with. |
+| `result` | The size and frame count, whether the pixels are bit-identical, the checks that passed (`verified_by`), what was removed (category, label and detail of each item), the actions taken, the warnings, what was kept from the input, the steganography verdict (its state only), and whether a Content Credential was added. |
+
+A record is written only for a file that was cleaned and written. A file that fails, a dry run (`-n`) and a `--check` leave none. When the cleaned bytes go to standard output the record says `<stdout>`; `--in-place` records the hash of the original that was just replaced, which is often the only trace of it left. If the record cannot be written the file is reported as failed (exit 1), with a message saying that the image itself was written.
+
+**The file.** `{"record": {...}, "signature": {...}}`. The signature is `{"algorithm": "ed25519", "key_id": SHA-256 of the raw 32-byte public key, "public_key": base64, "value": base64}`. It is made over the *canonical form* of `record`: JSON with sorted keys, no whitespace between tokens, every non-ASCII character escaped (`ensure_ascii`), encoded as ASCII. The record holds only strings, integers, booleans, `null`, lists and objects: a number that is not an integer is written as text, so every JSON library rebuilds the same bytes and a checker need not be Python. Without a key the file holds `"signature": null`.
+
+### What checking tells you
+
+| Result | Meaning | Exit |
+|---|---|---|
+| signed with the key you trust | The signature is valid and the key is the one you gave with `--record-pubkey`. The record has not been edited since it was signed. | 0 |
+| signature intact, key not checked | The signature is valid for the key inside the file, but nothing shows that the key is yours: anyone can make a record and sign it with their own key. Say which key you trust. | 0 |
+| unsigned | Nothing shows the record was left unedited. A signature removed from a signed record looks the same, which is why an unsigned record is never reported as passing. | 3 |
+| invalid | Edited after signing, signed by a different key than the one you trust, damaged, not a record, or from a newer version of the format. | 3 |
+| files do not match | With `--record-original` or `--record-cleaned`: the file you gave is not the one the record names (its SHA-256 differs). | 3 |
+| unreadable | The file could not be read. | 1 |
+
+### Keys
+
+`--new-record-key FILE` makes an Ed25519 key: the private key in `FILE` (mode 0600; encrypted when you give a passphrase) and the public key in `FILE.pub`. It never overwrites a file. Give the public key to everyone who checks your records; keep and back up the private key, because a record can only be signed with the key that was in use and a lost key cannot be replaced. The passphrase comes from `IMGSTRIP_RECORD_PASSPHRASE`, from `--record-passphrase-file`, or is typed when asked; it is never accepted on the command line, where it would show in the process list. A passphrase that is set for a key that has none is ignored. imgstrip warns when a key file can be read by other users. Rotating a key means making a new one and saying from which date it applies; imgstrip keeps no list of keys and no revocation list.
+
+### Options
+
+| Option | Meaning |
+|---|---|
+| `--record DIR` | Write one record per cleaned file into `DIR` (created with mode 0700). It may not be the folder the cleaned files go to. |
+| `--record-key FILE` | Sign the records with this Ed25519 key. Without it they are unsigned, and imgstrip says so. |
+| `--record-passphrase-file FILE` | Read the key's passphrase from a file (or set `IMGSTRIP_RECORD_PASSPHRASE`, or type it when asked). |
+| `--case TEXT`, `--operator TEXT` | The optional case reference and operator name. |
+| `--new-record-key FILE` | Make a signing key (`FILE` and `FILE.pub`) and exit. |
+| `--verify-record` | Check the given record files instead of cleaning. |
+| `--record-pubkey FILE` | With `--verify-record`: the public key you trust. |
+| `--record-original FILE`, `--record-cleaned FILE` | With `--verify-record` and one record: also compare these files with the hashes in it. |
+
+Records are named `<cleaned file name>.<first 12 hex of its SHA-256>.imgstrip-record.json`, so two runs never clash, and an existing record is never replaced unless `--force` is given.
+
+### In the web app
+
+*Options → Keep a processing record* opens a panel. The case and operator fields are for one piece of work and are never kept in the browser. For the key, *Load key* takes a PEM file made by `--new-record-key`, and *Create a key* makes one here: its private half is downloaded once (as `imgstrip-record-key.pem`, encrypted if you typed a passphrase) and imgstrip cannot show it again. Either way the key is held in memory only, never written to the app's folder or sent back to the page, and lost when you stop `imgstrip-web`. To keep it between runs start the app with `--record-key FILE` (and `--record-passphrase-file FILE`), which loads it without it passing through the browser. Without a key the page says that records will be unsigned. Changing the key, the case or the operator marks earlier results as made with old options, like any other option.
+
+Each cleaned image's detail shows its record and a *Download record* button; *Download records* in the panel gives all of them, as one file or as `imgstrip-records.zip`, which holds only records. Records are never in the images' ZIP and the *Save to folder* box never writes them: keep them with your evidence, apart from the images. *Check a record* takes a record file and says whether it is intact, and whether it was made by the key loaded here or by a public key you choose. The API: `/api/clean` takes `"record": {"keep": true, "case": ..., "operator": ...}` in its options and returns `record` (`id`, `filename`, `signed`, `key_id`) beside the image; `/api/record/key`, `/api/record/key/new` and `DELETE /api/record/key` handle the key, `/api/record/verify` checks a record, and `/api/zip` takes `"records": true` for a ZIP of records.
+
+### What a record cannot do
+
+* **It is imgstrip's own account of its work.** It shows that the account was not edited after it was signed. It does not show that the original was unchanged before imgstrip received it (the hash only fixes what imgstrip was given), that the computer's clock was right, or that the key belongs to the person named: whoever checks a record has to trust the public key for their own reasons.
+* **It is not a chain of custody.** It does not record who handled the file before or after, where it was stored, or what was done to it by other tools. It is one entry that a custody log can point to.
+* **It does not make the cleaning more or less correct.** The record states what was checked; the checks are those described elsewhere in this document.
+* **It is sensitive.** It names the original file and holds its SHA-256, which anyone who has the original can confirm. Keep it with the original evidence, never publish it or send it with the image, and never put the image and its record in one shared folder. imgstrip refuses to write it into the folder the cleaned files go to and keeps it out of the web app's ZIP and *Save to folder*, but it cannot stop you copying them together afterwards. The list of what was removed can include the details of what was found (for example a location), so the record may hold data the cleaned image no longer does.
+* **No perceptual hashing.** Services that match known material use perceptual hashes (PhotoDNA, PDQ), which change when the pixels do. A record holds cryptographic hashes only, so it can say that a file is the one that was cleaned but not that a cleaned file shows the same picture as an original someone else lists.
+
 ## Supported formats
 
 | Format | Read | Write (default output) |
@@ -476,6 +559,7 @@ Not supported, with a clear error: camera RAW files (DNG, CR2/CR3, NEF, ARW, …
 * The pytest suite (about 2,000 tests) covers every codec against independent decoders (ImageMagick for 16-bit data), the colour engine against LittleCMS, orientation 1–8, all CLI safety behaviours (no-clobber, atomic in-place writes, symlinks, hard links, FIFOs, collisions, permissions, stdin/stdout) the web app's security gates, round trips and signal handling, the sensor-fingerprint scrub (an *oracle* detector that knows the camera's exact fingerprint must fail to match after the scrub and succeed before it, on every colour mode, 16-bit data, animations and the failure cases), and **fuzzing**: 840 randomly corrupted files must each produce either a verified-clean output or a clean error, never a crash, a memory blow-up or an unverified write.
 * **Coverage-guided fuzzing** (`fuzz/`, since 1.2.5). Atheris drives eight targets: the structural walk (must never raise), the bit-exact JPEG rebuild, imgstrip's coefficient reader and canonical writer (whatever it reads it must write, and the result must read back to the same coefficients and bytes), the ICC sanitiser (its output must be one the sandbox accepts, and a fixed point), the JUMBF and CBOR parsers, the main process's reading of a sandbox worker's answer (anything but a refusal is a bug, since a hijacked worker writes those bytes), Pillow's decoders, and the whole engine (a verified clean file or a refusal). CI runs each for a minute on every push and for half an hour nightly, and fuzzes the decoders through a Pillow built with AddressSanitizer and UndefinedBehaviorSanitizer (only Pillow's own C code is instrumented; the system's libjpeg, libpng and the like are not, so memory errors inside them are caught only where the sanitiser intercepts the call). The first runs found two bugs: a truncated JPEG segment length raised the wrong kind of error, and a colour profile with an out-of-range rendering intent made a whole file fail instead of falling back to the default intent; a third report was the engine target's own check being too strict (a damaged BMP header that turns trailing bytes into pixels the input itself shows). All three inputs are kept in `fuzz/regressions/`. Writing the worker-answer target also showed that deeply nested or type-confused answers could make the main process raise something other than a refusal; they are refused now. `tests/test_fuzz_targets.py` runs every target on its seeds, on mutations of them and on those regression inputs, without Atheris.
 * The Content Credentials code has 285 tests of its own (skipped when the optional support is not installed). Highlights: every key type (ES256/384/512, RSA-PSS, Ed25519) signs and is verified with a **second, independent implementation** of the signature and the hard-binding hash; a **hostile-SDK harness** crafts credentials with one deliberate flaw each (an extra assertion, a hidden field, a thumbnail, the source's name as the ingredient title, a signature by another chain, different pixels, an EXIF segment slipped in, a double signature) and every one is refused, with a control proving the harness itself is sound; the canary fixtures prove no byte of the original reaches a credential; a local web server proves a hostile file's remote-manifest link is *not* followed (and that the library's defaults would follow it); thousands of randomly corrupted credentials must each give a verdict or a clean error, never a crash; the web app's key, passphrase and signing switch are shown never to reach a response, the disk or the browser's storage, and a real browser drives the toggle, the identity form and a signing run end to end. Eleven deliberate breakages of the key safeguards were each caught by these tests.
+* The processing record has 156 tests of its own (`tests/test_record*.py`; the signing ones are skipped when `cryptography` is not installed). Highlights: every field of a signed record is changed in turn, and a field added or removed, and each is reported as edited; a record re-signed with someone else's key is caught as soon as a trusted key is named; a signature removed from a signed record is never reported as a pass; damaged signature blocks, other key types, newer versions and files that are not records give a verdict and never a crash; the record holds no floating-point number and no host or user name; the cleaned file is byte-identical with and without `--record`, and the record's output hash is that of the bytes really written, with or without a Content Credential; a record is not written for a failed file or a dry run, is never put in the images' folder, ZIP or *Save to folder*, and a failed write fails the file; passphrases are refused on the command line and a stray one does not break an unprotected key; the web app's key never appears in a response, on disk or in browser storage; and a real browser drives the switch, making and loading a key, the record's download, and the check of an intact and of an edited record.
 * Trial run on the public [exif-samples](https://github.com/ianare/exif-samples) corpus: 104 real files from dozens of cameras and phones, including iPhone HEICs and deliberately broken files. 104 cleaned, 0 failures. Afterwards `exiftool` reported zero non-structural tags across all outputs, and all 16 orientation test images came out identical.
 
 ```console

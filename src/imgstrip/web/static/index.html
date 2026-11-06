@@ -124,6 +124,15 @@
               <button class="info" type="button" data-info="c2pa" aria-expanded="false" aria-label="What does “Sign with Content Credentials” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
               <label class="hint" for="opt-c2pa" id="c2paHint">Adds a signed note (C2PA) that you removed the metadata, and whether the picture is unchanged. Optional.</label>
             </div>
+            <div class="switch-row">
+              <label class="switch" id="recordSwitch">
+                <input type="checkbox" role="switch" name="record" aria-controls="record" id="opt-record" aria-labelledby="sw-record" aria-describedby="recordHint">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-title" id="sw-record">Keep a processing record</span>
+              </label>
+              <button class="info" type="button" data-info="record" aria-expanded="false" aria-label="What does “Keep a processing record” do?"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg></button>
+              <label class="hint" for="opt-record" id="recordHint">A separate signed file for your evidence: hashes before and after, and what was done. Never put in the image.</label>
+            </div>
           </div>
           <div class="switch-group" role="group" aria-labelledby="grp-jpeg">
             <h3 class="group-label" id="grp-jpeg">JPEG files</h3>
@@ -237,6 +246,71 @@
               <p class="note"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg><span id="receiptText"></span></p>
               <button class="btn btn-secondary btn-small" id="receiptDownload" type="button"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-download"/></svg><span>Download receipts</span></button>
             </div>
+          </div>
+        </div>
+      </section>
+      <section class="reveal" id="record" data-open="false" aria-labelledby="recTitle">
+        <div class="reveal-inner">
+          <div class="cred">
+            <h3 class="cred-title" id="recTitle">Processing record</h3>
+            <p class="cred-lede">For each cleaned image you get a small text file listing the SHA-256 of the original and of the cleaned file, the versions and options used, what was removed and the checks that passed. Sign it with your own key and any later edit is detectable. It names the original file, so keep it with your evidence and never share it with the image. Nothing here leaves this computer, and your key is kept in memory only.</p>
+            <div class="cred-settings rec-fields">
+              <div class="field">
+                <label for="rec-case">Case reference <span class="hint">optional</span></label>
+                <input type="text" id="rec-case" maxlength="200" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field">
+                <label for="rec-operator">Operator <span class="hint">optional</span></label>
+                <input type="text" id="rec-operator" maxlength="200" autocomplete="off" spellcheck="false">
+              </div>
+            </div>
+            <div class="cred-identity" id="recKey"></div>
+            <form class="cred-load" id="recKeyForm" autocomplete="off" hidden>
+              <div class="field">
+                <label for="rec-keyfile">Signing key <span class="hint">PEM file made by imgstrip</span></label>
+                <input type="file" id="rec-keyfile" accept=".pem,.key">
+              </div>
+              <div class="field">
+                <label for="rec-pass">Passphrase <span class="hint">if the key is protected</span></label>
+                <input type="password" id="rec-pass" autocomplete="off" spellcheck="false" autocapitalize="off">
+              </div>
+              <p class="note is-error cred-error" id="recKeyError" role="alert" hidden></p>
+              <div class="cred-actions">
+                <button class="btn btn-plate btn-small" id="recKeyLoad" type="submit">Load key</button>
+                <button class="btn btn-quiet btn-small" id="recKeyCancel" type="button">Cancel</button>
+              </div>
+            </form>
+            <form class="cred-load" id="recNewForm" autocomplete="off" hidden>
+              <div class="field">
+                <label for="rec-newpass">Passphrase for the new key <span class="hint">recommended; you will need it each time</span></label>
+                <input type="password" id="rec-newpass" autocomplete="new-password" spellcheck="false" autocapitalize="off">
+              </div>
+              <p class="note is-error cred-error" id="recNewError" role="alert" hidden></p>
+              <div class="cred-actions">
+                <button class="btn btn-plate btn-small" id="recNewMake" type="submit">Create key</button>
+                <button class="btn btn-quiet btn-small" id="recNewCancel" type="button">Cancel</button>
+              </div>
+            </form>
+            <div class="cred-hints" id="recHints"></div>
+            <div class="cred-receipts" id="recHeld" hidden>
+              <p class="note"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-info"/></svg><span id="recHeldText"></span></p>
+              <button class="btn btn-secondary btn-small" id="recDownload" type="button"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-download"/></svg><span>Download records</span></button>
+            </div>
+            <form class="cred-load rec-check" id="recCheckForm" autocomplete="off">
+              <h4 class="group-label" id="recCheckTitle">Check a record</h4>
+              <div class="field">
+                <label for="rec-file">Record file <span class="hint">.imgstrip-record.json</span></label>
+                <input type="file" id="rec-file" accept=".json,application/json">
+              </div>
+              <div class="field">
+                <label for="rec-pub">Public key <span class="hint">optional; otherwise the key loaded here</span></label>
+                <input type="file" id="rec-pub" accept=".pem,.pub">
+              </div>
+              <div class="cred-actions">
+                <button class="btn btn-secondary btn-small" id="recCheck" type="submit">Check record</button>
+              </div>
+              <div id="recVerdict" aria-live="polite"></div>
+            </form>
           </div>
         </div>
       </section>

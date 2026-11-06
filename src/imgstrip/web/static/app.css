@@ -800,6 +800,15 @@ input[type="file"]:focus-visible { outline: 2px solid var(--focus); outline-offs
 .cred-receipts { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
 .cred-receipts .note { font-size: var(--t-xs); flex: 1 1 18em; max-width: none; }
 
+/* processing record (optional): it reuses the credentials panel's pieces */
+#record[data-open="true"] { border-top: 1px solid var(--line); }
+.rec-check { padding-top: 12px; border-top: 1px solid var(--line); }
+.rec-check .group-label, .rec-check #recVerdict { grid-column: 1 / -1; }
+#recVerdict { display: grid; gap: 6px; }
+#recVerdict:empty { display: none; }
+#recVerdict .note { font-size: var(--t-xs); max-width: none; }
+.rec-fp { font-family: var(--mono); font-size: 0.6875rem; overflow-wrap: anywhere; color: var(--ink-2); }
+
 /* a signed file's credential, in its detail */
 .credential {
   display: grid; gap: 6px; margin-top: 18px; padding: 12px 14px;

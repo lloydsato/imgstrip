@@ -471,7 +471,7 @@ def test_nothing_secret_can_be_reached_by_the_options_form_or_its_storage(page):
 
 def test_the_page_never_stores_the_signing_toggle_or_secrets(page):
     js = (STATIC / "app.js").read_text()
-    assert "const VOLATILE = ['c2pa', 'c2pa_commit']" in js
+    assert "const VOLATILE = ['c2pa', 'c2pa_commit', 'record', 'record_case', 'record_operator']" in js
     assert "JSON.stringify(state.options)" not in js, (
         "options must be saved through persistable(), which drops volatile ones"
     )

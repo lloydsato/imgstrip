@@ -27,6 +27,12 @@ except ImportError:
         "test_credentials_ui.py",
     ]
 
+# The processing-record tests sign with Ed25519, which needs `cryptography` (the `record` extra).
+try:
+    import cryptography  # noqa: F401,F811
+except ImportError:
+    collect_ignore = [*globals().get("collect_ignore", []), "test_record.py", "test_record_cli.py", "test_record_web.py", "test_record_ui.py"]
+
 HAS_EXIFTOOL = shutil.which("exiftool") is not None
 HAS_MAGICK = shutil.which("convert") is not None
 
