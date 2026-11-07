@@ -1634,12 +1634,16 @@ def launch_url(httpd: Server, key: str) -> str:
 LAUNCH_PAGE = "launch.html"
 
 
+def _on_linux() -> bool:
+    return sys.platform.startswith("linux")
+
+
 def open_target(session: Session, httpd: Server, url: str) -> str:
     """What the system's browser opener is given.  The opener's command line can be read by other users of the computer
     (``ps``), and the key in ``url`` opens the app.  Linux checks which user connects, so a key read from the command
     line is of no use there; elsewhere the key goes into a page in this session's private folder (mode 0600) that sends
     the browser on, and the opener gets only that page's name."""
-    if sys.platform.startswith("linux"):
+    if _on_linux():
         return url
     return write_launch_page(session, url).as_uri()
 

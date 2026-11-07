@@ -525,7 +525,7 @@ def test_the_launch_key_goes_to_the_browser_in_a_private_page_where_nothing_chec
     httpd, session = web.make_server(0, session)
     try:
         url = web.launch_url(httpd, session.launch_key)
-        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(web, "_on_linux", lambda: False)  # not sys.platform: other modules read that
         target = web.open_target(session, httpd, url)
         assert target.startswith("file://") and session.launch_key not in target  # nothing secret for `ps` to show
         page = session.dir / web.LAUNCH_PAGE
@@ -534,7 +534,7 @@ def test_the_launch_key_goes_to_the_browser_in_a_private_page_where_nothing_chec
         assert 'http-equiv="refresh"' in text and url in text
         assert session.redeem(session.launch_key)
         assert not page.exists()  # the key is spent, and the page goes with it
-        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(web, "_on_linux", lambda: True)
         assert web.open_target(session, httpd, url) == url  # Linux refuses other users' connections itself
     finally:
         httpd.server_close()
