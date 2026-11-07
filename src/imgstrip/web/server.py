@@ -28,6 +28,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import html
 import io
 import json
 import os
@@ -47,6 +48,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None  # type: ignore[assignment]
 
 from .. import __version__
 from .. import credentials, record, stego
@@ -355,6 +361,10 @@ class Session:
             self._retired.add(hashlib.sha256(self.token.encode()).hexdigest())
             self.token = secrets.token_urlsafe(32)
             token = self.token
+        try:
+            (self.dir / LAUNCH_PAGE).unlink()  # the page that carried the key (non-Linux launches)
+        except OSError:
+            pass
         if self.on_launch:
             self.on_launch(nxt)
         return token
@@ -1120,6 +1130,21 @@ _SYSTEM_FOLDERS = (
     "/var/lib", "/var/spool", "/var/run", "/System", "/Library", "/private/etc", "/Applications",
 )  # fmt: skip
 _STARTUP_NAMES = {"startup", "launchagents", "launchdaemons", "autostart", "appdata"}
+_CREDENTIAL_NAMES = {".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker"}  # refused wherever they are
+
+
+def _home_folders() -> list[str]:
+    """Every home folder the system knows: this user's (as $HOME says, and as the account database says) and the others'."""
+    homes = {os.path.realpath(os.path.expanduser("~"))}
+    try:
+        import pwd
+
+        for entry in pwd.getpwall():
+            if entry.pw_dir and entry.pw_dir not in ("/", "/nonexistent") and os.path.isabs(entry.pw_dir):
+                homes.add(os.path.realpath(entry.pw_dir))
+    except (ImportError, KeyError, OSError):
+        pass  # no account database (Windows)
+    return sorted(homes)
 
 
 def refused_folder(target: str) -> str | None:
@@ -1130,21 +1155,24 @@ def refused_folder(target: str) -> str | None:
     (``~/.ssh``, ``~/.config/autostart``, ``~/Library/LaunchAgents``, a Windows ``Startup`` folder), and it checks
     the real location of a folder that is a link as well as the name it was given.
     """
-    home = os.path.realpath(os.path.expanduser("~"))
+    homes = _home_folders()
     for path in dict.fromkeys((os.path.abspath(target), os.path.realpath(target))):
         norm = os.path.normcase(path)
         for system in _SYSTEM_FOLDERS:
             system = os.path.normcase(system)
             if norm == system or norm.startswith(system + os.sep):
                 return "That is a system folder."
-        try:
-            relative = os.path.relpath(path, home)
-        except ValueError:  # another drive (Windows)
-            relative = path
-        inside = not relative.startswith("..") and not os.path.isabs(relative)
-        parts = Path(relative if inside else path).parts
-        if inside and any(part.startswith(".") and part not in (".", "..") for part in parts):
-            return "That is a hidden folder in your home folder."
+        for home in homes:
+            try:
+                relative = os.path.relpath(path, home)
+            except ValueError:  # another drive (Windows)
+                continue
+            inside = not relative.startswith("..") and not os.path.isabs(relative)
+            if inside and any(part.startswith(".") and part not in (".", "..") for part in Path(relative).parts):
+                return "That is a hidden folder in a home folder."
+        parts = Path(path).parts
+        if any(part.lower() in _CREDENTIAL_NAMES for part in parts):
+            return "That folder holds credentials."
         if any(part.lower() in _STARTUP_NAMES for part in parts):
             return "That is a folder where programs are started from."
         if os.path.dirname(path) == path:
@@ -1168,7 +1196,43 @@ def save_results(session: Session, ids: list[str], folder: str) -> dict:
         target.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise ApiError(400, f"Cannot create {display_path(str(target))}: {exc.strerror or exc}")
-    taken = {p.name.lower() for p in target.iterdir()}
+    folder_fd, base = _pin_folder(target)
+    try:
+        return _save_into(session, ids, target, base)
+    finally:
+        if folder_fd is not None:
+            os.close(folder_fd)
+
+
+def _pin_folder(target: Path) -> tuple[int | None, Path]:
+    """Open the folder once, without following a link, and check where it really is; return the descriptor and a path
+    that keeps leading to that folder, whatever is done to the names above it afterwards.  The check of the name and
+    the writing are otherwise two steps, and a link swapped in between would send the files somewhere else."""
+    if not (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")):
+        return None, target  # Windows: there is no way to hold a folder open by descriptor
+    try:
+        fd = os.open(os.path.realpath(target), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ApiError(400, f"Cannot open {display_path(str(target))}: {exc.strerror or exc}") from None
+    actual = None
+    try:
+        if sys.platform.startswith("linux"):
+            actual = os.readlink(f"/proc/self/fd/{fd}")
+        elif hasattr(fcntl, "F_GETPATH"):
+            actual = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024).split(b"\0", 1)[0].decode(errors="replace")
+    except OSError:
+        actual = None
+    why = refused_folder(actual) if actual else None
+    if why:
+        os.close(fd)
+        raise ApiError(400, f"Cannot save into {display_path(str(target))}. {why}")
+    if sys.platform.startswith("linux") and actual:
+        return fd, Path(f"/proc/self/fd/{fd}")  # names resolved through this stay on the folder that was checked
+    return fd, Path(actual or os.path.realpath(target))
+
+
+def _save_into(session: Session, ids: list[str], target: Path, base: Path) -> dict:
+    taken = {p.name.lower() for p in base.iterdir()}
     files = []
     for rid in ids:
         item = session.get(rid)
@@ -1176,7 +1240,7 @@ def save_results(session: Session, ids: list[str], folder: str) -> dict:
             files.append({"id": rid, "ok": False, "message": "No longer available. Clean it again."})
             continue
         name = unique_name(item.filename, taken)
-        dest = target / name
+        dest = base / name
         try:
             write_new(dest, item.path)  # copied in chunks: a batch ZIP can be gigabytes
         except FileExistsError:
@@ -1185,7 +1249,7 @@ def save_results(session: Session, ids: list[str], folder: str) -> dict:
         except OSError as exc:
             files.append({"id": rid, "ok": False, "message": f"Cannot write {name}: {exc.strerror or exc}"})
             continue
-        files.append({"id": rid, "ok": True, "name": name, "path": display_path(str(dest))})
+        files.append({"id": rid, "ok": True, "name": name, "path": display_path(str(target / name))})
     return {"folder": display_path(str(target)), "files": files}
 
 
@@ -1252,7 +1316,10 @@ class Handler(BaseHTTPRequestHandler):
         return {f"127.0.0.1:{self.port}", f"localhost:{self.port}", f"[::1]:{self.port}"}
 
     def _host_ok(self) -> bool:
-        return (self.headers.get("Host") or "").lower() in self._allowed_hosts()
+        # One Host header, naming this server; and a path-only request target (a browser never sends the absolute form,
+        # and proxies and parsers disagree about which of the two names the host).
+        hosts = self.headers.get_all("Host") or []
+        return len(hosts) == 1 and hosts[0].lower() in self._allowed_hosts() and self.path.startswith("/")
 
     def _origin_ok(self) -> bool:
         origin = self.headers.get("Origin")
@@ -1564,6 +1631,33 @@ def launch_url(httpd: Server, key: str) -> str:
     return f"http://127.0.0.1:{httpd.server_address[1]}/#k={key}"
 
 
+LAUNCH_PAGE = "launch.html"
+
+
+def open_target(session: Session, httpd: Server, url: str) -> str:
+    """What the system's browser opener is given.  The opener's command line can be read by other users of the computer
+    (``ps``), and the key in ``url`` opens the app.  Linux checks which user connects, so a key read from the command
+    line is of no use there; elsewhere the key goes into a page in this session's private folder (mode 0600) that sends
+    the browser on, and the opener gets only that page's name."""
+    if sys.platform.startswith("linux"):
+        return url
+    return write_launch_page(session, url).as_uri()
+
+
+def write_launch_page(session: Session, url: str) -> Path:
+    page = session.dir / LAUNCH_PAGE
+    text = html.escape(url, quote=True)
+    body = (
+        f'<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url={text}">'
+        f'<title>imgstrip</title><p>Opening imgstrip. If nothing happens, <a href="{text}">open it here</a>.</p>'
+    )
+    fd = os.open(page, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    os.chmod(page, 0o600)
+    return page
+
+
 # --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
@@ -1693,7 +1787,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  {url}", flush=True)
     print("The link opens the app once. Press Ctrl+C to stop; cleaned files are deleted then.", flush=True)
     if not args.no_browser:
-        threading.Timer(0.3, webbrowser.open, args=(url,)).start()
+        threading.Timer(0.3, webbrowser.open, args=(open_target(session, httpd, url),)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

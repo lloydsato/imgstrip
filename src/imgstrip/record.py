@@ -29,7 +29,9 @@ import binascii
 import datetime as dt
 import hashlib
 import json
+import os
 import platform
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -47,6 +49,10 @@ UNSIGNED = "unsigned"
 SIGNED = "signed"  # the signature is consistent; the key was not compared with one the reader trusts
 TRUSTED = "trusted"  # the signature is valid and the key is the one the reader trusts
 INVALID = "invalid"
+
+# Controls, bidirectional overrides and zero-width characters: text that reads differently from its bytes.  Zero-width
+# non-joiner and joiner (U+200C, U+200D) stay, because some scripts cannot be written without them.
+_INVISIBLE = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u180e\u200b\u200e\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]")
 
 
 class RecordError(StripError):
@@ -115,12 +121,66 @@ class Signer:
         return self.private_key.sign(message)
 
 
+# A key protected by a passphrase is wrapped with scrypt and ChaCha20-Poly1305.  The usual PKCS#8 file stretches the
+# passphrase with PBKDF2 at 2,048 rounds, which the library offers no way to raise.  Keys made by older versions
+# (encrypted PKCS#8) are still read.
+_WRAP_LABEL = "IMGSTRIP ENCRYPTED PRIVATE KEY"
+_SCRYPT = {"n": 1 << 17, "r": 8, "p": 1}  # 128 MiB, a few tenths of a second
+_SCRYPT_LIMIT = {"n": 1 << 18, "r": 8, "p": 4}  # a key file may not ask for more than this when it is opened
+_SCRYPT_MEMORY = 512 << 20
+
+
+def _wrap_key(private_der: bytes, passphrase: bytes) -> bytes:
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+    salt, nonce = os.urandom(16), os.urandom(12)
+    head = {"format": "imgstrip-key", "version": 1, "kdf": "scrypt", **_SCRYPT, "salt": base64.b64encode(salt).decode("ascii"),
+            "cipher": "chacha20poly1305", "nonce": base64.b64encode(nonce).decode("ascii")}
+    aad = canonical(head)
+    key = hashlib.scrypt(passphrase, salt=salt, dklen=32, maxmem=_SCRYPT_MEMORY, **_SCRYPT)
+    head["ciphertext"] = base64.b64encode(ChaCha20Poly1305(key).encrypt(nonce, private_der, aad)).decode("ascii")
+    body = base64.b64encode(json.dumps(head, sort_keys=True).encode("ascii")).decode("ascii")
+    lines = [body[i : i + 64] for i in range(0, len(body), 64)]
+    return ("\n".join([f"-----BEGIN {_WRAP_LABEL}-----", *lines, f"-----END {_WRAP_LABEL}-----"]) + "\n").encode("ascii")
+
+
+def _unwrap_key(pem: bytes, passphrase: bytes | None) -> bytes:
+    """The private key's DER from a wrapped key file."""
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+    match = re.search(rb"-----BEGIN " + _WRAP_LABEL.encode() + rb"-----(.+?)-----END", pem, re.S)
+    try:
+        head = json.loads(base64.b64decode(b"".join(match.group(1).split()), validate=True))
+        params = {k: head[k] for k in ("n", "r", "p")}
+        if head["format"] != "imgstrip-key" or head["version"] != 1 or head["kdf"] != "scrypt" or head["cipher"] != "chacha20poly1305":
+            raise ValueError
+        if any(not isinstance(v, int) or v < 1 or v > _SCRYPT_LIMIT[k] for k, v in params.items()) or params["n"] & (params["n"] - 1):
+            raise ValueError
+        salt, nonce = base64.b64decode(head["salt"], validate=True), base64.b64decode(head["nonce"], validate=True)
+        sealed = base64.b64decode(head.pop("ciphertext"), validate=True)
+    except (AttributeError, KeyError, TypeError, ValueError, binascii.Error, RecursionError):
+        raise RecordError("that is not a readable imgstrip private key") from None
+    if not passphrase:
+        raise PassphraseRequired("the signing key is protected by a passphrase")
+    key = hashlib.scrypt(passphrase, salt=salt, dklen=32, maxmem=_SCRYPT_MEMORY, **params)
+    try:
+        return ChaCha20Poly1305(key).decrypt(nonce, sealed, canonical(head))
+    except InvalidTag:
+        raise PassphraseRequired("wrong passphrase for the signing key") from None
+
+
 def generate_key(passphrase: bytes | None = None) -> tuple[bytes, bytes, str]:
     """A new signing key: ``(private PEM, public PEM, key id)``.  The private PEM is encrypted when a passphrase is given."""
     serialization, ed25519 = _crypto()
     private = ed25519.Ed25519PrivateKey.generate()
-    encryption = serialization.BestAvailableEncryption(passphrase) if passphrase else serialization.NoEncryption()
-    private_pem = private.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, encryption)
+    if passphrase:
+        der = private.private_bytes(serialization.Encoding.DER, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+        private_pem = _wrap_key(der, passphrase)
+    else:
+        private_pem = private.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+        )
     public = private.public_key()
     public_pem = public.public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
     return private_pem, public_pem, key_id_of(_raw_public(public))
@@ -130,6 +190,15 @@ def load_signer(pem: bytes, passphrase: bytes | None = None) -> Signer:
     serialization, ed25519 = _crypto()
     if b"PRIVATE KEY" not in pem:
         raise RecordError("that file does not hold a private key (expected a PEM file with an Ed25519 private key)")
+    if _WRAP_LABEL.encode() in pem:
+        der = _unwrap_key(pem, passphrase)  # raises RecordError or PassphraseRequired
+        try:
+            key = serialization.load_der_private_key(der, password=None)
+        except Exception:
+            raise RecordError("that is not a readable imgstrip private key") from None
+        if not isinstance(key, ed25519.Ed25519PrivateKey):
+            raise RecordError("the key must be an Ed25519 key; make one with --new-record-key")
+        return Signer(key, _raw_public(key.public_key()))
     try:
         try:
             key = serialization.load_pem_private_key(pem, password=passphrase or None)
@@ -185,9 +254,15 @@ def clean_text(value: str | None, what: str) -> str | None:
         return None
     if len(text) > MAX_FIELD:
         raise RecordError(f"the {what} is longer than {MAX_FIELD} characters")
-    if any(ord(c) < 32 or ord(c) == 127 for c in text):
-        raise RecordError(f"the {what} contains control characters")
+    if _INVISIBLE.search(text):
+        raise RecordError(f"the {what} contains control characters, text-direction marks or zero-width characters")
     return text
+
+
+def display_text(value: Any) -> Any:
+    """Text from a record file as it is shown to a reader: controls, text-direction marks and zero-width characters
+    are replaced by U+FFFD.  A record made elsewhere can hold them, and they must not reach a terminal or a page."""
+    return _INVISIBLE.sub("\ufffd", value) if isinstance(value, str) else value
 
 
 def _plain(value: Any) -> Any:
@@ -251,6 +326,15 @@ def build(
     }
 
 
+# The engine's messages name the ICC profile they removed or converted ("removed ICC profile 'Display P3 of Jane's
+# laptop' ...").  The name is text from the original, so the record says only that a profile was.
+_PROFILE_NAME = re.compile(r"ICC profile '.*?'(?= \(| without| with a| removed|$)", re.S)
+
+
+def _anonymous(line: Any) -> Any:
+    return _PROFILE_NAME.sub("ICC profile", line) if isinstance(line, str) else line
+
+
 def result_facts(payload: dict) -> dict:
     """What a cleaning reported (the CLI payload or the web payload), reduced to what the record keeps."""
     steg = payload.get("steganography") or {}
@@ -260,11 +344,13 @@ def result_facts(payload: dict) -> dict:
         "pixels_exact": payload.get("pixels_exact"),
         "verified_by": payload.get("verified_by") or [],
         "removed": [
-            {"category": f.get("category"), "label": f.get("label"), "detail": f.get("detail")}
+            # Category and label only.  The detail line holds what was found (a location, a camera, a name), and a
+            # record is kept and passed on; whoever holds the original can see the values in it.
+            {"category": f.get("category"), "label": f.get("label")}
             for f in payload.get("removed") or []
         ],
-        "actions": payload.get("actions") or [],
-        "warnings": payload.get("warnings") or [],
+        "actions": [_anonymous(line) for line in payload.get("actions") or []],
+        "warnings": [_anonymous(line) for line in payload.get("warnings") or []],
         "kept": payload.get("kept") or {},
         "steganography": steg.get("state"),
     }
@@ -326,15 +412,50 @@ class Verdict:
             "key_id": self.key_id,
             "problems": list(self.problems),
             "created": body.get("created"),
-            "case": body.get("case"),
-            "operator": body.get("operator"),
-            "input": body.get("input"),
-            "output": body.get("output"),
+            "case": display_text(body.get("case")),
+            "operator": display_text(body.get("operator")),
+            "input": _shown(body.get("input")),
+            "output": _shown(body.get("output")),
         }
+
+
+def _shown(entry: Any) -> Any:
+    return {k: display_text(v) for k, v in entry.items()} if isinstance(entry, dict) else None
 
 
 def _bad(*problems: str) -> Verdict:
     return Verdict(INVALID, list(problems))
+
+
+class _Repeated(ValueError):
+    pass
+
+
+def _no_repeats(pairs: list[tuple[str, Any]]) -> dict:
+    """``json.loads`` keeps the last of a repeated key, while a person or another program may read the first."""
+    out: dict = {}
+    for key, value in pairs:
+        if key in out:
+            raise _Repeated(key)
+        out[key] = value
+    return out
+
+
+_SIGNATURE_KEYS = {"algorithm", "key_id", "public_key", "value"}
+# Ed25519 points of small order: a public key that is one of them verifies a signature chosen without any secret.
+_SMALL_ORDER = {
+    bytes.fromhex(h)
+    for h in (
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "0000000000000000000000000000000000000000000000000000000000000080",
+        "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+        "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+        "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+        "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    )
+}
 
 
 def verify(document: bytes, trusted_public: bytes | None = None) -> Verdict:
@@ -342,16 +463,25 @@ def verify(document: bytes, trusted_public: bytes | None = None) -> Verdict:
     if len(document) > MAX_RECORD_BYTES:
         return _bad("this file is too large to be an imgstrip record")
     try:
-        doc = json.loads(document)
+        doc = json.loads(document, object_pairs_hook=_no_repeats)
         body, signature = doc["record"], doc["signature"]
         if not isinstance(body, dict) or body.get("format") != FORMAT:
             raise ValueError
+    except _Repeated as exc:
+        return _bad(
+            f"the file repeats the key {str(exc)!r}, so different readers would see different values; "
+            "an imgstrip record never does that"
+        )
     except (ValueError, KeyError, TypeError, RecursionError, UnicodeDecodeError):
         return _bad("this is not an imgstrip record")
+    if set(doc) != {"record", "signature"}:
+        return _bad("the file holds fields outside the signed record, which nothing protects")
     if body.get("version") != VERSION:
         return _bad(f"this record is version {body.get('version')!r}; this imgstrip reads version {VERSION}")
     if signature is None:
         return Verdict(UNSIGNED, ["the record is not signed, so nothing shows that it was left unedited"], body)
+    if not isinstance(signature, dict) or set(signature) != _SIGNATURE_KEYS:
+        return _bad("the signature block is malformed")
     try:
         if signature["algorithm"] != "ed25519":
             return _bad(f"unknown signature algorithm {signature['algorithm']!r}")
@@ -360,6 +490,8 @@ def verify(document: bytes, trusted_public: bytes | None = None) -> Verdict:
         claimed = signature["key_id"]
     except (KeyError, TypeError, ValueError, binascii.Error):
         return _bad("the signature block is malformed")
+    if public_raw in _SMALL_ORDER:
+        return Verdict(INVALID, ["the signature block holds a key of no value: anyone can sign for it"], body)
     if len(public_raw) != 32 or claimed != key_id_of(public_raw):
         return Verdict(INVALID, ["the signature block names a key that does not match its own key id"], body)
     try:

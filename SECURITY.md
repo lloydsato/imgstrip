@@ -30,6 +30,10 @@ you ran, and the smallest input that shows the problem. A file that triggers it 
 You will get an answer, a fix or a clear reason why not, and credit in the changelog if you want it. A fix is
 released as a new version and described in [CHANGELOG.md](CHANGELOG.md) once it is out.
 
+## What the checks have found
+
+A security test of 2.0.5 (fuzzing with coverage guidance, HEIF and AVIF decoders, a real browser, the Content Credentials code and a pass through the OWASP Top 10) found no way for hidden data to reach a cleaned file and no way out of the decoder sandbox. It found twelve smaller issues, all fixed in 2.0.6; [CHANGELOG.md](CHANGELOG.md) lists them.
+
 ## Supported versions
 
 Only the latest release gets fixes. imgstrip requires a Pillow version without the known decoder flaws that matter

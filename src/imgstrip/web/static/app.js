@@ -1194,7 +1194,8 @@
   // One CSV cell. A cell a spreadsheet would run as a formula (it starts with = + - @ or a control character) gets a
   // leading apostrophe, and a cell with a comma, quote or line break is quoted.
   function csvCell(value) {
-    let s = String(value === null || value === undefined ? '' : value);
+    // Text-direction marks and zero-width characters make a name read differently from its letters: they are left out.
+    let s = String(value === null || value === undefined ? '' : value).replace(/[\u061c\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g, '');
     if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   }
@@ -2333,7 +2334,9 @@
   function verdictView(res, imageGiven) {
     const [kind, text] = VERDICT_TEXT[res.status] || ['error', 'This record cannot be checked.'];
     const rows = [];
-    if (res.status === 'trusted' || res.status === 'signed') rows.push(checkRow('ok', `The signature is valid${res.short ? ` (key ${res.short})` : ''}.`));
+    // A green tick only for a key the reader trusts: anyone can sign a record with a key of their own.
+    if (res.status === 'trusted') rows.push(checkRow('ok', `The signature is valid${res.short ? ` (key ${res.short})` : ''}.`));
+    if (res.status === 'signed') rows.push(checkRow('', `The signature matches the record${res.short ? ` (key ${res.short})` : ''}.`));
     if (res.status === 'trusted') rows.push(checkRow('ok', 'The signer is the key you trust.'));
     if (res.status === 'signed') rows.push(checkRow('warn', 'The signer is not confirmed: no public key was given.'));
     if (res.status === 'unsigned') rows.push(checkRow('warn', 'There is no signature to check.'));

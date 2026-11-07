@@ -52,6 +52,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import select
 import signal
 import struct
 import subprocess
@@ -463,14 +464,16 @@ def _restrict(roots=(), memory: int = 0) -> dict:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     signal.signal(signal.SIGXFSZ, signal.SIG_IGN)  # a write past the limit fails with EFBIG instead of killing
     resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+    # Hard limits equal the soft ones: a worker that has been taken over cannot lift its own caps.
     _soft, hard = resource.getrlimit(resource.RLIMIT_CPU)
     cpu = _CPU_SECONDS if hard == resource.RLIM_INFINITY else min(_CPU_SECONDS, hard)
-    resource.setrlimit(resource.RLIMIT_CPU, (cpu, hard))
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
     if memory > 0 and sys.platform.startswith("linux"):
         # Private writable memory (the heap and anonymous maps) may not grow past the start by more than the job needs.
         limit = _vm_data() + memory
         _soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
-        resource.setrlimit(resource.RLIMIT_DATA, (limit if hard == resource.RLIM_INFINITY else min(limit, hard), hard))
+        limit = limit if hard == resource.RLIM_INFINITY else min(limit, hard)
+        resource.setrlimit(resource.RLIMIT_DATA, (limit, limit))
     if not sys.platform.startswith("linux"):
         return _tier()
     try:
@@ -681,6 +684,22 @@ def _probe(params: dict) -> dict:
     def optional(key, step):
         return attempt(step) if params.get(key) else "not tried"
 
+    # Other processes' limits, priority and CPUs.  Each step sets what is already there, so nothing changes if it works.
+    def other_limits():
+        resource.prlimit(params["target"], resource.RLIMIT_NOFILE, resource.getrlimit(resource.RLIMIT_NOFILE))
+
+    def other_priority():
+        os.setpriority(os.PRIO_PROCESS, params["target"], os.getpriority(os.PRIO_PROCESS, params["target"]))
+
+    def other_cpus():
+        os.sched_setaffinity(params["target"], os.sched_getaffinity(params["target"]))
+
+    def own_limit():
+        resource.setrlimit(resource.RLIMIT_NOFILE, resource.getrlimit(resource.RLIMIT_NOFILE))
+
+    def own_priority():
+        os.setpriority(os.PRIO_PROCESS, 0, os.getpriority(os.PRIO_PROCESS, 0))
+
     def oom_adj():
         try:
             with open("/proc/self/oom_score_adj", "rb") as fh:
@@ -703,6 +722,11 @@ def _probe(params: dict) -> dict:
         "memfd": attempt(anonymous_file) if hasattr(os, "memfd_create") else "no (not here)",
         "peek": optional("target", peek),
         "environ": optional("target", environ),
+        "other_limits": optional("target", other_limits) if fsize is not None else "not tried",
+        "other_priority": optional("target", other_priority) if hasattr(os, "setpriority") else "not tried",
+        "other_cpus": optional("target", other_cpus) if hasattr(os, "sched_setaffinity") else "not tried",
+        "own_limit": attempt(own_limit) if fsize is not None else "not tried",
+        "own_priority": attempt(own_priority) if hasattr(os, "setpriority") else "not tried",
         "tier": params.get("tier"),
         "fsize": fsize,
         "core": core_,
@@ -958,6 +982,15 @@ def _serve(accept=None) -> None:
         with os.fdopen(read_end, "rb", buffering=0) as pipe:
             view = memoryview(relay)
             while True:
+                # Nothing is sent on stdin while a job runs, so if it becomes readable the main process has ended (EOF)
+                # or broken the protocol: stop the worker now instead of letting it run to its CPU limit.
+                if 0 in select.select([read_end, 0], [], [])[0]:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    os.wait4(pid, 0)
+                    return
                 n = pipe.readinto(relay)
                 if not n:
                     break
@@ -1203,9 +1236,14 @@ def _pixels_of(params: dict) -> int:
     return int(value) if isinstance(value, (int, float)) and value > 0 else core.DEFAULT_MAX_PIXELS
 
 
+_MAX_PIXELS_PER_BYTE = 20_000  # no real file holds more: a solid-colour lossless picture needs about one byte per 8,000
+
+
 def _deadline(max_pixels: int, size: int) -> float:
-    """Wall-clock seconds one job may take: a minute, plus time for the picture and the file (never above ``_TIMEOUT``)."""
-    return min(_TIMEOUT, _BASE_SECONDS + _SECONDS_PER_MP * max_pixels / 1e6 + _SECONDS_PER_MB * size / (1 << 20))
+    """Wall-clock seconds one job may take: a minute, plus time for the picture and the file (never above ``_TIMEOUT``).
+    The picture counts for what the file can hold, not for the limit on pixels, so a small file gets little extra time."""
+    pixels = min(max_pixels, size * _MAX_PIXELS_PER_BYTE)
+    return min(_TIMEOUT, _BASE_SECONDS + _SECONDS_PER_MP * pixels / 1e6 + _SECONDS_PER_MB * size / (1 << 20))
 
 
 def _call(job: str, data: bytes, params: dict, budget: int, timeout: float | None = None):

@@ -1977,17 +1977,27 @@ def _heif_iloc(d: bytes, s: int, e: int, ctx: dict) -> None:
         nonlocal pos
         if nbytes == 0:
             return 0
+        if pos + nbytes > e:  # the counts below come from the file: never read, or loop, past the end of the box
+            raise _Malformed("the item location table runs past the end of its box")
         v = int.from_bytes(d[pos : pos + nbytes], "big")
         pos += nbytes
         return v
 
-    count = read(2 if version < 2 else 4)
+    id_size = 2 if version < 2 else 4
+    count = read(id_size)
+    # Every item takes at least its id, data reference, base offset and extent count; every extent takes its fields.
+    if count * (id_size + (2 if version in (1, 2) else 0) + 2 + base_size + 2) > e - pos:
+        raise _Malformed("the item location table holds more items than fit in its box")
+    per_extent = idx_size + off_size + len_size
     for _ in range(count):
-        item_id = read(2 if version < 2 else 4)
+        _tick()
+        item_id = read(id_size)
         method = read(2) & 15 if version in (1, 2) else 0
         read(2)  # data reference index
         base = read(base_size)
         n_ext = read(2)
+        if n_ext * per_extent > e - pos or (per_extent == 0 and n_ext > 1):
+            raise _Malformed("an item has more extents than fit in the item location table")
         extents = []
         for _ in range(n_ext):
             read(idx_size)
@@ -1999,6 +2009,8 @@ def _heif_item_data(d: bytes, ctx: dict, item_id: int) -> bytes:
     method, extents = ctx["iloc"].get(item_id, (None, []))
     if method != 0:
         return b""
+    if sum(min(n, len(d)) for _o, n in extents) > len(d):  # an item cannot hold more than the file does
+        raise _Malformed("an item's extents add up to more data than the file holds")
     return b"".join(d[o : o + n] for o, n in extents)
 
 

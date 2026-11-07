@@ -10,6 +10,8 @@ installed a worker
   itself, attach to one, or read its memory (``ptrace``, ``process_vm_*``, ``pidfd_*``);
 * cannot open a file for writing, create, remove, rename, truncate or change the mode, owner or attributes of
   anything, and cannot make an anonymous executable file (``memfd_create``);
+* cannot change the limits, priority or CPU placement of any process but itself (``prlimit64``, ``setpriority``,
+  ``sched_set*`` and the like are allowed only for the caller);
 * cannot reach the parts of the kernel that decoders never use and that have a history of local privilege
   escalations: ``io_uring``, ``bpf``, ``perf_event_open``, ``userfaultfd``, keyrings, mounts and namespaces.
 
@@ -54,6 +56,10 @@ FILES = (
     "symlink symlinkat mknod mknodat chmod fchmod fchmodat fchmodat2 chown fchown lchown fchownat setxattr lsetxattr "
     "fsetxattr removexattr lremovexattr fremovexattr utime utimes futimesat utimensat"
 )
+# Calls that act on another process when given its id: they may only name the caller (id 0, or the process itself for
+# ``prlimit64``).  Otherwise a decoder could change the limits, priority or placement of every other process of the user.
+OWN_PID = "sched_setparam sched_setscheduler sched_setaffinity sched_setattr migrate_pages move_pages"  # argument 0
+OWN_WHO = "setpriority ioprio_set"  # argument 1 is the id; argument 0 says what kind
 REFUSED = " ".join((NETWORK, IPC, PROCESSES, KERNEL, FILES)).split()
 NOT_THERE = ("clone3", "openat2")  # ENOSYS: glibc and Python fall back to ``clone`` and ``openat``, which are checked
 
@@ -87,6 +93,8 @@ _NUMBERS = {
         "io_uring_register": 427, "open_tree": 428, "move_mount": 429, "fsopen": 430, "fsconfig": 431,
         "fsmount": 432, "fspick": 433, "pidfd_open": 434, "clone3": 435, "openat2": 437, "pidfd_getfd": 438,
         "process_madvise": 440, "mount_setattr": 442, "quotactl_fd": 443, "memfd_secret": 447, "fchmodat2": 452,
+        "setpriority": 141, "sched_setparam": 142, "sched_setscheduler": 144, "sched_setaffinity": 203,
+        "ioprio_set": 251, "migrate_pages": 256, "move_pages": 279, "prlimit64": 302, "sched_setattr": 314,
     },
     "aarch64": {
         "setxattr": 5, "lsetxattr": 6, "fsetxattr": 7, "removexattr": 14, "lremovexattr": 15, "fremovexattr": 16,
@@ -109,6 +117,8 @@ _NUMBERS = {
         "io_uring_register": 427, "open_tree": 428, "move_mount": 429, "fsopen": 430, "fsconfig": 431,
         "fsmount": 432, "fspick": 433, "pidfd_open": 434, "clone3": 435, "openat2": 437, "pidfd_getfd": 438,
         "process_madvise": 440, "mount_setattr": 442, "quotactl_fd": 443, "memfd_secret": 447, "fchmodat2": 452,
+        "ioprio_set": 30, "sched_setparam": 118, "sched_setscheduler": 119, "sched_setaffinity": 122,
+        "migrate_pages": 238, "move_pages": 239, "setpriority": 140, "prlimit64": 261, "sched_setattr": 274,
     },
 }
 
@@ -180,6 +190,24 @@ def build(arch: str, pid: int) -> bytes:
     out += [
         _ins(_JEQ, 0, 4, nr["tgkill"]),
         _ins(_LD_ABS, 0, 0, _ARGS),
+        _ins(_JEQ, 1, 0, pid),
+        _ins(_RET, 0, 0, 0x00050000 | _EPERM),
+        reload,
+    ]
+    # calls that take a process id: the caller only (``setrlimit`` is ``prlimit64`` with id 0)
+    for names, arg in ((OWN_PID.split(), 0), (OWN_WHO.split(), 1)):
+        for name in names:
+            out += [
+                _ins(_JEQ, 0, 4, nr[name]),
+                _ins(_LD_ABS, 0, 0, _ARGS + 8 * arg),
+                _ins(_JEQ, 1, 0, 0),
+                _ins(_RET, 0, 0, 0x00050000 | _EPERM),
+                reload,
+            ]
+    out += [
+        _ins(_JEQ, 0, 5, nr["prlimit64"]),
+        _ins(_LD_ABS, 0, 0, _ARGS),
+        _ins(_JEQ, 2, 0, 0),
         _ins(_JEQ, 1, 0, pid),
         _ins(_RET, 0, 0, 0x00050000 | _EPERM),
         reload,

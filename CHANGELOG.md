@@ -3,6 +3,55 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
+## [2.0.6]
+
+Fixes for the twelve issues a security test of 2.0.5 found. The test found no way for hidden data to reach a cleaned
+file and no way out of the decoder sandbox; these are integrity, privacy, hardening and availability gaps around them.
+The engine that rebuilds and verifies pictures is untouched, and cleaned files are byte-identical to 2.0.5 in every
+mode.
+
+### Fixed
+
+- **A hostile HEIF or AVIF could hold the inspector for minutes.** The item-location table is now read within its box:
+  a count or an extent that cannot fit is a malformed file, the loop reports to the inspector's time budget, and an
+  item's extents may not add up to more than the file. A 1.7 KB file that kept a core busy for six minutes is refused
+  at once. Both files that showed it are regression tests.
+- **A signed record with a repeated JSON key verified as trusted.** Different readers (and people) take the first or
+  the last value, so a forged operator, case or hash could sit above the signed one. A record that repeats a key at any
+  level is now invalid.
+- **A record accepted fields outside the signed part.** Only `record` and `signature` may be in the file, and only the
+  four signature fields in the signature block; anything else makes it invalid.
+- **Case and operator accepted text that reads differently from its bytes.** Text-direction marks and zero-width
+  characters are refused (the joiners some scripts need stay). Text shown from a record made elsewhere has controls and
+  such characters replaced, so they cannot reach a terminal or the page.
+- **The record kept the values of what it removed**: a location, a camera, the text of a comment. It now keeps the
+  category and label of each item only, and leaves the names of ICC profiles out of the actions and warnings.
+- **A passphrase-protected record key was stretched with 2,048 PBKDF2 rounds**, which the library does not let a caller
+  raise. New protected keys use scrypt (128 MiB) and ChaCha20-Poly1305, with the settings authenticated and capped when
+  a key is opened. Keys made by earlier versions still open.
+- **A confined decoder could change other processes' limits, priority and CPUs.** `prlimit64`, `setpriority`,
+  `ioprio_set` and the `sched_set*` calls (and `migrate_pages`, `move_pages`) now work only on the caller itself.
+- **A worker could lift its own CPU and memory caps.** The hard limits now equal the soft ones.
+- **A decoder outlived the program that started it.** If the program was killed during a job, the zygote and its worker
+  ran on until the CPU limit. The zygote now stops its worker and ends when its parent goes, and the time a job may take
+  is based on what the file can hold, not on the limit on pixels, so a small file no longer gets six minutes.
+- **The save-to-folder guard protected hidden folders only inside `$HOME`.** It now covers every home folder in the
+  account database, and refuses `.ssh`, `.gnupg`, `.aws`, `.azure`, `.kube` and `.docker` wherever they are.
+- **A link swapped in while saving could send a file into a guarded folder.** The folder is opened once without
+  following a link, its real location is checked, and the files are written through that handle.
+- **The launch key was in the browser opener's command line**, where other users can read it. On Linux the app also
+  checks who connects, so a key read that way is of no use; elsewhere the opener now gets a private page (mode 0600,
+  deleted when the key is used) that sends the browser on.
+
+### Changed
+
+- The web app rejects a request with two `Host` headers or an absolute-form request target.
+- The record window shows a green tick only for a signature made with a key you trust; a signed record whose key was
+  not compared says only that the signature matches.
+- The hash list (CSV) leaves out text-direction marks and zero-width characters from file names.
+- A public key of small order, which verifies a signature chosen without any secret, makes a record invalid.
+- `--self-test` also checks that a worker cannot change other processes' limits, priority or CPUs.
+
 ## [2.0.5]
 
 The web app's options are reorganised so they stop crowding the screen. The engine, the sandbox, the checks and the

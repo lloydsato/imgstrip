@@ -103,7 +103,7 @@ def test_result_facts_keeps_what_was_removed_and_the_checks_that_passed():
         "credentials": {"signed": True, "signer": "someone"},
     }
     facts = record.result_facts(payload)
-    assert facts["removed"] == [{"category": "metadata", "label": "EXIF", "detail": "14 bytes"}]
+    assert facts["removed"] == [{"category": "metadata", "label": "EXIF"}]  # what was removed, never its values
     assert facts["verified_by"] == ["structure", "Pillow"] and facts["steganography"] == "not_scanned"
     assert facts["dct"] == "canonical" and facts["content_credentials"] is True
     assert "someone" not in json.dumps(facts)
