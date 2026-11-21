@@ -1,10 +1,11 @@
 """imgstrip - remove every trace of metadata and hidden data from images."""
 
+from . import _floor  # noqa: F401  (first: it refuses a Pillow that is too old)
 from .core import Options, Result, StripError, VerificationError, strip_image
 from .inspect import Finding, Report, inspect_bytes
 
 # The single place the version lives: pyproject.toml reads it from here.
-__version__ = "2.0.6"
+__version__ = "2.0.7"
 
 __all__ = [
     "Finding",

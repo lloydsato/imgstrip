@@ -1534,7 +1534,7 @@ def _check_record_options(args, parser) -> None:
 
 _RECORD_WORDS = {
     "trusted": "ok",
-    "signed": "ok",
+    "signed": "UNCHECKED",
     "unsigned": "UNSIGNED",
     "invalid": "PROBLEM",
 }
@@ -1585,7 +1585,7 @@ def verify_records(args, parser) -> int:
             if e.get("status") == "failed":
                 _say(f"FAILED   {e['file']}: {e['message']}", file=sys.stderr)
                 continue
-            word = _RECORD_WORDS[e["status"]] if e["ok"] or e["status"] in ("unsigned", "invalid") else "PROBLEM"
+            word = _RECORD_WORDS[e["status"]] if e["ok"] or e["status"] in ("signed", "unsigned", "invalid") else "PROBLEM"
             kind = {
                 "trusted": "signed with the key you trust",
                 "signed": "signature intact, key not checked",

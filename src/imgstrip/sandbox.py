@@ -576,15 +576,40 @@ _NEVER = ("/", "/tmp", "/var", "/var/tmp", "/home", "/root", "/etc", "/mnt", "/m
 _READ_ROOTS: list[str] = []
 
 
+def _import_sources() -> set[str]:
+    """The entries of ``sys.path`` that the modules imported so far came from (``numpy`` from the entry that holds
+    the ``numpy`` folder, and so on).  An entry that nothing was imported from, such as the folder a program was
+    started from (``python -m imgstrip`` or a script puts it first on ``sys.path``), is not among them."""
+    entries = {os.path.realpath(p) for p in sys.path if p}
+    found: set[str] = set()
+    for name, module in list(sys.modules.items()):
+        origin = getattr(module, "__file__", None)
+        if name == "__main__" or not isinstance(origin, str) or not os.path.isabs(origin):
+            continue
+        folder = os.path.dirname(origin)
+        for _ in range(name.count(".") + (1 if hasattr(module, "__path__") else 0)):
+            folder = os.path.dirname(folder)  # up to the entry: one level for each part of the dotted name
+        folder = os.path.realpath(folder)
+        if folder in entries:  # a module that is filed under another name gives a folder that is no entry: skipped
+            found.add(folder)
+    return found
+
+
 def _read_roots() -> list[str]:
-    """Paths the zygote lets its workers read, worked out once after everything is imported."""
+    """Paths the zygote lets its workers read, worked out once after everything is imported.
+
+    These are the Python installation, the folders the imported modules came from and the libraries that are mapped.
+    The other entries of ``sys.path`` are left out unless they lie inside the installation: the first one is the folder
+    ``imgstrip`` was started from, and a worker has no business there."""
     import sysconfig
 
-    found: set[str] = set()
-    for p in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix, *sys.path):
-        if p:
-            found.add(p)
+    found: set[str] = {p for p in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix) if p}
     found.update(v for v in sysconfig.get_paths().values() if v)
+    inside = tuple(
+        real.rstrip("/") + "/" for real in (os.path.realpath(p) for p in found) if real not in _NEVER
+    )  # the installation, as prefixes of paths
+    found.update(p for p in sys.path if p and (os.path.realpath(p).rstrip("/") + "/").startswith(inside))
+    found.update(_import_sources())
     try:
         with open("/proc/self/maps", encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -694,6 +719,19 @@ def _probe(params: dict) -> dict:
     def other_cpus():
         os.sched_setaffinity(params["target"], os.sched_getaffinity(params["target"]))
 
+    def group_priority():  # the whole process group, at the value it already has: nothing changes if it works
+        os.setpriority(os.PRIO_PGRP, 0, os.getpriority(os.PRIO_PGRP, 0))
+
+    def async_owner():  # name the main process as the one to be signalled when a pipe is ready (nothing is sent)
+        import fcntl
+
+        r, w = os.pipe()
+        try:
+            fcntl.fcntl(r, fcntl.F_SETOWN, params["target"])
+        finally:
+            os.close(r)
+            os.close(w)
+
     def own_limit():
         resource.setrlimit(resource.RLIMIT_NOFILE, resource.getrlimit(resource.RLIMIT_NOFILE))
 
@@ -725,6 +763,8 @@ def _probe(params: dict) -> dict:
         "other_limits": optional("target", other_limits) if fsize is not None else "not tried",
         "other_priority": optional("target", other_priority) if hasattr(os, "setpriority") else "not tried",
         "other_cpus": optional("target", other_cpus) if hasattr(os, "sched_setaffinity") else "not tried",
+        "group_priority": attempt(group_priority) if hasattr(os, "setpriority") else "not tried",
+        "async_owner": optional("target", async_owner) if fsize is not None else "not tried",
         "own_limit": attempt(own_limit) if fsize is not None else "not tried",
         "own_priority": attempt(own_priority) if hasattr(os, "setpriority") else "not tried",
         "tier": params.get("tier"),
@@ -1584,7 +1624,8 @@ def probe_limits(
     """What a worker may still do, for the tests and the self-test.  It tries to write a file in ``directory``, to
     create one, to change then delete the file ``victim``, to connect to ``port`` on the loopback interface (and send a
     datagram there), to connect to the Unix socket ``unix``, to read the file ``secret``, to read this process's memory
-    and environment, to signal it, to start a process and to make an anonymous file; ``tier`` is what it was given."""
+    and environment, to signal it (also by naming it the owner of a pipe), to change the priority of other processes, to
+    start a process and to make an anonymous file; ``tier`` is what it was given."""
     params = {"dir": directory, "victim": victim, "port": port, "secret": secret, "unix": unix, "target": os.getpid()}
     return _call("_limits", b"", params, 1 << 16)
 

@@ -62,8 +62,9 @@ def test_the_arm64_table_matches_the_kernel_headers():
     if not Path(path).exists():
         pytest.skip("no kernel headers here")
     numbers = header_numbers(path)
-    # the generic header numbers a few calls through __NR3264_*; its other entries are plain
-    numbers.update({"truncate": 45, "ftruncate": 46})
+    # the generic header numbers a few calls (truncate, ftruncate, fcntl) through __NR3264_*; its other entries are plain
+    numbers.update(header_numbers(path, "__NR3264_"))
+    assert {"truncate": 45, "ftruncate": 46, "fcntl": 25}.items() <= numbers.items()
     for name, number in seccomp._NUMBERS["aarch64"].items():
         assert numbers[name] == number, name
 
@@ -248,6 +249,7 @@ def test_the_read_roots_leave_out_the_home_directory_and_everything_above_it(mon
     home = tmp_path / "home" / "me"
     (home / "project" / "venv").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(sys, "prefix", str(home / "project" / "venv"))  # the installation (2.0.7: other entries are left out)
     monkeypatch.setattr(sys, "path", [*sys.path, str(home), str(tmp_path / "home"), "/", str(home / "project" / "venv")])
     roots = sandbox._read_roots()
     assert str(home) not in roots and str(tmp_path / "home") not in roots and "/" not in roots

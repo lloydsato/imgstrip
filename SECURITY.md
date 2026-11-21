@@ -37,7 +37,7 @@ A security test of 2.0.5 (fuzzing with coverage guidance, HEIF and AVIF decoders
 ## Supported versions
 
 Only the latest release gets fixes. imgstrip requires a Pillow version without the known decoder flaws that matter
-to it (see the changelog entry for 2.0.1); if you must run an older one, keep the decoder sandbox on.
+to it (see the changelog entries for 2.0.1 and 2.0.7); since 2.0.7 it refuses to start on an older one.
 
 ## Running it on files you do not trust
 

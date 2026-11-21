@@ -1558,21 +1558,31 @@ class Handler(BaseHTTPRequestHandler):
         self._send_file(item.path, item.size, item.mime, {"Content-Disposition": disposition})
 
 
+NOT_LISTED = -1  # peer_uid: the kernel's table works, and this connection is not in it
+
+
 def peer_uid(client_address, server_port: int) -> int | None:
-    """The user id that owns the other end of a loopback connection, from the kernel's TCP table (Linux), or None when
-    that cannot be found out (another system, an address that is not IPv4 loopback, a connection already gone)."""
+    """The user id that owns the other end of a loopback connection, from the kernel's TCP table (Linux).  ``None``
+    when that cannot be found out (another system, a table that cannot be read or lists no connection at all, an
+    address that is not IPv4 loopback); ``NOT_LISTED`` when the table lists connections but not this one (it is
+    already gone), which is no user's."""
     try:
         host, port = client_address[:2]
         local = "%08X:%04X" % (int.from_bytes(socket.inet_aton(host), "little"), port)
         remote = "%08X:%04X" % (int.from_bytes(socket.inet_aton("127.0.0.1"), "little"), server_port)
+        listed = False
         with open("/proc/net/tcp", encoding="ascii") as fh:
+            next(fh, None)  # the header
             for line in fh:
                 fields = line.split()
-                if len(fields) > 7 and fields[1] == local and fields[2] == remote:
-                    return int(fields[7])
+                if len(fields) > 7:
+                    listed = True
+                    if fields[1] == local and fields[2] == remote:
+                        return int(fields[7])
+        # A connection that is being served is in a working table; if this one is not, it is gone: not a user's to serve.
+        return NOT_LISTED if listed else None
     except (OSError, ValueError, TypeError, IndexError):
-        pass
-    return None
+        return None
 
 
 class Server(ThreadingHTTPServer):
@@ -1584,7 +1594,8 @@ class Server(ThreadingHTTPServer):
     def verify_request(self, request, client_address):
         """Only the user who started the app may talk to it.  Binding to 127.0.0.1 keeps other computers out, but every
         user of this one can connect to the port; the launch key and token keep them from doing anything, and this
-        refuses their connections outright (Linux; elsewhere the kernel offers no cheap way to ask)."""
+        refuses their connections outright (Linux; elsewhere the kernel offers no cheap way to ask).  Where the kernel's
+        table works but does not list the connection, the owner is unknown and the connection is refused too."""
         if self.any_user or not hasattr(os, "getuid"):
             return True
         uid = peer_uid(client_address, self.server_address[1])

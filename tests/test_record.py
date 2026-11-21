@@ -137,7 +137,7 @@ def test_file_names_are_safe_and_carry_the_hash():
 
 def test_a_signed_record_verifies_and_is_trusted_with_the_right_key(keys, signer):
     document = record.seal(make_body(), signer)
-    assert record.verify(document).status == record.SIGNED and record.verify(document).ok
+    assert record.verify(document).status == record.SIGNED and not record.verify(document).ok  # 2.0.7: not a pass
     verdict = record.verify(document, record.load_public(keys[1]))
     assert verdict.status == record.TRUSTED and verdict.ok and verdict.key_id == keys[2]
     assert verdict.body["case"] == "CASE-7"

@@ -358,10 +358,11 @@ def test_verify_accepts_an_intact_record_with_the_right_public_key_and_matching_
     assert code == 0 and "signed with the key you trust" in out and "match the record" in out and "K-1" in out
 
 
-def test_verify_without_a_public_key_says_the_key_was_not_checked(made, capsys):
+def test_verify_without_a_public_key_says_the_key_was_not_checked_and_is_not_a_pass(made, capsys):
     capsys.readouterr()
-    assert run(["--verify-record", made[0]]) == 0
-    assert "key not checked" in capsys.readouterr().out
+    assert run(["--verify-record", made[0]]) == 3  # 2.0.6: "ok", exit 0, whatever key had signed it
+    out = capsys.readouterr().out
+    assert "key not checked" in out and "UNCHECKED" in out and "--record-pubkey" in out
 
 
 def test_verify_catches_an_edited_record(tmp_path, made, key, capsys):

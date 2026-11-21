@@ -46,7 +46,7 @@ MAX_RECORD_BYTES = 4 << 20  # a record is a few KB; anything larger is not one
 INSTALL_HINT = "signing records needs the optional 'cryptography' library: pip install 'imgstrip[record]'"
 
 UNSIGNED = "unsigned"
-SIGNED = "signed"  # the signature is consistent; the key was not compared with one the reader trusts
+SIGNED = "signed"  # the signature is consistent; the key was not compared with one the reader trusts (not a pass)
 TRUSTED = "trusted"  # the signature is valid and the key is the one the reader trusts
 INVALID = "invalid"
 
@@ -402,7 +402,9 @@ class Verdict:
 
     @property
     def ok(self) -> bool:
-        return self.status in (SIGNED, TRUSTED)
+        """True only for a valid signature made with the key the reader trusts: anyone can make a record and sign it with
+        a key of their own, so a signature that was not compared with a trusted key is not a pass."""
+        return self.status == TRUSTED
 
     def as_dict(self) -> dict:
         body = self.body or {}

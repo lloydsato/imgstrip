@@ -11,7 +11,10 @@ installed a worker
 * cannot open a file for writing, create, remove, rename, truncate or change the mode, owner or attributes of
   anything, and cannot make an anonymous executable file (``memfd_create``);
 * cannot change the limits, priority or CPU placement of any process but itself (``prlimit64``, ``setpriority``,
-  ``sched_set*`` and the like are allowed only for the caller);
+  ``sched_set*`` and the like are allowed only for the caller, and ``setpriority`` and ``ioprio_set`` only for a
+  single process, never for a process group or a user);
+* cannot name another process to be signalled when a file becomes ready (``fcntl`` with ``F_SETOWN``, ``F_SETOWN_EX``
+  or ``F_SETSIG``);
 * cannot reach the parts of the kernel that decoders never use and that have a history of local privilege
   escalations: ``io_uring``, ``bpf``, ``perf_event_open``, ``userfaultfd``, keyrings, mounts and namespaces.
 
@@ -59,7 +62,15 @@ FILES = (
 # Calls that act on another process when given its id: they may only name the caller (id 0, or the process itself for
 # ``prlimit64``).  Otherwise a decoder could change the limits, priority or placement of every other process of the user.
 OWN_PID = "sched_setparam sched_setscheduler sched_setaffinity sched_setattr migrate_pages move_pages"  # argument 0
-OWN_WHO = "setpriority ioprio_set"  # argument 1 is the id; argument 0 says what kind
+# ``setpriority`` and ``ioprio_set`` take a kind (argument 0: a process, a process group or a user) and an id (argument 1;
+# 0 means the caller's own).  Only the kind "process" with the caller's id is allowed: id 0 with another kind means the
+# caller's whole group or every process of the user.  The kind that means "one process" is 0 for ``setpriority``
+# (``PRIO_PROCESS``) and 1 for ``ioprio_set`` (``IOPRIO_WHO_PROCESS``).
+OWN_WHO = {"setpriority": 0, "ioprio_set": 1}
+# ``fcntl`` commands that name a process or thread to be signalled when I/O on the descriptor is ready (``SIGIO`` or,
+# with ``F_SETSIG``, any signal).  The kernel sends it with the worker's credentials, so a worker could signal any
+# other process of the user.  Nothing a decoder does needs them.
+F_SETOWN, F_SETSIG, F_SETOWN_EX = 8, 10, 15
 REFUSED = " ".join((NETWORK, IPC, PROCESSES, KERNEL, FILES)).split()
 NOT_THERE = ("clone3", "openat2")  # ENOSYS: glibc and Python fall back to ``clone`` and ``openat``, which are checked
 
@@ -93,7 +104,7 @@ _NUMBERS = {
         "io_uring_register": 427, "open_tree": 428, "move_mount": 429, "fsopen": 430, "fsconfig": 431,
         "fsmount": 432, "fspick": 433, "pidfd_open": 434, "clone3": 435, "openat2": 437, "pidfd_getfd": 438,
         "process_madvise": 440, "mount_setattr": 442, "quotactl_fd": 443, "memfd_secret": 447, "fchmodat2": 452,
-        "setpriority": 141, "sched_setparam": 142, "sched_setscheduler": 144, "sched_setaffinity": 203,
+        "fcntl": 72, "setpriority": 141, "sched_setparam": 142, "sched_setscheduler": 144, "sched_setaffinity": 203,
         "ioprio_set": 251, "migrate_pages": 256, "move_pages": 279, "prlimit64": 302, "sched_setattr": 314,
     },
     "aarch64": {
@@ -118,7 +129,7 @@ _NUMBERS = {
         "fsmount": 432, "fspick": 433, "pidfd_open": 434, "clone3": 435, "openat2": 437, "pidfd_getfd": 438,
         "process_madvise": 440, "mount_setattr": 442, "quotactl_fd": 443, "memfd_secret": 447, "fchmodat2": 452,
         "ioprio_set": 30, "sched_setparam": 118, "sched_setscheduler": 119, "sched_setaffinity": 122,
-        "migrate_pages": 238, "move_pages": 239, "setpriority": 140, "prlimit64": 261, "sched_setattr": 274,
+        "migrate_pages": 238, "move_pages": 239, "fcntl": 25, "setpriority": 140, "prlimit64": 261, "sched_setattr": 274,
     },
 }
 
@@ -195,15 +206,35 @@ def build(arch: str, pid: int) -> bytes:
         reload,
     ]
     # calls that take a process id: the caller only (``setrlimit`` is ``prlimit64`` with id 0)
-    for names, arg in ((OWN_PID.split(), 0), (OWN_WHO.split(), 1)):
-        for name in names:
-            out += [
-                _ins(_JEQ, 0, 4, nr[name]),
-                _ins(_LD_ABS, 0, 0, _ARGS + 8 * arg),
-                _ins(_JEQ, 1, 0, 0),
-                _ins(_RET, 0, 0, 0x00050000 | _EPERM),
-                reload,
-            ]
+    for name in OWN_PID.split():
+        out += [
+            _ins(_JEQ, 0, 4, nr[name]),
+            _ins(_LD_ABS, 0, 0, _ARGS),
+            _ins(_JEQ, 1, 0, 0),
+            _ins(_RET, 0, 0, 0x00050000 | _EPERM),
+            reload,
+        ]
+    # setpriority(2) / ioprio_set(2): one process (kind ``one``), and the caller's own (id 0)
+    for name, one in OWN_WHO.items():
+        out += [
+            _ins(_JEQ, 0, 6, nr[name]),
+            _ins(_LD_ABS, 0, 0, _ARGS),
+            _ins(_JEQ, 0, 2, one),
+            _ins(_LD_ABS, 0, 0, _ARGS + 8),
+            _ins(_JEQ, 1, 0, 0),
+            _ins(_RET, 0, 0, 0x00050000 | _EPERM),
+            reload,
+        ]
+    # fcntl(2): not the commands that name a process to be signalled
+    out += [
+        _ins(_JEQ, 0, 6, nr["fcntl"]),
+        _ins(_LD_ABS, 0, 0, _ARGS + 8),
+        _ins(_JEQ, 2, 0, F_SETOWN),
+        _ins(_JEQ, 1, 0, F_SETSIG),
+        _ins(_JEQ, 0, 1, F_SETOWN_EX),
+        _ins(_RET, 0, 0, 0x00050000 | _EPERM),
+        reload,
+    ]
     out += [
         _ins(_JEQ, 0, 5, nr["prlimit64"]),
         _ins(_LD_ABS, 0, 0, _ARGS),

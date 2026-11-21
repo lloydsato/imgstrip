@@ -323,10 +323,10 @@ def test_other_processes_cannot_be_given_other_limits_priority_or_cpus(filt):  #
         assert filt(name, 0) == ALLOW, name  # the caller
         assert filt(name, PID + 1) == EPERM, name
         assert filt(name, 1) == EPERM, name
-    for name in ("setpriority", "ioprio_set"):  # argument 1 names the process
-        assert filt(name, 0, 0, 5) == ALLOW
-        assert filt(name, 0, PID + 1, 5) == EPERM
-        assert filt(name, 1, 1, 5) == EPERM
+    for name, process in (("setpriority", 0), ("ioprio_set", 1)):  # argument 1 names the process (2.0.7: and 0 the kind)
+        assert filt(name, process, 0, 5) == ALLOW
+        assert filt(name, process, PID + 1, 5) == EPERM
+        assert filt(name, 2, 1, 5) == EPERM
     assert filt("prlimit64", 0, 7) == ALLOW  # setrlimit, on itself
     assert filt("prlimit64", PID, 7) == ALLOW
     assert filt("prlimit64", PID + 1, 7) == EPERM

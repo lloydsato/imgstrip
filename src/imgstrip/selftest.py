@@ -276,7 +276,7 @@ def _sandbox_self_test() -> list[str]:
         if tier.get("full"):
             for what in (
                 "connect", "datagram", "unix", "netlink", "read", "fork", "signal", "memfd", "peek", "environ",
-                "other_limits", "other_priority", "other_cpus",
+                "other_limits", "other_priority", "other_cpus", "group_priority", "async_owner",
             ):  # fmt: skip
                 if not limits[what].startswith("no"):
                     problems.append(f"decoder sandbox: a worker could do this despite its filters: {what}")

@@ -3,6 +3,48 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
+## [2.0.7]
+
+Fixes for the issues a review of the code of 2.0.6 found: six that it reproduced on synthetic inputs and one that it saw
+in the code. The review found no way for hidden data to reach a cleaned file, none out of the decoder sandbox from a
+hostile image and none past the web interface's launch key and token; these are gaps around the sandbox, one missing
+startup check, one availability problem, one misleading verdict and one access check that failed open. The engine that
+rebuilds and verifies pictures is untouched, and cleaned files are byte-identical to 2.0.6 in every mode.
+
+### Fixed
+
+- **A decoder could read the folder imgstrip was started from.** `python -m imgstrip` and a script put that folder on
+  the import path, and the worker could read every file in it. The worker may now read the Python installation, the
+  folders its imported modules came from and the libraries it has mapped, and no other entry of the import path.
+- **A confined decoder could signal other processes of the user through `fcntl`.** `F_SETOWN`, `F_SETOWN_EX` and
+  `F_SETSIG` name a process that is signalled when a file is ready; the system-call filter now refuses them. (On
+  Linux 6.12 and later Landlock's signal scope stopped the signal anyway; the filter does not rely on it.)
+- **A confined decoder could change the priority of its whole process group or of every process of the user.** The
+  filter checked the id given to `setpriority` and `ioprio_set` but not the kind; it now allows only the kind that
+  means one process, and only the caller itself.
+- **The Pillow floor was declared but not checked.** `pyproject.toml` asks for Pillow 13.0.0 or newer, which has the
+  fix for returning uninitialised memory as the pixels of some damaged TIFFs (GHSA-q45j-58j2-45rg), but an older Pillow
+  already in the environment was used without a word. Importing imgstrip on one now fails with a message that says why
+  and how to upgrade.
+- **A crafted TIFF of 512 KiB made the camera-RAW check hold about 2 GiB.** The check ran in the main process and copied
+  the values of all 4,096 tags of a directory, each of which could point at nearly the whole file. It now reads the tag
+  numbers only, and the TIFF reader refuses a directory whose tag values together exceed eight times the file (and
+  1 MiB), which no well-made file does. This also applies with `--no-sandbox`.
+- **`--verify-record` said "ok" and exited 0 for a record signed again with any key.** Anyone can make a record and sign it
+  with a key of their own, so a signature that was not compared with a key you trust is no longer a pass: it is reported
+  as UNCHECKED and exits 3, like an unsigned record. Pin the signer with `--record-pubkey` to get "ok" and exit 0.
+  `Verdict.ok` in the library means the same (a valid signature by the key the reader trusts).
+
+- **The web interface's same-user check let a connection through when it could not tell whose it was.** On Linux the
+  app asks the kernel's table of TCP connections who owns the other end. When the table works but does not list the
+  connection, the owner is unknown and the connection is now refused. Where the table cannot be read or lists nothing
+  (another system, a restricted container) the check is skipped as before, and the launch key and token remain the gate.
+
+### Changed
+
+- `--self-test` and `probe_limits` also try, from inside a worker, to renice the worker's group and to name the main
+  process as the owner of a pipe.
+
 ## [2.0.6]
 
 Fixes for the twelve issues a security test of 2.0.5 found. The test found no way for hidden data to reach a cleaned

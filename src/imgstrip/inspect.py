@@ -1392,6 +1392,10 @@ class _Tiff:
             raise _Malformed("bad TIFF version")
         self.ranges: list[tuple[int, int]] = []
         self.padding = 0  # non-zero bytes in the unused tail of inline tag values
+        # The values of the tags are copied out of the file.  They lie apart in a well-made file, so together they are
+        # about as long as the file; a few thousand tags that all point at most of it would need thousands of times its
+        # size in memory.  Values that share their bytes are rare, hence the factor.
+        self.value_budget = 8 * len(d) + (1 << 20)
 
     def cover(self, start: int, length: int) -> None:
         if start < 0 or length < 0 or start + length > len(self.d):
@@ -1399,16 +1403,26 @@ class _Tiff:
         if length:
             self.ranges.append((start, start + length))
 
-    def read_ifd(self, off: int) -> tuple[list[tuple[int, int, int, int, bytes]], int]:
-        e, d = self.e, self.d
+    def _directory(self, off: int) -> tuple[int, int, int, int]:
+        """The entry count of the directory at ``off`` and the sizes of its count field, entries and next-pointer."""
         if self.big:
-            (count,) = struct.unpack_from(e + "Q", d, off)
+            (count,) = struct.unpack_from(self.e + "Q", self.d, off)
             esize, hsize, nsize = 20, 8, 8
         else:
-            (count,) = struct.unpack_from(e + "H", d, off)
+            (count,) = struct.unpack_from(self.e + "H", self.d, off)
             esize, hsize, nsize = 12, 2, 4
         if count > 4096:
             raise _Malformed("implausible IFD entry count")
+        return count, hsize, esize, nsize
+
+    def tag_numbers(self, off: int) -> set[int]:
+        """The tags of the directory at ``off``, without reading any of their values."""
+        count, hsize, esize, _nsize = self._directory(off)
+        return {struct.unpack_from(self.e + "H", self.d, off + hsize + esize * i)[0] for i in range(count)}
+
+    def read_ifd(self, off: int) -> tuple[list[tuple[int, int, int, int, bytes]], int]:
+        e, d = self.e, self.d
+        count, hsize, esize, nsize = self._directory(off)
         self.cover(off, hsize + esize * count + nsize)
         entries = []
         for i in range(count):
@@ -1423,6 +1437,9 @@ class _Tiff:
             if size > inline:
                 (ptr,) = struct.unpack_from(e + ("Q" if self.big else "I"), d, voff)
                 self.cover(ptr, size)
+                self.value_budget -= size
+                if self.value_budget < 0:
+                    raise _Malformed("tag values overlap far beyond the size of the file")
                 raw = d[ptr : ptr + size]
             else:
                 raw = d[voff : voff + size]

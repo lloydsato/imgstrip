@@ -139,7 +139,7 @@ def test_the_peer_uid_of_a_real_connection_is_ours():
         conn, address = listener.accept()
         try:
             assert web.peer_uid(address, port) == os.getuid()
-            assert web.peer_uid(("127.0.0.1", 1), port) is None  # no such connection
+            assert web.peer_uid(("127.0.0.1", 1), port) == web.NOT_LISTED  # the table works and has no such connection (2.0.7)
             assert web.peer_uid(("::1", 1, 0, 0), port) is None
             assert web.peer_uid("garbage", port) is None
         finally:

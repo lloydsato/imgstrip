@@ -420,9 +420,7 @@ def camera_raw_kind(data: bytes) -> str | None:
 
             t = _Tiff(data)
             (first,) = struct.unpack_from(t.e + "I", data, 4)
-            entries, _ = t.read_ifd(first)
-            tags = {e[0] for e in entries}
-            if 50706 in tags:
+            if 50706 in t.tag_numbers(first):  # only the tag numbers: this runs in the main process, on any file
                 return "DNG"
         except Exception:
             return None
