@@ -18,13 +18,11 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import socket
 import struct
 import subprocess
 import sys
 import textwrap
-import time
 import tracemalloc
 from pathlib import Path
 
@@ -365,8 +363,8 @@ def test_the_package_imports_on_the_pillow_that_is_installed():
     assert _floor.parse(PIL.__version__) >= _floor.PILLOW_FLOOR
 
 
-def test_the_version_is_2_0_7():
-    assert imgstrip.__version__ == "2.0.7"
+def test_the_version_is_at_least_2_0_7():
+    assert tuple(int(n) for n in imgstrip.__version__.split(".")) >= (2, 0, 7)
 
 
 # --------------------------------------------------------------------------

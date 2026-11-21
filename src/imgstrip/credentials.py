@@ -57,6 +57,10 @@ ASSERTION_VERSION = 1
 CLAIM_TITLE = "Sanitized image"
 INGREDIENT_TITLE = "Image as received"
 GENERATOR = "imgstrip"
+ACTIONS = "c2pa.actions.v2"
+# c2pa-python 0.39 writes the automatic "opened" action and the actions imgstrip adds as two assertions of the
+# same kind (the second carries the SDK's duplicate-label suffix); 0.38 wrote one. Both layouts are accepted.
+ACTIONS_SECOND = ACTIONS + "__1"
 
 # Formats the C2PA SDK can write.  BMP has no place for a manifest.  TIFF is excluded on
 # purpose: the SDK appends a second directory and leaves the old one orphaned in the file,
@@ -1293,9 +1297,9 @@ def check_manifest_shape(store: jumbf.Store, fmt: str) -> tuple[jumbf.Manifest, 
         raise CredentialError("The claim's instance id is malformed.")
     labels = set(m.assertions)
     hard = {"c2pa.hash.bmff.v3"} if fmt in ("AVIF", "HEIF") else {"c2pa.hash.data"}
-    required = {LABEL, "c2pa.actions.v2", "c2pa.ingredient.v3"} | hard
-    if labels != required:
-        extra = sorted(labels - required)
+    required = {LABEL, ACTIONS, "c2pa.ingredient.v3"} | hard
+    if labels - {ACTIONS_SECOND} != required:
+        extra = sorted(labels - required - {ACTIONS_SECOND})
         raise CredentialError(
             "The credential holds unexpected assertions: " + ", ".join(extra)
             if extra
@@ -1326,13 +1330,24 @@ def check_manifest_shape(store: jumbf.Store, fmt: str) -> tuple[jumbf.Manifest, 
     return m, sanitization
 
 
+def _action_items(m: jumbf.Manifest) -> list:
+    """The actions in the order they were written, whether the SDK kept them in one assertion or two."""
+    parts = [m.assertions[ACTIONS]]
+    if ACTIONS_SECOND in m.assertions:
+        parts.append(m.assertions[ACTIONS_SECOND])
+    lists = []
+    for part in parts:
+        listed = part.get("actions") if isinstance(part, dict) else None
+        if not (isinstance(part, dict) and set(part) <= {"actions", "allActionsIncluded"} and isinstance(listed, list)):
+            raise CredentialError("The credential's actions are malformed.")
+        lists.append(listed)
+    if len(lists) == 2 and len(lists[0]) != 1:  # split layout: the first assertion holds "opened" and nothing else
+        raise CredentialError("The credential lists unexpected actions.")
+    return [item for listed in lists for item in listed]
+
+
 def _check_actions(m: jumbf.Manifest, evidence: Evidence, config: Config) -> None:
-    actions = m.assertions["c2pa.actions.v2"]
-    items = actions.get("actions") if isinstance(actions, dict) else None
-    if not (
-        isinstance(actions, dict) and set(actions) <= {"actions", "allActionsIncluded"} and isinstance(items, list)
-    ):
-        raise CredentialError("The credential's actions are malformed.")
+    items = _action_items(m)
     want = _actions(evidence, config)
     if len(items) != len(want) + 1:
         raise CredentialError("The credential lists unexpected actions.")

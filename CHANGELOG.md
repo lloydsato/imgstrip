@@ -3,6 +3,31 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
+## [2.0.8]
+
+Fixes the failing CI of 2.0.7. The test jobs install the newest c2pa-python, 0.39, which lays out a credential's actions
+differently from 0.38, the version the code was written and tested against, and every credential was refused. The engine
+that rebuilds and verifies pictures is untouched; only the signing of Content Credentials was affected.
+
+### Fixed
+
+- **Credentials could not be written with c2pa-python 0.39.** 0.38 kept all of a credential's actions in one
+  `c2pa.actions.v2` assertion. 0.39 keeps the automatic "opened" action in that one and the actions imgstrip adds in a
+  second assertion of the same kind, `c2pa.actions.v2__1`. The check that refuses any credential that is not exactly what
+  imgstrip wrote took the second for an unexpected assertion, so every signing failed closed ("The credential holds
+  unexpected assertions: c2pa.actions.v2__1"), and so did `--self-test`. The check now accepts both layouts and nothing
+  else: with two assertions, the first holds the "opened" action alone and the second exactly the actions imgstrip adds;
+  a third assertion of the kind, an extra action or an extra key is refused as before.
+- **The lint job failed on two unused imports** in the tests of 2.0.7.
+
+### Changed
+
+- `c2pa-python` is limited to the versions that were tested, `>=0.38,<0.40` (it was `>=0.38,<1`). A library below 1.0 may
+  change what it writes in any release, and imgstrip checks that item by item; a newer release is added to the range
+  once the tests pass with it.
+- The `minimum-versions` CI job also installs the lowest supported c2pa-python (0.38.0), so both layouts are tested on
+  every push (the other jobs install the newest).
+
 ## [2.0.7]
 
 Fixes for the issues a review of the code of 2.0.6 found: six that it reproduced on synthetic inputs and one that it saw

@@ -270,6 +270,15 @@ def sensor_photo(width: int = 160, height: int = 120) -> np.ndarray:
     return fixtures.photo(width, height)
 
 
+def actions_of(manifest) -> list[dict]:
+    """Every action in a manifest, in order: c2pa-python 0.38 writes one actions assertion, 0.39 two."""
+    out: list[dict] = []
+    for label in ("c2pa.actions.v2", "c2pa.actions.v2__1"):
+        if label in manifest.assertions:
+            out += manifest.assertions[label]["actions"]
+    return out
+
+
 def assert_one_credential_and_nothing_else(data: bytes) -> None:
     from imgstrip.inspect import inspect_bytes, is_c2pa_finding
 

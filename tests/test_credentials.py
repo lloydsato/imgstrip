@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 import inspect as pyinspect
@@ -17,6 +18,7 @@ from PIL import Image
 
 from c2pa_support import (
     Pki,
+    actions_of,
     assert_one_credential_and_nothing_else,
     edit_intent,
     foreign_credential,
@@ -301,7 +303,7 @@ def test_minimal_detail_says_less_than_full(creds, signer):
         _r, ev, signed = run(creds, jpg, Options(), signer.identity, creds.Config(detail=detail))
         s = signed.credential.sanitization
         manifest = store_of(signed.data, "JPEG").manifests[0]
-        actions = [a["action"] for a in manifest.assertions["c2pa.actions.v2"]["actions"]]
+        actions = [a["action"] for a in actions_of(manifest)]
         if detail == "minimal":
             assert "operations" not in s and "psnr_db" not in s
             assert actions == ["c2pa.opened", "c2pa.edited.metadata", "c2pa.transcoded"]
@@ -315,7 +317,7 @@ def test_altered_pixels_always_leave_an_honest_edited_action(creds, signer):
     Image.fromarray(sensor_photo()).save(buf, "PNG")
     _r, _ev, signed = run(creds, buf.getvalue(), Options(scrub_prnu=True), signer.identity)
     m = store_of(signed.data, "PNG").manifests[0]
-    actions = [a["action"] for a in m.assertions["c2pa.actions.v2"]["actions"]]
+    actions = [a["action"] for a in actions_of(m)]
     assert actions[:2] == ["c2pa.opened", "c2pa.edited.metadata"] and "c2pa.edited" in actions
     assert "operations" not in signed.credential.sanitization, "minimal detail does not say how"
 
@@ -422,7 +424,13 @@ def test_no_byte_of_the_original_reaches_the_credential(creds, signer, fx, name)
 def test_the_manifest_holds_only_the_fixed_vocabulary(creds, signer, fx):
     result, _ev, signed = run(creds, fx["jpeg_everything.jpg"], Options(), signer.identity)
     m = store_of(signed.data, "JPEG").manifests[0]
-    assert set(m.assertions) == {"org.imgstrip.sanitization", "c2pa.actions.v2", "c2pa.ingredient.v3", "c2pa.hash.data"}
+    # the SDK may keep the actions in one assertion (c2pa-python 0.38) or two (0.39): same vocabulary either way
+    assert set(m.assertions) - {"c2pa.actions.v2__1"} == {
+        "org.imgstrip.sanitization",
+        "c2pa.actions.v2",
+        "c2pa.ingredient.v3",
+        "c2pa.hash.data",
+    }
     assert m.assertions["c2pa.ingredient.v3"] == {
         "relationship": "parentOf",
         "dc:title": "Image as received",
@@ -439,6 +447,62 @@ def test_the_manifest_holds_only_the_fixed_vocabulary(creds, signer, fx):
         "pixel_integrity",
         "scope",
     }
+
+
+def _with_actions(m, *assertions):
+    """The signed manifest with its actions replaced by the given actions assertions {label: content}."""
+    kept = {k: v for k, v in m.assertions.items() if not k.startswith("c2pa.actions.v2")}
+    return dataclasses.replace(m, assertions={**kept, **dict(assertions)})
+
+
+def _checked(creds, m, ev, fmt="PNG"):
+    creds.check_manifest_shape(jumbf.Store([m]), fmt)
+    creds._check_actions(m, ev, creds.Config())
+
+
+def test_the_actions_may_be_one_assertion_or_two_and_nothing_else(creds, signer):
+    """c2pa-python 0.38 wrote one actions assertion; 0.39 writes "opened" and ours as two. Both are exactly ours."""
+    _r, ev, signed = run(creds, photo_bytes("PNG"), Options(), signer.identity)
+    m = store_of(signed.data, "PNG").manifests[0]
+    assert [a["action"] for a in actions_of(m)][:2] == ["c2pa.opened", "c2pa.edited.metadata"]
+    one = _with_actions(m, ("c2pa.actions.v2", {"actions": actions_of(m)}))
+    split = _with_actions(
+        m, ("c2pa.actions.v2", {"actions": actions_of(m)[:1]}), ("c2pa.actions.v2__1", {"actions": actions_of(m)[1:]})
+    )
+    for layout in (one, split):
+        _checked(creds, layout, ev)
+
+
+def _refused(creds, m, ev, match):
+    with pytest.raises(creds.CredentialError, match=match):
+        _checked(creds, m, ev)
+
+
+def test_every_other_arrangement_of_the_actions_is_refused(creds, signer):
+    _r, ev, signed = run(creds, photo_bytes("PNG"), Options(), signer.identity)
+    m = store_of(signed.data, "PNG").manifests[0]
+    items = actions_of(m)
+    extra = {"action": "c2pa.edited", "description": "Something else"}
+
+    def two(first, second, **more):
+        return _with_actions(m, ("c2pa.actions.v2", {"actions": first}), ("c2pa.actions.v2__1", {"actions": second, **more}))
+
+    # "opened" must be alone in the first assertion, and the second must hold exactly the actions we added
+    _refused(creds, two(items[:2], items[2:]), ev, "unexpected actions")
+    _refused(creds, two(items[:1], items[1:] + [extra]), ev, "unexpected actions")
+    _refused(creds, two(items[:1], items[1:-1]), ev, "unexpected actions")
+    _refused(creds, two(items[:1], [dict(items[1], description="Altered")]), ev, "unexpected actions")
+    _refused(creds, two(items[:1], items[1:], templates=[{"action": "x"}]), ev, "actions are malformed")
+    _refused(creds, two(items[:1], "not a list"), ev, "actions are malformed")
+    # a third assertion of the kind, or the second without the first, is not a layout the SDK writes
+    third = _with_actions(
+        m,
+        ("c2pa.actions.v2", {"actions": items[:1]}),
+        ("c2pa.actions.v2__1", {"actions": items[1:]}),
+        ("c2pa.actions.v2__2", {"actions": [extra]}),
+    )
+    _refused(creds, third, ev, "unexpected assertions: c2pa.actions.v2__2")
+    _refused(creds, _with_actions(m, ("c2pa.actions.v2__1", {"actions": items})), ev, "missing an assertion")
 
 
 def test_there_is_no_thumbnail_anywhere(creds, signed_samples):
