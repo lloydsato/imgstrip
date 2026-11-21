@@ -50,8 +50,9 @@ jobs:
       - run: imgstrip --self-test
 
   minimum-versions:
-    # pyproject.toml promises "numpy>=1.26", "Pillow>=13.0.0" and "pillow-heif>=0.18"; the other jobs install the
-    # newest of each, so this one installs those exact floors on the oldest supported Python and runs everything.
+    # pyproject.toml promises "numpy>=1.26", "Pillow>=13.0.0", "pillow-heif>=0.18" and "c2pa-python>=0.38"; the other
+    # jobs install the newest of each, so this one installs those exact floors on the oldest supported Python and runs
+    # everything.
     # When a floor in pyproject.toml changes, change the pins below with it.
     runs-on: ubuntu-latest
     steps:
@@ -61,6 +62,6 @@ jobs:
           python-version: "3.11"
       - run: sudo apt-get update && sudo apt-get install -y libimage-exiftool-perl imagemagick ffmpeg
       - run: pip install -e '.[test]'
-      - run: pip install "numpy==1.26.4" "Pillow==13.0.0" "pillow-heif==0.18.0"
+      - run: pip install "numpy==1.26.4" "Pillow==13.0.0" "pillow-heif==0.18.0" "c2pa-python==0.38.0"
       - run: python -m pytest -q
       - run: imgstrip --self-test
