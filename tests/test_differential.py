@@ -10,10 +10,13 @@ pixels are known, so the corpus is not only things imgstrip made.
 from __future__ import annotations
 
 import io
+import os
 import random
+import shlex
 import shutil
 import struct
 import subprocess
+import sys
 import zlib
 
 import numpy as np
@@ -277,6 +280,48 @@ def test_interlaced_png_is_declared_unsupported_not_misread():
     data = assemble([(b"IHDR", head), (b"IDAT", zlib.compress(b"\x00\x01\x00\x02")), (b"IEND", b"")])
     with pytest.raises(oracles.Unsupported):
         oracles.reference_png(data)
+
+
+# ImageMagick 7 on a system whose libheif has no HEVC decoder plugin (a package of its own on recent Linux releases,
+# and the one the GitHub runner leaves out) refuses every HEIC file with this message, whatever the file holds.
+NO_HEVC_PLUGIN = (
+    "magick: Error while loading plugin: No decoding plugin installed for this compression format (11.6003) "
+    "`/tmp/imgstrip-oracle-x/in.heic' @ error/heic.c/IsHEIFSuccess/202."
+)
+BAD_FILE = "magick: Invalid input: No 'ftyp' box (1.2000) `/tmp/imgstrip-oracle-x/in.heic' @ error/heic.c/IsHEIFSuccess/202."
+
+
+def test_a_reader_without_the_decoder_gives_no_opinion_but_one_that_rejects_the_file_is_a_problem():
+    def failing(message: str) -> list[str]:
+        return [sys.executable, "-c", f"import sys; sys.stderr.write({message!r}); sys.exit(1)"]
+
+    with pytest.raises(oracles.Unsupported):
+        oracles._run(failing(NO_HEVC_PLUGIN))
+    with pytest.raises(oracles.OracleError):
+        oracles._run(failing(BAD_FILE))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a shell script stands in for ImageMagick")
+@pytest.mark.skipif(not heif_available(), reason="no HEIF writer")
+def test_an_imagemagick_that_cannot_decode_heic_does_not_fail_the_cross_check(fx, tmp_path, monkeypatch):
+    fake = tmp_path / "magick"
+
+    def stand_in(message: str) -> None:
+        fake.write_text(f"#!/bin/sh\necho {shlex.quote(message)} >&2\nexit 1\n")
+        fake.chmod(0o755)
+
+    stand_in(NO_HEVC_PLUGIN)  # before the reader looks for ``magick``, which it does once, when it is made
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    reader = oracles.ImageMagick()
+    assert reader.convert == [str(fake)]
+    monkeypatch.setattr(oracles, "_EXTERNAL", [reader])
+    result = strip_image(fx["png_everything.png"], Options(format="HEIF"))
+    got = oracles.differential(result.data, "HEIF", result.verified_exact)
+    assert got.problems == [] and got.readers == []
+    # the same stand-in refusing the file for any other reason is still a finding
+    stand_in(BAD_FILE)
+    got = oracles.differential(result.data, "HEIF", result.verified_exact)
+    assert got.problems and "ImageMagick cannot read the output" in got.problems[0]
 
 
 # --------------------------------------------------------------------------

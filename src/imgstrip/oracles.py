@@ -360,7 +360,11 @@ def _run(cmd: list[str], timeout: int = 60) -> bytes:
         raise OracleError(f"{cmd[0]} timed out") from None
     if proc.returncode:
         text = proc.stderr.decode("utf-8", "replace")
-        if "Unsupported codec" in text or "Unsupported feature" in text or "no decode delegate" in text:
+        # "No decoding plugin installed": a libheif whose HEVC or AV1 decoder is a package that is not installed.
+        if any(
+            gap in text
+            for gap in ("Unsupported codec", "Unsupported feature", "no decode delegate", "No decoding plugin installed")
+        ):
             raise Unsupported(f"{cmd[0]} lacks a decoder for this file: {text.strip()[:120]}")
         raise OracleError(f"{cmd[0]} could not read the file: {proc.stderr.decode('utf-8', 'replace').strip()[:200]}")
     return proc.stdout

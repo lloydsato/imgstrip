@@ -3,6 +3,20 @@
 All notable changes to imgstrip. Versions follow [semantic versioning](https://semver.org/); each released version is
 tagged `vX.Y.Z` in the repository and archived on Zenodo with its own DOI (see `CITATION.cff`).
 
+## [2.0.9]
+
+Fixes the CI failure that remained after 2.0.8. The runner's ImageMagick (7.1) cannot decode any HEIC file, because its
+libheif has no HEVC decoder plugin installed, and `imgstrip --self-test` and the differential tests took that for a defect
+in the cleaned file. Nothing about how pictures are cleaned or verified changed.
+
+### Fixed
+
+- **An independent reader that has no decoder for a format was counted as rejecting the output.** ImageMagick on a
+  libheif whose HEVC or AV1 decoder is a separate package that is not installed answers every HEIC or AVIF file with "No
+  decoding plugin installed for this compression format". imgstrip now takes that, like the other "no decoder" messages
+  it already knew, to mean that the reader has no opinion on the format; a reader that rejects a file for any other reason
+  is still a problem. On such a system `imgstrip --self-test` exited with 1 and 22 differential tests failed.
+
 ## [2.0.8]
 
 Fixes the failing CI of 2.0.7. The test jobs install the newest c2pa-python, 0.39, which lays out a credential's actions
